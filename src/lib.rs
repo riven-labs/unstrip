@@ -8,6 +8,7 @@ pub mod fingerprint;
 pub mod garble;
 pub mod gobin;
 pub mod goroutines;
+pub mod inline;
 pub mod itabs;
 pub mod moduledata;
 pub mod output;

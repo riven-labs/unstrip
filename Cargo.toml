@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "internal/inlinecov"]
+
 [package]
 name = "unstrip"
 version = "1.0.0"

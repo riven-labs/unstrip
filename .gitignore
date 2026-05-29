@@ -1,4 +1,5 @@
 /target
+**/target/
 **/*.rs.bk
 Cargo.lock.bak
 
@@ -26,3 +27,16 @@ testdata/*.unstripped
 testdata/*.bin
 testdata/*.exe
 testdata/*.macho
+
+# Inline-tree coverage probe working-tree artifacts. The decoder, harness,
+# and REPORT.md are tracked under src/inline/, internal/inlinecov/, and
+# internal/inlinecov/REPORT.md. Everything below regenerates per run.
+/probe/inline-coverage/toolchains/
+/probe/inline-coverage/sources/
+/probe/inline-coverage/corpus/
+/probe/inline-coverage/results/
+/probe/inline-coverage/.gocache/
+/probe/inline-coverage/.gomodcache/
+/probe/inline-coverage/*.sh
+/probe/inline-coverage/*.tsv
+/probe/inline-coverage/DAY1.md

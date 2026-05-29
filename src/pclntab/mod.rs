@@ -38,6 +38,20 @@ pub struct Pclntab<'a> {
     gofunc: Option<u64>,
 }
 
+/// A richer per-function record with the raw `_func` struct offset and the
+/// PC-range size, both of which are needed to decode funcdata structures
+/// such as the inline tree.
+#[derive(Debug, Clone)]
+pub struct FuncEntry {
+    pub address: u64,
+    pub name: String,
+    /// Offset of the function's `_func` struct inside `Pclntab::data()`.
+    pub func_off: usize,
+    /// PC size of the function in bytes (next_text_off - text_off). On the
+    /// final functab entry this is derived from the sentinel.
+    pub size: u64,
+}
+
 /// One frame in a recovered inline call stack at a given PC. The innermost
 /// (leaf) frame comes first; subsequent entries are the inlined call chain
 /// outward to the physical function the compiler actually emitted code for.
@@ -170,6 +184,54 @@ impl<'a> Pclntab<'a> {
 
     pub fn nfunc(&self) -> u64 {
         self.nfunc
+    }
+
+    /// Raw pclntab bytes. Exposed for sibling modules (e.g. `crate::inline`)
+    /// that need to decode structures beyond what the top-level walker
+    /// surfaces (the inline tree array, pcdata streams, etc.).
+    pub fn data(&self) -> &[u8] {
+        self.data
+    }
+
+    /// Endianness flag for any reader that needs to decode integers from
+    /// `data()` directly.
+    pub fn little_endian(&self) -> bool {
+        self.little_endian
+    }
+
+    /// Offset of the functab inside `data()`. Each entry is two u32s:
+    /// `(text_off, func_off)`. The final sentinel entry has `text_off`
+    /// equal to the text size, terminating the array.
+    pub fn funcdata_off(&self) -> usize {
+        self.funcdata_off
+    }
+
+    /// Offset of the funcname string table inside `data()`. Add a per-function
+    /// `nameOff` to this to get the absolute byte offset of the function's
+    /// NUL-terminated name.
+    pub fn funcname_off(&self) -> usize {
+        self.funcname_off
+    }
+
+    /// Offset of the pctab (pc-value tables) inside `data()`. Per-function
+    /// pcdata streams (pcsp, pcfile, pcln, and the pcdata[] array, including
+    /// PCDATA_InlTreeIndex) are encoded as offsets into this region.
+    pub fn pctab_off(&self) -> usize {
+        self.pctab_off
+    }
+
+    /// `gofunc` base from moduledata, if it was supplied via [`with_gofunc`].
+    /// Required for inline-tree decoding because funcdata pointers are stored
+    /// as offsets relative to this address.
+    pub fn gofunc(&self) -> Option<u64> {
+        self.gofunc
+    }
+
+    /// Resolve a function `nameOff` into the recovered string. Returns an
+    /// empty string when the offset lands on a NUL byte (which the corpus
+    /// shows up as for some compiler-generated helpers).
+    pub fn read_name_at(&self, name_off: usize) -> Result<String> {
+        self.read_name(name_off)
     }
 
     /// Resolve a single PC to its containing function. Uses binary search on
@@ -513,6 +575,67 @@ impl<'a> Pclntab<'a> {
             }
         }
 
+        Ok(out)
+    }
+
+    /// Walk the functab and yield a richer per-function record that includes
+    /// the `_func` struct offset and the function's PC size. Callers that need
+    /// to decode funcdata/pcdata structures want this richer view; callers
+    /// that only want names and entry PCs should use [`functions`] instead.
+    pub fn functions_with_offsets(&self) -> Result<Vec<FuncEntry>> {
+        const ENTRY_SIZE: usize = 8;
+        const MAX_FUNCS: u64 = 5_000_000;
+        let available_bytes = self.data.len().saturating_sub(self.funcdata_off);
+        let max_possible = (available_bytes / ENTRY_SIZE).saturating_sub(1) as u64;
+        let n = self.nfunc.min(MAX_FUNCS).min(max_possible) as usize;
+        if (self.nfunc > MAX_FUNCS || self.nfunc > max_possible) && self.nfunc != 0 {
+            return Err(Error::BadPclntab {
+                offset: 0,
+                reason: format!(
+                    "nfunc {} exceeds functab capacity (max {}, cap {})",
+                    self.nfunc, max_possible, MAX_FUNCS,
+                ),
+            });
+        }
+        let table_bytes = n.saturating_add(1).saturating_mul(ENTRY_SIZE);
+        if self.funcdata_off + table_bytes > self.data.len() {
+            return Err(Error::BadPclntab {
+                offset: 0,
+                reason: format!("functab ({n} entries) extends past pclntab end"),
+            });
+        }
+        let mut out = Vec::with_capacity(n);
+        // Read text_offs and their func_offs; use the next text_off as the
+        // end-of-function PC so we can compute size without scanning further.
+        let read_entry = |i: usize| -> Result<(u32, u32)> {
+            let entry = self.funcdata_off + i * ENTRY_SIZE;
+            let t = read_u32(self.data, entry, self.little_endian)?;
+            let f = read_u32(self.data, entry + 4, self.little_endian)?;
+            Ok((t, f))
+        };
+        for i in 0..n {
+            let (text_off, func_off) = match read_entry(i) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let next_text_off = read_entry(i + 1).map(|(t, _)| t).unwrap_or(u32::MAX);
+            let size = next_text_off.saturating_sub(text_off) as u64;
+            let func_start = self.funcdata_off + func_off as usize;
+            if func_start + 8 > self.data.len() {
+                continue;
+            }
+            let name_off = match read_u32(self.data, func_start + 4, self.little_endian) {
+                Ok(v) => v as usize,
+                Err(_) => continue,
+            };
+            let name = self.read_name(name_off).unwrap_or_default();
+            out.push(FuncEntry {
+                address: self.text_start + text_off as u64,
+                name,
+                func_off: func_off as usize,
+                size,
+            });
+        }
         Ok(out)
     }
 
