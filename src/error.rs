@@ -49,4 +49,7 @@ pub enum Error {
 
     #[error("goroutines: {0}")]
     Goroutines(String),
+
+    #[error("xrefs: {0}")]
+    Xrefs(String),
 }

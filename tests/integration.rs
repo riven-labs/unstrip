@@ -517,6 +517,30 @@ fn extract_struct_decl(line: &str) -> Option<String> {
 }
 
 #[test]
+fn xrefs_finds_main_main_callees() {
+    // Every real binary's main.main calls at least a few other functions.
+    // If the CALL scanner returns zero edges from main.main, it's broken.
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let edges = unstrip::xrefs::find_calls(&bin, &pcln).expect("scan");
+    let from_main: Vec<&unstrip::xrefs::CallEdge> = edges
+        .iter()
+        .filter(|e| e.caller_name == "main.main")
+        .collect();
+    assert!(
+        from_main.len() >= 3,
+        "main.main calls more than 3 functions; got {} edges",
+        from_main.len()
+    );
+    let callees = unstrip::xrefs::callees_from(&edges, "main.main", 1);
+    assert!(
+        callees.iter().any(|c| c.contains("cobra")),
+        "main.main in a cobra-using binary should call something in cobra; got {callees:?}"
+    );
+}
+
+#[test]
 fn goroutines_finds_runtime_newproc_sites() {
     // Every real Go binary calls runtime.newproc at least a handful of
     // times for the GC's background workers (runtime.gcBgMarkWorker,

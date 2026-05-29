@@ -130,6 +130,32 @@ struct Args {
     #[arg(long)]
     goroutines: bool,
 
+    /// Build a static call graph by scanning `.text` for direct CALL/BL
+    /// targets resolved against the recovered function set. Direct
+    /// calls only; virtual dispatch through itabs lives in `--itabs`.
+    /// Combine with `--from`, `--to`, `--depth`, or `--callgraph dot`.
+    #[arg(long)]
+    xrefs: bool,
+
+    /// With `--xrefs`, list only callers and callees reachable from
+    /// this function name. Combine with `--depth` to expand transitively.
+    #[arg(long, value_name = "FUNCNAME")]
+    from: Option<String>,
+
+    /// With `--xrefs`, list only functions that call this one. Combine
+    /// with `--depth`.
+    #[arg(long, value_name = "FUNCNAME")]
+    to: Option<String>,
+
+    /// With `--xrefs --from`/`--to`, transitive depth. Default 1.
+    #[arg(long, default_value_t = 1)]
+    depth: usize,
+
+    /// With `--xrefs`, emit Graphviz dot format suitable for
+    /// `dot -Tsvg -o callgraph.svg`. Otherwise text (caller -> callee).
+    #[arg(long)]
+    callgraph: bool,
+
     /// Filter recovered functions (or types, with --types) by substring.
     #[arg(long)]
     filter: Option<String>,
@@ -415,6 +441,60 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     writeln!(out, "  deps:           {}", fp.dep_count)?;
                 }
                 f => return Err(format!("--fingerprint does not support --format {:?}", f).into()),
+            }
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
+    if args.xrefs {
+        let edges = unstrip::xrefs::find_calls(&bin, &pcln)?;
+
+        if args.callgraph {
+            // dot output: ignore --from/--to/--depth and emit the
+            // full graph. For focused subgraphs use --from + --depth
+            // and pipe text output into your own graph tool.
+            out.write_all(unstrip::xrefs::to_dot(&edges).as_bytes())?;
+            out.flush()?;
+            return Ok(());
+        }
+
+        match (&args.from, &args.to) {
+            (Some(from), None) => {
+                let callees = unstrip::xrefs::callees_from(&edges, from, args.depth);
+                if matches!(args.format, OutFormat::Json) {
+                    serde_json::to_writer_pretty(&mut out, &callees)?;
+                    writeln!(out)?;
+                } else {
+                    for c in callees {
+                        writeln!(out, "{} -> {}", from, c)?;
+                    }
+                }
+            }
+            (None, Some(to)) => {
+                let callers = unstrip::xrefs::callers_of(&edges, to, args.depth);
+                if matches!(args.format, OutFormat::Json) {
+                    serde_json::to_writer_pretty(&mut out, &callers)?;
+                    writeln!(out)?;
+                } else {
+                    for c in callers {
+                        writeln!(out, "{} -> {}", c, to)?;
+                    }
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err("--from and --to are mutually exclusive".into());
+            }
+            (None, None) => {
+                let pairs = unstrip::xrefs::forward_graph(&edges);
+                if matches!(args.format, OutFormat::Json) {
+                    serde_json::to_writer_pretty(&mut out, &edges)?;
+                    writeln!(out)?;
+                } else {
+                    for (caller, callee) in pairs {
+                        writeln!(out, "{} -> {}", caller, callee)?;
+                    }
+                }
             }
         }
         out.flush()?;

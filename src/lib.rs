@@ -12,6 +12,7 @@ pub mod plugin;
 pub mod rewrite;
 pub mod stdlib;
 pub mod types;
+pub mod xrefs;
 
 pub use buildinfo::{BuildInfo, Module};
 pub use error::Error;
