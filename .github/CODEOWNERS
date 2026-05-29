@@ -1,0 +1,10 @@
+# Default owner for everything in the repo.
+* @DEMON1A
+
+# Workflows and release plumbing.
+/.github/ @DEMON1A
+
+# Parser core. Changes here need an extra eye.
+/src/pclntab/ @DEMON1A
+/src/moduledata/ @DEMON1A
+/src/types/ @DEMON1A
