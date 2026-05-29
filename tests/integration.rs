@@ -821,6 +821,63 @@ fn goroutines_finds_runtime_newproc_sites() {
 }
 
 #[test]
+fn goroutines_surfaces_unresolved_call_sites() {
+    // Every real Go binary has a tail of call sites the LEA/ADRP back-track
+    // heuristic can't name: indirect funcvals stashed earlier in the
+    // function, codegen the pattern matcher doesn't cover, or funcvals
+    // whose pointer lands outside any section we mapped. The whole point
+    // of the unresolved listing is to surface those for triage; if the
+    // list is empty something has changed (or, more likely, the
+    // resolution-state plumbing regressed and every miss is being tagged
+    // as Resolved).
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let spawns = unstrip::goroutines::find_spawns(&bin, &pcln).expect("scan");
+
+    let unresolved: Vec<&unstrip::goroutines::GoroutineSpawn> =
+        spawns.iter().filter(|s| !s.is_resolved()).collect();
+    assert!(
+        !unresolved.is_empty(),
+        "expected at least one unresolved spawn site on a real Go binary; got {} total, all resolved",
+        spawns.len()
+    );
+
+    // Each unresolved site must carry a non-Resolved reason and must
+    // still have target_addr=None, target_name=None. The pclntab
+    // source:line lookup is independent of funcval resolution and
+    // should still populate when the pcln pc-value table covers the PC.
+    let mut have_source_line = false;
+    for s in &unresolved {
+        assert!(
+            s.target_addr.is_none(),
+            "unresolved site must have no target_addr"
+        );
+        assert!(
+            s.target_name.is_none(),
+            "unresolved site must have no target_name"
+        );
+        assert!(
+            matches!(
+                s.resolution,
+                unstrip::goroutines::Resolution::NoLeaPattern
+                    | unstrip::goroutines::Resolution::FuncvalUnmapped
+            ),
+            "unresolved site must carry a non-Resolved reason"
+        );
+        if s.file.is_some() && s.line.is_some() {
+            have_source_line = true;
+        }
+    }
+    assert!(
+        have_source_line,
+        "pclntab source:line should resolve for at least one unresolved spawn site"
+    );
+}
+
+#[test]
 fn symbols_as_elf_writes_valid_symtab() {
     // Rewrite a real stripped binary with --symbols-as elf and verify the
     // resulting file has a valid Elf64_Sym table containing every function

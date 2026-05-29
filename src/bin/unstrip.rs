@@ -130,6 +130,16 @@ struct Args {
     #[arg(long)]
     goroutines: bool,
 
+    /// With `--goroutines`, restrict output to a subset by resolution
+    /// state. `all` prints every call site (default). `resolved` keeps
+    /// only sites where the funcval entry PC decoded. `unresolved` keeps
+    /// only sites where the LEA/ADRP pattern was missing or the funcval
+    /// pointer landed outside any mapped section. The unresolved set is
+    /// the one worth eyeballing in IDA, since something stopped the
+    /// heuristic from naming the goroutine body.
+    #[arg(long, requires = "goroutines", value_enum, default_value_t = GoroutinesShow::All)]
+    goroutines_show: GoroutinesShow,
+
     /// Compare this binary's recovered functions against another binary
     /// passed as the positional argument. Reports identical / renamed /
     /// added / removed counts. Pair with `--port-symbols ida|ghidra|binja`
@@ -198,6 +208,13 @@ struct Args {
     /// Filter recovered functions (or types, with --types) by substring.
     #[arg(long)]
     filter: Option<String>,
+}
+
+#[derive(Copy, Clone, ValueEnum, PartialEq, Eq, Debug)]
+enum GoroutinesShow {
+    All,
+    Resolved,
+    Unresolved,
 }
 
 #[derive(Copy, Clone, ValueEnum, PartialEq, Eq, Debug)]
@@ -697,25 +714,52 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.goroutines {
         let spawns = unstrip::goroutines::find_spawns(&bin, &pcln)?;
-        let filtered: Vec<&unstrip::goroutines::GoroutineSpawn> = match &args.filter {
-            Some(needle) => spawns
-                .iter()
-                .filter(|s| {
+        let filtered: Vec<&unstrip::goroutines::GoroutineSpawn> = spawns
+            .iter()
+            .filter(|s| match args.goroutines_show {
+                GoroutinesShow::All => true,
+                GoroutinesShow::Resolved => s.is_resolved(),
+                GoroutinesShow::Unresolved => !s.is_resolved(),
+            })
+            .filter(|s| match &args.filter {
+                Some(needle) => {
                     s.spawner.contains(needle)
                         || s.target_name
                             .as_deref()
                             .map(|n| n.contains(needle))
                             .unwrap_or(false)
-                })
-                .collect(),
-            None => spawns.iter().collect(),
-        };
+                }
+                None => true,
+            })
+            .collect();
         match args.format {
             OutFormat::Json => {
                 serde_json::to_writer_pretty(&mut out, &filtered)?;
                 writeln!(out)?;
             }
-            OutFormat::Text => write_goroutines(&mut out, &filtered)?,
+            OutFormat::Text => {
+                write_goroutines(&mut out, &filtered)?;
+                if matches!(args.goroutines_show, GoroutinesShow::All) {
+                    let mut resolved = 0usize;
+                    let mut no_lea = 0usize;
+                    let mut unmapped = 0usize;
+                    for s in &filtered {
+                        match s.resolution {
+                            unstrip::goroutines::Resolution::Resolved => resolved += 1,
+                            unstrip::goroutines::Resolution::NoLeaPattern => no_lea += 1,
+                            unstrip::goroutines::Resolution::FuncvalUnmapped => unmapped += 1,
+                        }
+                    }
+                    let unresolved = no_lea + unmapped;
+                    if resolved + unresolved > 0 {
+                        writeln!(
+                            out,
+                            "{} resolved, {} unresolved ({} no-lea, {} unmapped)",
+                            resolved, unresolved, no_lea, unmapped
+                        )?;
+                    }
+                }
+            }
             f => return Err(format!("--goroutines does not support --format {:?}", f).into()),
         }
         out.flush()?;
@@ -880,7 +924,14 @@ fn write_goroutines<W: Write>(
         let target = match (&s.target_name, s.target_addr) {
             (Some(n), Some(addr)) => format!("{n} (0x{addr:x})"),
             (None, Some(addr)) => format!("(unnamed @ 0x{addr:x})"),
-            (None, None) => "(target unresolved)".into(),
+            (None, None) => {
+                let reason = match s.resolution {
+                    unstrip::goroutines::Resolution::NoLeaPattern => "no-lea-pattern",
+                    unstrip::goroutines::Resolution::FuncvalUnmapped => "funcval-unmapped",
+                    unstrip::goroutines::Resolution::Resolved => "unknown",
+                };
+                format!("(unresolved: {reason})")
+            }
             (Some(n), None) => n.clone(),
         };
         let loc = match (&s.file, s.line) {

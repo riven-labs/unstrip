@@ -48,6 +48,40 @@ pub struct GoroutineSpawn {
     /// table covers it (it usually does).
     pub file: Option<String>,
     pub line: Option<u32>,
+    /// Why resolution succeeded or failed. Lets callers separate "we
+    /// never found the LEA/ADRP load" from "we found it but the funcval
+    /// pointer is outside any mapped section" without re-deriving the
+    /// distinction from the Option fields.
+    pub resolution: Resolution,
+}
+
+/// Outcome of attempting to resolve a goroutine spawn's funcval target.
+/// Serialized as a kebab-case tag so JSON consumers can filter on it
+/// without parsing free-form strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Resolution {
+    /// Funcval pointer decoded and its entry PC read successfully.
+    /// `target_name` may still be `None` if the entry PC doesn't match
+    /// any recovered function (rare but possible).
+    Resolved,
+    /// No LEA (amd64) or ADRP/ADD (arm64) load was found in the window
+    /// preceding the CALL. Either Go used a codegen shape we don't
+    /// recognise or the funcval came from a register set further back.
+    NoLeaPattern,
+    /// The load pattern decoded cleanly but the resulting funcval
+    /// pointer is outside any mapped section, so we couldn't read the
+    /// entry PC. Usually points at a relocation we didn't apply.
+    FuncvalUnmapped,
+}
+
+impl GoroutineSpawn {
+    /// True when the funcval entry PC was decoded successfully. Does
+    /// not require `target_name` to be present; an entry PC outside the
+    /// recovered function set still counts as resolved.
+    pub fn is_resolved(&self) -> bool {
+        matches!(self.resolution, Resolution::Resolved)
+    }
 }
 
 /// The Go runtime functions we care about, in priority order.
@@ -157,7 +191,7 @@ fn scan_amd64(
             let call_next_va = call_site_va + 5;
             let target_va = call_next_va.wrapping_add(rel as i64 as u64);
             if let Some(&spawner_name) = spawners.get(&target_va) {
-                let (target_addr, target_name) =
+                let (target_addr, target_name, resolution) =
                     resolve_amd64_target(bin, text_bytes, text_start_va, i, by_addr);
                 let (file, line) = pcln
                     .lookup(call_site_va)
@@ -170,6 +204,7 @@ fn scan_amd64(
                     target_name,
                     file,
                     line,
+                    resolution,
                 });
             }
         }
@@ -189,7 +224,10 @@ fn resolve_amd64_target(
     text_start_va: u64,
     call_offset: usize,
     by_addr: &std::collections::HashMap<u64, &Function>,
-) -> (Option<u64>, Option<String>) {
+) -> (Option<u64>, Option<String>, Resolution) {
+    // Track whether we saw the LEA pattern at all so we can distinguish
+    // "no pattern" from "pattern present but funcval pointer unmapped".
+    let mut saw_pattern = false;
     for back in [7usize, 9, 11, 13, 16, 19, 22, 25] {
         if call_offset < back {
             continue;
@@ -210,6 +248,7 @@ fn resolve_amd64_target(
         if !matches!(modrm, 0x05 | 0x0d | 0x15 | 0x1d | 0x35 | 0x3d) {
             continue;
         }
+        saw_pattern = true;
         let disp = i32::from_le_bytes(text_bytes[pos + 3..pos + 7].try_into().unwrap());
         let lea_next_va = text_start_va + (pos + 7) as u64;
         let funcval_va = lea_next_va.wrapping_add(disp as i64 as u64);
@@ -218,10 +257,15 @@ fn resolve_amd64_target(
         if let Some(buf) = bin.read_at_addr(funcval_va, 8) {
             let entry_pc = u64::from_le_bytes(buf.try_into().unwrap());
             let name = by_addr.get(&entry_pc).map(|f| f.name.clone());
-            return (Some(entry_pc), name);
+            return (Some(entry_pc), name, Resolution::Resolved);
         }
     }
-    (None, None)
+    let reason = if saw_pattern {
+        Resolution::FuncvalUnmapped
+    } else {
+        Resolution::NoLeaPattern
+    };
+    (None, None, reason)
 }
 
 /// arm64 scan: look for `BL` instructions (top byte 0x94 in little-endian
@@ -252,7 +296,7 @@ fn scan_arm64(
             let call_site_va = text_start_va + i as u64;
             let target_va = call_site_va.wrapping_add((signed << 2) as u64);
             if let Some(&spawner_name) = spawners.get(&target_va) {
-                let (target_addr, target_name) =
+                let (target_addr, target_name, resolution) =
                     resolve_arm64_target(bin, text_bytes, text_start_va, i, by_addr);
                 let (file, line) = pcln
                     .lookup(call_site_va)
@@ -265,6 +309,7 @@ fn scan_arm64(
                     target_name,
                     file,
                     line,
+                    resolution,
                 });
             }
         }
@@ -292,7 +337,8 @@ fn resolve_arm64_target(
     text_start_va: u64,
     call_offset: usize,
     by_addr: &std::collections::HashMap<u64, &Function>,
-) -> (Option<u64>, Option<String>) {
+) -> (Option<u64>, Option<String>, Resolution) {
+    let mut saw_pattern = false;
     // Look backward up to 8 instructions (32 bytes).
     let mut pos = call_offset;
     for _ in 0..8 {
@@ -350,12 +396,18 @@ fn resolve_arm64_target(
         }
         let imm12 = (add >> 10) & 0xfff;
         let funcval_va = page.wrapping_add(imm12 as u64);
+        saw_pattern = true;
 
         if let Some(buf) = bin.read_at_addr(funcval_va, 8) {
             let entry_pc = u64::from_le_bytes(buf.try_into().unwrap());
             let name = by_addr.get(&entry_pc).map(|f| f.name.clone());
-            return (Some(entry_pc), name);
+            return (Some(entry_pc), name, Resolution::Resolved);
         }
     }
-    (None, None)
+    let reason = if saw_pattern {
+        Resolution::FuncvalUnmapped
+    } else {
+        Resolution::NoLeaPattern
+    };
+    (None, None, reason)
 }
