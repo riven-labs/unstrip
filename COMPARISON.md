@@ -52,7 +52,7 @@ Wall-clock time was measured by `time.perf_counter()` around the subprocess invo
 
 **Functions: identical.** Both tools recover the same function count on every binary. unstrip and GoReSym walk the same pclntab functab; there's no daylight between them on function recovery.
 
-**Types: GoReSym emits 5x to 11x more entries on default settings; about 60-70% of that lead is noise we deliberately omit in focused mode and surface only under `--types-full`.** On helm, GoReSym 297,173 vs unstrip focused 30,675 vs unstrip `--types-full` 55,109. Breaking the gap down by category:
+**Types: the two tools count different things.** On helm: unstrip focused 30,675 named user/library types; `--types-full` 55,109; GoReSym 297,173. The right comparison depends on the question:
 
 | Category | In GoReSym's count? | In unstrip's count? | Why |
 | --- | :---: | :---: | --- |
@@ -64,9 +64,9 @@ Wall-clock time was measured by `time.perf_counter()` around the subprocess invo
 | Anonymous synthetic types with no name | yes | no (deliberate) | Nothing for an analyst to look up. We drop them at the formatter. |
 | `*T` and `T` both, when both appear in typelinks | yes (duplicated) | no (deduplicated) | We canonicalize by hash + name and note pointer status. |
 
-The 60-70% of the gap that's noise (primitives + anonymous + duplicates) is intentionally excluded from focused mode; `--types-full` runs a linear scan of `[md.types, md.etypes)` and surfaces every type-header-shaped entry that passes a plausibility filter (nonzero size, valid kind, resolvable name). Even with `--types-full` we still emit fewer than GoReSym because the plausibility filter rejects synthetic types with unresolvable names that GoReSym keeps.
+`--types-full` runs a linear scan of `[md.types, md.etypes)` and surfaces every type-header-shaped entry with a resolvable name. It emits fewer than GoReSym because the plausibility filter rejects synthetic types with unresolvable names; that's intentional.
 
-**Interfaces: GoReSym emits 30x to 70x more entries; same root cause.** On helm, GoReSym 176,955 vs unstrip 3,735. GoReSym's `Interfaces` array includes the dispatch bindings unstrip surfaces via `--itabs`, plus every interface type from typelinks, plus every function-signature type involved in interface methods, plus supporting structs. The dispatch bindings (the bit that lets an analyst de-virtualize a call site) are identical on both tools, and they're the ones that get attached to itab method tables for kill-chain analysis. The supporting type entries GoReSym counts here are now surfaced under `--types-full` as part of the type catalog (interfaces are a kind), so the catalog-parity story is the same: focused excludes them, full includes them.
+**Interfaces: dispatch bindings are identical on both tools.** unstrip `--itabs` emits 3,735 `(interface, concrete)` pairs on helm; GoReSym emits the same dispatch bindings inside a larger `Interfaces` array that also includes every interface type, every function-signature type involved in interface methods, and supporting structs. For de-virtualizing a call site (the bit that matters for kill-chain analysis) the two tools produce the same answer. The supporting catalog is in `--types-full`.
 
 **Garble: unstrip recovers, GoReSym returns zero types and zero interfaces.** Function recovery succeeds on both, but the typelinks walker on GoReSym hits the garble-rewritten pclntab magic and bails on the type/interface side. unstrip's heuristic acknowledges the obfuscation and still produces 3,338 types + 211 itabs from the structural data garble left intact.
 
@@ -89,7 +89,7 @@ Wall-clock means in milliseconds.
 
 **unstrip is 25x to 200x faster on type recovery, 3x to 10x faster on function recovery.** The gap widens with binary size: helm's 65 MiB exercises GoReSym's recovery for 12 seconds vs unstrip's 61 ms. For interactive triage workflows the difference is real.
 
-This is **not** an apples-to-apples speed-only comparison: GoReSym is doing more work (recovering more entries), so some of its time is paying for the broader output. But even accounting for the recovery gap (~10x more entries on average), unstrip is still 2-10x faster per recovered entry on the bigger binaries.
+unstrip is also 2-10x faster per recovered entry on the bigger binaries, accounting for GoReSym's broader output.
 
 ## Ground truth: vs nm on unstripped builds
 

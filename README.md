@@ -184,16 +184,15 @@ Function names sanitize down to valid disassembler labels; the original Go name 
 For a menu-item install instead of running the script every time:
 
 ```
-unstrip --install-plugin ida      # installs to ~/.idapro/plugins/
-unstrip --install-plugin ghidra   # installs to ~/ghidra_scripts/
-unstrip --install-plugin binja    # installs to the Binary Ninja plugins dir
+unstrip --install-plugin ida      # ~/.idapro/plugins/, registers as Edit -> Plugins -> Load Go symbols (unstrip), Ctrl-Shift-G
+unstrip --install-plugin ghidra   # ~/ghidra_scripts/, run from Script Manager
 ```
 
-The IDA plugin registers as `Edit -> Plugins -> Load Go symbols (unstrip)` (hotkey `Ctrl-Shift-G`). The Ghidra installer drops a script under Script Manager. The Binary Ninja installer registers a `Plugins -> Load Go symbols (unstrip)` command. All three shell out to the `unstrip` binary on PATH against the currently-loaded program and apply the emitted script in-process.
+A Binary Ninja installer also exists (`--install-plugin binja`) and works the same way; see the source if you're on Binja.
 
-### Behavioral classification
+### Triage hints
 
-`--info` includes a count of stdlib interface implementations the binary ships. Useful for fast triage: "does this binary speak HTTP, do crypto, write files?"
+`--info` includes a count of stdlib interface implementations the binary ships. Useful for the first-pass question "does this binary speak HTTP, do crypto, write files?"
 
 ```
 stdlib interface implementations:
@@ -203,10 +202,9 @@ stdlib interface implementations:
   *http.Handler      14
   *net.Conn          11
   *crypto.Signer      3
-  ...
 ```
 
-For clustering related binaries, `--fingerprint --behavioral` hashes that count vector into a SHA-256. Two binaries with the same stdlib-interface shape produce the same behavioral hash. Coarser than the regular fingerprint; use as a clustering signal, not a unique ID. Not garble-stable (garble v0.13+ renames stdlib interface types too).
+(`--fingerprint --behavioral` exists for hashing that counter into a SHA-256; coarser than `--fingerprint` and not garble-stable, included for completeness.)
 
 ## How it works
 
