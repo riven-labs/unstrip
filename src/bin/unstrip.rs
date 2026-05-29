@@ -206,7 +206,11 @@ struct Args {
     #[arg(long)]
     callgraph: bool,
 
-    /// Filter recovered functions (or types, with --types) by substring.
+    /// Filter recovered output by substring. With --types, matches type
+    /// name. With --itabs, matches interface name, concrete name, or
+    /// any interface-method name (method-column matching is what the
+    /// signal usually lives in on garble-default binaries). Default
+    /// (functions list) matches function name.
     #[arg(long)]
     filter: Option<String>,
 
@@ -843,8 +847,19 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let md = ModuleData::locate(&bin)?;
         let mut all = itabs::recover_all(&bin, &md)?;
         if let Some(needle) = &args.filter {
+            // Match interface name, concrete name, OR any recovered
+            // interface-method name. On garble-default binaries the
+            // type columns are hashed but the method names survive
+            // (garble can't rewrite a method that satisfies a stdlib
+            // interface without breaking dispatch), so the method
+            // column is the actual signal-bearing surface.
             all.retain(|it| {
-                it.interface_name.contains(needle) || it.concrete_name.contains(needle)
+                it.interface_name.contains(needle)
+                    || it.concrete_name.contains(needle)
+                    || it
+                        .methods
+                        .iter()
+                        .any(|m| m.interface_method.contains(needle))
             });
         }
         match args.format {

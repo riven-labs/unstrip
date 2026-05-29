@@ -198,6 +198,37 @@ fn recovers_itabs_on_depsdemo() {
 }
 
 #[test]
+fn itabs_filter_matches_method_names() {
+    // --itabs --filter applies the predicate (interface_name OR
+    // concrete_name OR any interface_method). This test pins the
+    // method-column behavior because that's the surface garble-
+    // default binaries depend on: type columns are hashed but
+    // methods that satisfy stdlib interfaces survive (garble can't
+    // rewrite a method name that satisfies a stdlib interface
+    // without breaking dispatch).
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    let all = itabs::recover_all(&bin, &md).expect("recover itabs");
+
+    let needle = "Write";
+    let by_method: Vec<_> = all
+        .iter()
+        .filter(|it| {
+            it.methods
+                .iter()
+                .any(|m| m.interface_method.contains(needle))
+        })
+        .collect();
+    assert!(
+        !by_method.is_empty(),
+        "any real Go binary has at least one itab whose method name contains 'Write'"
+    );
+}
+
+#[test]
 fn parses_buildinfo_with_real_deps() {
     let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
         return;
