@@ -1,10 +1,15 @@
 # unstrip
 
-> Recover symbols, types, interfaces, and module info from stripped Go binaries.
+[![Crates.io](https://img.shields.io/crates/v/unstrip.svg)](https://crates.io/crates/unstrip)
+[![CI](https://github.com/riven-labs/unstrip/actions/workflows/ci.yml/badge.svg)](https://github.com/riven-labs/unstrip/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Go versions](https://img.shields.io/badge/go-1.18--1.25-00ADD8.svg)](https://go.dev)
+[![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
 
-`strip` removes Go's symbol table but leaves the runtime metadata the program uses to print stack traces and to drive reflection: `.gopclntab`, the moduledata struct, the typelinks table, the itab table, and the buildinfo blob. `unstrip` reads all of it and gives you back what the linker tried to take away: function names with source files and line numbers, every Go type the program ships with its full struct layout, every `(interface, concrete)` pair the runtime uses to dispatch, and the module dependency tree.
+> Recover function names, types, and interface dispatch tables from stripped Go binaries, with inlined call stacks the leaf-only tools miss.
 
-It works on ELF, Mach-O, and PE; amd64 and arm64; non-PIE and PIE binaries; Go 1.18 through 1.25. It detects when the binary was processed by [garble](https://github.com/burrowers/garble) and tells you so, and still recovers what it can.
+Stripped Go binaries still carry `pclntab`, moduledata, typelinks, and itablinks because the runtime needs them for stack traces and reflection. `unstrip` reads all of it: every function with file and line, every type with full struct layout, every `(interface, concrete)` pair the dispatcher uses, and the module dependency tree. ELF, Mach-O, PE. amd64 and arm64. Go 1.18 through 1.25.
 
 ## Install
 
@@ -13,6 +18,37 @@ cargo install unstrip
 ```
 
 Prebuilt binaries for Linux, macOS, and Windows are on the [releases page](https://github.com/riven-labs/unstrip/releases).
+
+## Quick start
+
+```
+unstrip ./bin                       # function names, files, lines
+unstrip ./bin --info                # container, Go version, garble heuristic
+unstrip ./bin --format ghidra > apply.py    # Python script for Ghidra Script Manager
+```
+
+## Why unstrip
+
+- Inlined call stacks, not just leaf functions: `--addr` returns the full inline tree from funcdata.
+- Real Ghidra, IDA, and Binary Ninja Python exporters with C struct decls and correct field offsets, not just JSON.
+- Single 942 KiB static binary; sub-100ms feature times on a 65 MiB helm binary.
+- Go 1.18 through 1.25, ELF + Mach-O + PE, amd64 + arm64, PIE + non-PIE, one tool.
+
+## Compared to
+
+| Capability                              | unstrip          | GoReSym    | redress  | gore     |
+|-----------------------------------------|------------------|------------|----------|----------|
+| Function names + file + line            | yes              | yes        | yes      | yes      |
+| Go 1.18 through 1.25                    | yes              | yes        | partial  | partial  |
+| Go 1.2 through 1.17                     | no (use GoReSym) | yes        | yes      | yes      |
+| Full struct layout with field offsets   | yes              | partial    | no       | partial  |
+| Interface to concrete itab pairs        | yes              | no         | no       | no       |
+| Inlined call stacks on `--addr`         | yes              | leaf only  | no       | no       |
+| Ghidra / IDA / Binja Python exporters   | yes (built-in)   | IDA only   | no       | no       |
+| Garble detection + partial recovery     | yes              | yes        | no       | no       |
+| Behavioral fingerprint (stdlib ifaces)  | yes              | no         | no       | no       |
+| Single static binary, no runtime deps   | yes (942 KiB)    | yes        | yes      | yes      |
+| Batch PC lookup (`--addr-file`)         | yes              | no         | no       | no       |
 
 ## Use
 
@@ -79,7 +115,7 @@ build settings
 
 ### Types
 
-This is the part that surprises people. From a stripped binary, with no debug info, with no debugging tooling installed:
+From a stripped binary, no debug info, no SDK installed:
 
 ```
 $ unstrip ./samples/myapp --types --filter cobra.Command
@@ -172,54 +208,55 @@ Every Go binary built since 1.2 carries a `pclntab`, a self-describing table tha
 4. **Walk the type graph.** Start from `typelinks` (the linker's list of every type the program references), parse each `_type` header, resolve its name through the names blob relative to `moduledata.types`, decode kind-specific extra data (pointer.elem, slice.elem, struct fields, ...), and follow the references to pull in types `typelinks` itself missed. Same trick for `itablinks`.
 5. **Parse buildinfo.** Locate the `\xff Go buildinf:` marker, decode the inline string format introduced in Go 1.18, strip the 16-byte sentinel framing, parse the tab-separated `path`/`mod`/`dep`/`build` records.
 
-No relocations. No rewriting. Read-only output you pipe into your real tools.
+No relocations. No rewriting. Read-only output. Pipe it into IDA, Ghidra, gdb, or a script.
 
 ## Scope
 
 What works:
 
-- Go 1.18, 1.19, 1.20, 1.21, 1.22, 1.23, 1.24, 1.25
+- Go 1.18 through 1.25
 - ELF, Mach-O, and PE containers
 - amd64 and arm64
 - PIE and non-PIE
 - Garble-obfuscated binaries (detected and flagged; structural data still recovered)
 - Function names, file paths, line numbers
 - Full type recovery (names, kinds, sizes, struct fields with offsets and embedded flags)
-- Interface ↔ concrete-type recovery via itabs
+- Interface to concrete type recovery via itabs
 - Module dependency tree, build settings, VCS info
-- PC-to-symbol reverse lookup
+- PC-to-symbol reverse lookup with inlined call stacks
 - IDA, Ghidra, Binary Ninja, JSON, and human-readable output
+
+Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Go 1.22, with function addresses verified byte-for-byte against `nm` on the unstripped equivalent. Windows PE amd64, Go 1.25, recovery verified by content. Mach-O code paths exercised but no macOS-built fixture yet, please file an issue if it breaks. garble v0.13, heuristic detection works and structural recovery survives.
 
 What's out of scope, and where to look instead:
 
 - **Go < 1.18**: pre-1.18 pclntab layouts are unsupported. Use [GoReSym](https://github.com/mandiant/GoReSym) for those.
-- **Rust and Swift binaries**: planned for v2. There is no good equivalent for either today.
 - **Generic ELF symbol recovery**: not this tool. Use `eu-unstrip` from elfutils.
 - **Decompilation**: not this tool. This gives you names; a decompiler gives you code.
-- **32-bit Go targets**: parser assumes 64-bit pointers. Wire when there's demand.
-
-## Status
-
-v1.0.0.
-
-Tested against:
-
-- **Linux ELF amd64 & arm64, non-PIE & PIE**. Go 1.22, verified function addresses byte-for-byte against `nm` on the unstripped equivalent
-- **Windows PE amd64**. Go 1.25, function recovery + types + itabs verified by content (no `nm` cross-check)
-- **Mach-O**, code path exercised, but no fixture has been built on macOS yet; please file an issue if it breaks
-- **garble v0.13**, heuristic detection works, structural recovery survives
 
 Known gaps in v1.0:
 
 - Type recovery surfaces struct package paths as `_pkg_path` (read-and-discarded). Function-type argument types (in/out parameter type pointers) aren't enumerated, you get the count + variadic flag but not the signature types.
-- Multi-module binaries (Go plugins, shared libs), only `runtime.firstmoduledata` is parsed; the `moduledata.next` chain is not walked. Most real binaries are single-module, so this matters for plugins specifically.
-- Pre-Go-1.18 pclntab layout (Go 1.13-1.17) is unsupported (different magic, different header field positions).
+- Multi-module binaries (Go plugins, shared libs): only `runtime.firstmoduledata` is parsed; the `moduledata.next` chain is not walked. Most real binaries are single-module, so this matters for plugins specifically.
 
-If `unstrip` can't recover symbols from a binary in the supported matrix, that's a bug, open an issue with the binary attached if you can share it, or the Go version and target triple if you can't.
+## Roadmap
+
+- v1.1: Go 1.13 through 1.17 pclntab support (closes the "use GoReSym for old binaries" gap)
+- v1.1: multi-module binary support (walk `moduledata.next` for Go plugins and `-buildmode=plugin`)
+- v1.2: function signature recovery (in/out parameter types beyond count and variadic flag)
+- v1.2: 32-bit Go target support (i386, arm)
+- v2.0: Rust binary symbol recovery (DWARF + Rust-specific name demangling)
+- v2.1: Swift binary symbol recovery
 
 ## Performance
 
-Real-world numbers: on a stripped 65 MiB helm binary (75,630 functions, 29,743 types, 3,735 itabs), every feature runs in under 100 ms, see [`BENCHMARKS.md`](./BENCHMARKS.md) for the full corpus and per-feature timings.
+On a stripped 65 MiB helm binary (75,630 functions, 29,743 types, 3,735 itabs), every feature runs in under 100 ms. See [`BENCHMARKS.md`](./BENCHMARKS.md) for the full corpus and per-feature timings.
+
+## Contributing
+
+PRs welcome. Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening one. Good first issues are tagged [`good first issue`](https://github.com/riven-labs/unstrip/labels/good%20first%20issue). For vulnerability reports see [SECURITY.md](./SECURITY.md).
+
+If `unstrip` can't recover symbols from a binary in the supported matrix, that's a bug. Open an issue with the binary attached if you can share it, or the Go version and target triple if you can't.
 
 ## License
 
