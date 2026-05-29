@@ -190,6 +190,29 @@ unstrip --install-plugin ghidra   # ~/ghidra_scripts/, run from Script Manager
 
 A Binary Ninja installer also exists (`--install-plugin binja`) and works the same way; see the source if you're on Binja.
 
+### Bake symbols into a runnable binary
+
+`--symbols-as elf` writes a new ELF with a populated `.symtab` + `.strtab` built from the recovered functions. The result is a strict superset of the input that still runs, but `nm`, `gdb`, `objdump --syms`, `perf`, `addr2line`, eBPF stack traces, and `delve` all see the names.
+
+```
+$ nm helm
+nm: helm: no symbols
+
+$ unstrip --symbols-as elf -o helm.symbols helm
+wrote 75630 symbols to helm.symbols
+
+$ nm helm.symbols | head -3
+0000000000401000 T fatalf
+00000000004012b0 T _cgo_get_context_function
+00000000004011e0 T _cgo_set_stacklo
+
+$ gdb -q helm.symbols -ex 'info functions main.main' -ex quit
+0x00000000027f50e0  main.main
+0x00000000027f53a0  main.main.func1
+```
+
+Use `--in-place --yes` to overwrite the input file. Today supports ELF64 little-endian only; Mach-O and PE rewrite ships later.
+
 ### Triage hints
 
 `--info` includes a count of stdlib interface implementations the binary ships. Useful for the first-pass question "does this binary speak HTTP, do crypto, write files?"
