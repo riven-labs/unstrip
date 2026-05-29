@@ -933,6 +933,99 @@ fn symbols_as_elf_writes_valid_symtab() {
 }
 
 #[test]
+fn symbols_as_pe_writes_valid_symtab() {
+    // Rewrite a real stripped PE with --symbols-as pe and verify the
+    // appended COFF symbol table parses back correctly and resolves
+    // a known Go symbol via the string table.
+    use std::io::Read;
+    let Some(path) = fixture("hello.windows-amd64.stripped.exe") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let functions = pcln.functions().expect("functions");
+
+    let tmp = std::env::temp_dir().join(format!(
+        "unstrip-symbols-pe-test-{}.exe",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+
+    let n = unstrip::rewrite::write_symbols_as_pe(&bin, &functions, &tmp, Some(&path))
+        .expect("rewrite");
+    assert_eq!(n, functions.len(), "should write one symbol per function");
+
+    let mut new_bytes = Vec::new();
+    std::fs::File::open(&tmp)
+        .expect("reopen")
+        .read_to_end(&mut new_bytes)
+        .expect("read");
+    let parsed = goblin::Object::parse(&new_bytes).expect("re-parse PE");
+    let pe = match parsed {
+        goblin::Object::PE(p) => p,
+        _ => panic!("output is not PE"),
+    };
+    assert_eq!(
+        pe.header.coff_header.number_of_symbol_table as usize,
+        functions.len(),
+        "COFF NumberOfSymbols should match function count"
+    );
+    assert!(
+        pe.header.coff_header.pointer_to_symbol_table != 0,
+        "PointerToSymbolTable should be patched to the appended table"
+    );
+
+    // Walk the appended COFF table directly and confirm a well-known Go
+    // symbol resolves via the string table path.
+    let symtab = goblin::pe::symbol::SymbolTable::parse(
+        &new_bytes,
+        pe.header.coff_header.pointer_to_symbol_table as usize,
+        pe.header.coff_header.number_of_symbol_table as usize,
+    )
+    .expect("parse coff symtab");
+    // Locate the appended string table directly from the file bytes.
+    // We skip goblin's Strtab::parse on purpose because it preparses
+    // every entry as UTF-8 and the trailing bytes after our strtab are
+    // arbitrary file padding that fail that strict walk.
+    let strtab_file_off = pe.header.coff_header.pointer_to_symbol_table as usize
+        + goblin::pe::symbol::SymbolTable::size(
+            pe.header.coff_header.number_of_symbol_table as usize,
+        );
+    let strtab_len = u32::from_le_bytes(
+        new_bytes[strtab_file_off..strtab_file_off + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let strtab_bytes = &new_bytes[strtab_file_off..strtab_file_off + strtab_len];
+
+    let mut found_main = false;
+    for (_, _, sym) in symtab.iter() {
+        let name = if sym.name[0] == 0 {
+            let off = u32::from_le_bytes(sym.name[4..8].try_into().unwrap()) as usize;
+            let end = strtab_bytes[off..]
+                .iter()
+                .position(|&b| b == 0)
+                .map(|p| off + p)
+                .unwrap_or(strtab_bytes.len());
+            std::str::from_utf8(&strtab_bytes[off..end]).ok()
+        } else {
+            let end = sym.name.iter().position(|&b| b == 0).unwrap_or(8);
+            std::str::from_utf8(&sym.name[..end]).ok()
+        };
+        if name == Some("main.main") {
+            found_main = true;
+            break;
+        }
+    }
+    assert!(
+        found_main,
+        "main.main should be present in the appended COFF symbol table"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
 fn rejects_non_go_binary() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let result = GoBinary::open(&path);

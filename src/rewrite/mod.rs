@@ -2,8 +2,8 @@
 //! information into a real `.symtab` + `.strtab` so every other tool
 //! in the chain (nm, objdump, gdb, perf, eBPF, delve) sees the names.
 //!
-//! Today only ELF64 little-endian is implemented. Mach-O and PE are
-//! formatted differently enough that they ship in follow-up versions.
+//! ELF64 little-endian and PE/COFF are implemented today. Mach-O is
+//! formatted differently enough that it ships in a follow-up version.
 //! For ELF the strategy is:
 //!
 //! 1. Append a new `.strtab` section to the end of the file containing
@@ -339,3 +339,214 @@ const _: () = {
     // referenced through the file's structure even when not directly used.
     let _ = SHT_NULL;
 };
+
+// PE/COFF constants used when appending a synthetic symbol table.
+const PE_E_LFANEW_OFFSET: usize = 0x3c;
+const PE_SIGNATURE: [u8; 4] = [b'P', b'E', 0, 0];
+// IMAGE_FILE_HEADER field offsets (relative to the start of the header,
+// which sits at e_lfanew + 4 because the PE signature precedes it).
+const COFF_PTR_TO_SYMTAB: usize = 8;
+const COFF_NUM_SYMBOLS: usize = 12;
+const COFF_SIZE_OF_OPT_HDR: usize = 16;
+const COFF_HEADER_SIZE: usize = 20;
+const COFF_SECTION_HEADER_SIZE: usize = 40;
+// 18-byte IMAGE_SYMBOL record per the PE/COFF spec.
+const COFF_SYMBOL_SIZE: usize = 18;
+// IMAGE_SCN_MEM_EXECUTE.
+const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+// IMAGE_SYM_CLASS_EXTERNAL.
+const IMAGE_SYM_CLASS_EXTERNAL: u8 = 2;
+// Type field for a function: DT_FCN(2) << 4 | T_NULL(0) = 0x20.
+const COFF_SYM_TYPE_FUNCTION: u16 = 0x20;
+
+/// Write a copy of `path` to `out_path` with a synthetic COFF symbol
+/// table plus string table appended to the end of the PE file, and
+/// IMAGE_FILE_HEADER patched to point at them. Returns the number of
+/// symbols written.
+///
+/// `source_path` is the path the input was read from; we use it to
+/// preserve executable bits on the output. On Windows the permissions
+/// passthrough is a no-op.
+pub fn write_symbols_as_pe(
+    bin: &GoBinary,
+    functions: &[Function],
+    out_path: &Path,
+    source_path: Option<&Path>,
+) -> Result<usize> {
+    if bin.container != Container::Pe {
+        return Err(Error::Rewrite(format!(
+            "--symbols-as pe requires a PE input, got {:?}",
+            bin.container
+        )));
+    }
+    if !bin.little_endian {
+        return Err(Error::Rewrite(
+            "--symbols-as pe only supports little-endian PE today".into(),
+        ));
+    }
+    if bin.bytes.len() < PE_E_LFANEW_OFFSET + 4 {
+        return Err(Error::Rewrite("input is smaller than a DOS header".into()));
+    }
+
+    let e_lfanew = u32::from_le_bytes(
+        bin.bytes[PE_E_LFANEW_OFFSET..PE_E_LFANEW_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    if e_lfanew + 4 + COFF_HEADER_SIZE > bin.bytes.len() {
+        return Err(Error::Rewrite("PE header overruns file".into()));
+    }
+    if bin.bytes[e_lfanew..e_lfanew + 4] != PE_SIGNATURE {
+        return Err(Error::Rewrite("missing PE\\0\\0 signature".into()));
+    }
+    let coff_off = e_lfanew + 4;
+
+    // The Go linker leaves a small COFF symbol table in stripped PE
+    // outputs that names section bounds and a few internal globals but
+    // not user functions. We append our own table at end of file and
+    // re-point IMAGE_FILE_HEADER at it; the old table bytes are left
+    // in place as orphaned data so we don't have to relocate anything
+    // earlier in the file.
+
+    let size_of_opt_hdr = u16::from_le_bytes(
+        bin.bytes[coff_off + COFF_SIZE_OF_OPT_HDR..coff_off + COFF_SIZE_OF_OPT_HDR + 2]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let section_table_off = coff_off + COFF_HEADER_SIZE + size_of_opt_hdr;
+
+    // Recover image_base from the optional header so we can compute
+    // RVAs for the Value field. The image base sits at offset 24 of
+    // the optional header for PE32+ (magic 0x20b) and offset 28 for
+    // PE32 (magic 0x10b); we read both formats.
+    let opt_hdr_off = coff_off + COFF_HEADER_SIZE;
+    if opt_hdr_off + 2 > bin.bytes.len() {
+        return Err(Error::Rewrite("optional header truncated".into()));
+    }
+    let opt_magic = u16::from_le_bytes(bin.bytes[opt_hdr_off..opt_hdr_off + 2].try_into().unwrap());
+    let image_base: u64 = match opt_magic {
+        0x20b => {
+            // PE32+: ImageBase is a u64 at offset 24.
+            if opt_hdr_off + 24 + 8 > bin.bytes.len() {
+                return Err(Error::Rewrite("PE32+ optional header truncated".into()));
+            }
+            u64::from_le_bytes(
+                bin.bytes[opt_hdr_off + 24..opt_hdr_off + 32]
+                    .try_into()
+                    .unwrap(),
+            )
+        }
+        0x10b => {
+            // PE32: ImageBase is a u32 at offset 28.
+            if opt_hdr_off + 28 + 4 > bin.bytes.len() {
+                return Err(Error::Rewrite("PE32 optional header truncated".into()));
+            }
+            u32::from_le_bytes(
+                bin.bytes[opt_hdr_off + 28..opt_hdr_off + 32]
+                    .try_into()
+                    .unwrap(),
+            ) as u64
+        }
+        other => {
+            return Err(Error::Rewrite(format!(
+                "unrecognized optional header magic 0x{other:x}"
+            )))
+        }
+    };
+
+    // Scan the section table to find the 1-based index of the first
+    // executable section. Symbols pointing at addresses in that section
+    // get section_number set to this value with Value = RVA.
+    let num_sections =
+        u16::from_le_bytes(bin.bytes[coff_off + 2..coff_off + 4].try_into().unwrap()) as usize;
+    if section_table_off + num_sections * COFF_SECTION_HEADER_SIZE > bin.bytes.len() {
+        return Err(Error::Rewrite("section table overruns file".into()));
+    }
+    let mut text_section_index: u16 = 1;
+    for i in 0..num_sections {
+        let off = section_table_off + i * COFF_SECTION_HEADER_SIZE;
+        let characteristics = u32::from_le_bytes(bin.bytes[off + 36..off + 40].try_into().unwrap());
+        if characteristics & IMAGE_SCN_MEM_EXECUTE != 0 {
+            text_section_index = (i + 1) as u16;
+            break;
+        }
+    }
+
+    // Build the symbol records and the appended string table. Names up
+    // to 8 bytes including a trailing null go inline; longer names land
+    // in the string table and are referenced by {0u32, offset u32}.
+    let mut symbols: Vec<u8> = Vec::with_capacity(functions.len() * COFF_SYMBOL_SIZE);
+    // The string table starts with its own 4-byte size field; offsets
+    // into it are counted from the start of the size field, so the
+    // first usable offset is 4.
+    let mut strtab: Vec<u8> = Vec::with_capacity(functions.len() * 24);
+    strtab.extend_from_slice(&[0u8; 4]);
+
+    for f in functions {
+        let mut rec = [0u8; COFF_SYMBOL_SIZE];
+        let name_bytes = f.name.as_bytes();
+        if name_bytes.len() <= 8 {
+            // Inline; remaining bytes stay zero so the name is null-padded.
+            rec[..name_bytes.len()].copy_from_slice(name_bytes);
+        } else {
+            let off = strtab.len() as u32;
+            // First 4 bytes are zero, next 4 bytes are the strtab offset.
+            rec[0..4].copy_from_slice(&0u32.to_le_bytes());
+            rec[4..8].copy_from_slice(&off.to_le_bytes());
+            strtab.extend_from_slice(name_bytes);
+            strtab.push(0);
+        }
+        // Value = RVA = address - image_base. Saturate to zero on
+        // underflow rather than failing the whole rewrite; a malformed
+        // function record shouldn't drop every other symbol.
+        let rva = f.address.saturating_sub(image_base) as u32;
+        rec[8..12].copy_from_slice(&rva.to_le_bytes());
+        rec[12..14].copy_from_slice(&text_section_index.to_le_bytes());
+        rec[14..16].copy_from_slice(&COFF_SYM_TYPE_FUNCTION.to_le_bytes());
+        rec[16] = IMAGE_SYM_CLASS_EXTERNAL;
+        rec[17] = 0; // NumberOfAuxSymbols
+        symbols.extend_from_slice(&rec);
+    }
+
+    // Patch the strtab size header now that we know the final length.
+    let strtab_size = strtab.len() as u32;
+    strtab[0..4].copy_from_slice(&strtab_size.to_le_bytes());
+
+    // Compose the output: original bytes, then symbol records, then
+    // the string table. The symbol table file offset must be 4-byte
+    // aligned per the PE/COFF spec.
+    let mut out = Vec::with_capacity(bin.bytes.len() + symbols.len() + strtab.len() + 16);
+    out.extend_from_slice(&bin.bytes);
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    let symtab_file_offset = out.len() as u32;
+    out.extend_from_slice(&symbols);
+    out.extend_from_slice(&strtab);
+
+    // Patch IMAGE_FILE_HEADER.PointerToSymbolTable and NumberOfSymbols.
+    out[coff_off + COFF_PTR_TO_SYMTAB..coff_off + COFF_PTR_TO_SYMTAB + 4]
+        .copy_from_slice(&symtab_file_offset.to_le_bytes());
+    let num_symbols = functions.len() as u32;
+    out[coff_off + COFF_NUM_SYMBOLS..coff_off + COFF_NUM_SYMBOLS + 4]
+        .copy_from_slice(&num_symbols.to_le_bytes());
+
+    fs::write(out_path, &out).map_err(Error::Io)?;
+
+    // Match the input's executable bits on unix so the rewritten file
+    // can still be launched under wine / mono. No-op on Windows.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = source_path
+            .and_then(|p| fs::metadata(p).ok())
+            .map(|m| m.permissions().mode())
+            .unwrap_or(0o755);
+        let _ = fs::set_permissions(out_path, fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = source_path;
+    }
+    Ok(functions.len())
+}

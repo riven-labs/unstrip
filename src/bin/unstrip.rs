@@ -98,13 +98,14 @@ struct Args {
     #[arg(long, value_name = "ida|ghidra|binja")]
     install_plugin: Option<String>,
 
-    /// Write a new binary containing a populated .symtab/.strtab built
-    /// from the recovered functions. The resulting file is byte-identical
-    /// to the input plus a few appended sections, so it still runs, but
-    /// `nm`, `gdb`, `objdump --syms`, `perf`, eBPF stack traces, and
-    /// `delve` all see the symbols. Today supports ELF64 little-endian
-    /// only.
-    #[arg(long, value_name = "elf")]
+    /// Write a new binary containing a populated symbol table built from
+    /// the recovered functions. For ELF the result has a synthetic
+    /// `.symtab` + `.strtab` so `nm`, `gdb`, `objdump --syms`, `perf`,
+    /// eBPF stack traces, and `delve` see the symbols. For PE the result
+    /// has a populated COFF symbol table referenced from the
+    /// IMAGE_FILE_HEADER so `dumpbin /symbols` and WinDbg pick it up.
+    /// Pass `elf` for ELF inputs and `pe` for PE inputs.
+    #[arg(long, value_name = "elf|pe")]
     symbols_as: Option<String>,
 
     /// With `--symbols-as`, write the result to this path. Defaults to
@@ -292,8 +293,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = BufWriter::new(stdout.lock());
 
     if let Some(target) = &args.symbols_as {
-        if target != "elf" {
-            return Err(format!("--symbols-as supports `elf` only today, got {target:?}").into());
+        if target != "elf" && target != "pe" {
+            return Err(format!("--symbols-as supports `elf` or `pe`, got {target:?}").into());
         }
         let functions = pcln.functions()?;
         let out_path = match (&args.output, args.in_place) {
@@ -313,8 +314,25 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 p
             }
         };
-        let n =
-            unstrip::rewrite::write_symbols_as_elf(&bin, &functions, &out_path, Some(binary_path))?;
+        let n = match (target.as_str(), bin.container) {
+            ("elf", unstrip::gobin::Container::Elf) => unstrip::rewrite::write_symbols_as_elf(
+                &bin,
+                &functions,
+                &out_path,
+                Some(binary_path),
+            )?,
+            ("pe", unstrip::gobin::Container::Pe) => unstrip::rewrite::write_symbols_as_pe(
+                &bin,
+                &functions,
+                &out_path,
+                Some(binary_path),
+            )?,
+            (t, c) => {
+                return Err(
+                    format!("--symbols-as {t} requires a matching container, got {c:?}").into(),
+                )
+            }
+        };
         writeln!(out, "wrote {} symbols to {}", n, out_path.display())?;
         out.flush()?;
         return Ok(());
