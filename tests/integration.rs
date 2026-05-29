@@ -43,55 +43,80 @@ fn assert_recovers_hello(path: PathBuf) {
 
 #[test]
 fn recovers_symbols_from_linux_amd64() {
-    let Some(path) = fixture("hello.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
     assert_recovers_hello(path);
 }
 
 #[test]
 fn recovers_symbols_from_linux_arm64() {
-    let Some(path) = fixture("hello.linux-arm64.stripped") else { return };
+    let Some(path) = fixture("hello.linux-arm64.stripped") else {
+        return;
+    };
     assert_recovers_hello(path);
 }
 
 #[test]
 fn recovers_symbols_from_darwin_amd64() {
-    let Some(path) = fixture("hello.darwin-amd64.stripped") else { return };
+    let Some(path) = fixture("hello.darwin-amd64.stripped") else {
+        return;
+    };
     assert_recovers_hello(path);
 }
 
 #[test]
 fn recovers_symbols_from_darwin_arm64() {
-    let Some(path) = fixture("hello.darwin-arm64.stripped") else { return };
+    let Some(path) = fixture("hello.darwin-arm64.stripped") else {
+        return;
+    };
     assert_recovers_hello(path);
 }
 
 #[test]
 fn recovers_symbols_from_windows_amd64() {
-    let Some(path) = fixture("hello.windows-amd64.stripped.exe") else { return };
+    let Some(path) = fixture("hello.windows-amd64.stripped.exe") else {
+        return;
+    };
     assert_recovers_hello(path);
 }
 
 #[test]
 fn recovers_symbols_from_linux_pie() {
-    let Some(path) = fixture("hello.linux-amd64.pie.stripped") else { return };
+    let Some(path) = fixture("hello.linux-amd64.pie.stripped") else {
+        return;
+    };
     assert_recovers_hello(path);
 }
 
 #[test]
 fn locates_moduledata_on_linux_amd64() {
-    let Some(path) = fixture("hello.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open binary");
     let md = ModuleData::locate(&bin).expect("locate moduledata");
 
-    assert!(md.types > 0 && md.etypes > md.types, "types region must be non-empty");
-    assert_eq!(md.pc_header_addr, bin.pclntab_addr, "pcHeader pointer must match pclntab");
-    assert!(md.typelinks.len > 0, "real binaries have hundreds of typelinks");
+    assert!(
+        md.types > 0 && md.etypes > md.types,
+        "types region must be non-empty"
+    );
+    assert_eq!(
+        md.pc_header_addr, bin.pclntab_addr,
+        "pcHeader pointer must match pclntab"
+    );
+    assert!(
+        md.typelinks.len > 0,
+        "real binaries have hundreds of typelinks"
+    );
     assert!(md.text < md.etext, "text region must have positive size");
 }
 
 #[test]
 fn recovers_types_on_linux_amd64() {
-    let Some(path) = fixture("hello.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open binary");
     let md = ModuleData::locate(&bin).expect("locate moduledata");
     let recovered = types::recover_all(&bin, &md).expect("recover types");
@@ -110,18 +135,25 @@ fn recovers_types_on_linux_amd64() {
 
     let kinds: std::collections::HashSet<KindName> = recovered.iter().map(|t| t.kind).collect();
     for required_kind in [KindName::Pointer, KindName::Slice, KindName::Struct] {
-        assert!(kinds.contains(&required_kind), "expected at least one {required_kind:?} type");
+        assert!(
+            kinds.contains(&required_kind),
+            "expected at least one {required_kind:?} type"
+        );
     }
 }
 
 #[test]
 fn recovers_cobra_struct_fields() {
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open binary");
     let md = ModuleData::locate(&bin).expect("locate moduledata");
     let all = types::recover_all(&bin, &md).expect("recover types");
 
-    let cobra_struct = all.iter().find(|t| t.name == "*cobra.Command" && t.kind == KindName::Struct);
+    let cobra_struct = all
+        .iter()
+        .find(|t| t.name == "*cobra.Command" && t.kind == KindName::Struct);
     let cobra = match cobra_struct {
         Some(t) => t,
         None => return, // dep tree may differ across cobra versions; fine to skip
@@ -142,41 +174,59 @@ fn recovers_cobra_struct_fields() {
 
 #[test]
 fn recovers_itabs_on_depsdemo() {
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open binary");
     let md = ModuleData::locate(&bin).expect("locate moduledata");
     let pairs = itabs::recover_all(&bin, &md).expect("recover itabs");
 
-    assert!(pairs.len() > 10, "real binaries have dozens of itabs, got {}", pairs.len());
+    assert!(
+        pairs.len() > 10,
+        "real binaries have dozens of itabs, got {}",
+        pairs.len()
+    );
 
     // Every real Go binary linking io.* eventually has a *io.Writer => *os.File pair.
-    let has_writer_os_file = pairs.iter().any(|p| {
-        p.interface_name.contains("io.Writer") && p.concrete_name.contains("os.File")
-    });
-    assert!(has_writer_os_file, "expected *io.Writer => *os.File pairing in itabs");
+    let has_writer_os_file = pairs
+        .iter()
+        .any(|p| p.interface_name.contains("io.Writer") && p.concrete_name.contains("os.File"));
+    assert!(
+        has_writer_os_file,
+        "expected *io.Writer => *os.File pairing in itabs"
+    );
 }
 
 #[test]
 fn parses_buildinfo_with_real_deps() {
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open binary");
     let info = BuildInfo::parse(&bin).expect("parse buildinfo");
 
-    assert!(info.go_version.starts_with("go1."), "go version must look real");
+    assert!(
+        info.go_version.starts_with("go1."),
+        "go version must look real"
+    );
     assert_eq!(info.path.as_deref(), Some("example.com/depsdemo"));
     assert!(
         info.deps.iter().any(|m| m.path == "github.com/spf13/cobra"),
         "expected cobra in deps"
     );
     assert!(
-        info.settings.iter().any(|s| s.key == "GOOS" && s.value == "linux"),
+        info.settings
+            .iter()
+            .any(|s| s.key == "GOOS" && s.value == "linux"),
         "expected GOOS=linux build setting"
     );
 }
 
 #[test]
 fn reverse_lookup_finds_main_main() {
-    let Some(path) = fixture("hello.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open binary");
     let pcln = Pclntab::parse(&bin).expect("parse pclntab");
 
@@ -187,32 +237,56 @@ fn reverse_lookup_finds_main_main() {
         .find(|f| f.name == "main.main")
         .expect("main.main must be recovered");
 
-    let looked_up = pcln.lookup(main_fn.address).expect("lookup must succeed at function entry");
+    let looked_up = pcln
+        .lookup(main_fn.address)
+        .expect("lookup must succeed at function entry");
     assert_eq!(looked_up.name, "main.main");
 
-    let inside = pcln.lookup(main_fn.address + 4).expect("lookup must succeed mid-function");
+    let inside = pcln
+        .lookup(main_fn.address + 4)
+        .expect("lookup must succeed mid-function");
     assert_eq!(inside.name, "main.main");
 
     let nonsense = pcln.lookup(0xdead_beef_1234_5678);
-    assert!(nonsense.is_none(), "PC outside any function must return None");
+    assert!(
+        nonsense.is_none(),
+        "PC outside any function must return None"
+    );
 }
 
 #[test]
 fn detects_garble_on_garbled_binary() {
-    let Some(path) = fixture("depsdemo.garbled.stripped") else { return };
+    let Some(path) = fixture("depsdemo.garbled.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open binary");
     let pcln = Pclntab::parse(&bin).expect("parse garbled pclntab");
 
-    assert!(!pcln.magic_is_official(), "garble rewrites the pclntab magic");
+    assert!(
+        !pcln.magic_is_official(),
+        "garble rewrites the pclntab magic"
+    );
 
-    let funcs = pcln.functions().expect("functions still parse despite garble");
-    assert!(funcs.len() > 100, "garble keeps the table structure; functions should still parse");
+    let funcs = pcln
+        .functions()
+        .expect("functions still parse despite garble");
+    assert!(
+        funcs.len() > 100,
+        "garble keeps the table structure; functions should still parse"
+    );
 
     let version = unstrip::output::detect_go_version(&bin.bytes);
-    let report = unstrip::output::detect_garble(&funcs, version.as_deref(), pcln.magic_is_official());
-    assert!(report.verdict(), "garble verdict should fire on a real garble-built binary");
+    let report =
+        unstrip::output::detect_garble(&funcs, version.as_deref(), pcln.magic_is_official());
+    assert!(
+        report.verdict(),
+        "garble verdict should fire on a real garble-built binary"
+    );
     assert!(report.magic_rewritten, "should detect magic rewrite");
-    assert!(report.version_overwritten, "should detect version overwrite");
+    assert!(
+        report.version_overwritten,
+        "should detect version overwrite"
+    );
 }
 
 #[test]
@@ -221,7 +295,9 @@ fn inline_stack_recovers_three_deep_inlining() {
     // level3, all inlinable. PCs inside the level3 body must produce a four-
     // frame stack: level3 (inlined) <- level2 (inlined) <- level1 (inlined) <-
     // anchor (physical).
-    let Some(path) = fixture("inline3.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("inline3.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open binary");
     let pcln = Pclntab::parse(&bin).expect("parse pclntab");
     let md = unstrip::ModuleData::locate(&bin).expect("locate moduledata");
@@ -259,7 +335,10 @@ fn inline_stack_recovers_three_deep_inlining() {
         );
     }
     // Physical frame must be last and not marked inlined.
-    assert!(!deepest.last().unwrap().inlined, "physical frame must be last");
+    assert!(
+        !deepest.last().unwrap().inlined,
+        "physical frame must be last"
+    );
     assert_eq!(deepest.last().unwrap().name, "main.anchor");
 }
 
@@ -267,7 +346,9 @@ fn inline_stack_recovers_three_deep_inlining() {
 fn inline_stack_returns_single_frame_for_non_inlined_pc() {
     // The hello fixture's main.main does not have any inlined calls at its
     // entry PC. lookup_inline should return exactly one frame.
-    let Some(path) = fixture("hello.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open binary");
     let pcln = Pclntab::parse(&bin).expect("parse pclntab");
     let md = unstrip::ModuleData::locate(&bin).expect("locate moduledata");
@@ -281,23 +362,34 @@ fn inline_stack_returns_single_frame_for_non_inlined_pc() {
         .expect("main.main must be recovered");
 
     let frames = pcln.lookup_inline(&bin, main_fn.address);
-    assert!(!frames.is_empty(), "should always return at least the physical frame");
+    assert!(
+        !frames.is_empty(),
+        "should always return at least the physical frame"
+    );
     let physical = frames.last().expect("physical frame");
     assert_eq!(physical.name, "main.main");
-    assert!(!physical.inlined, "the last frame must be physical, not inlined");
+    assert!(
+        !physical.inlined,
+        "the last frame must be physical, not inlined"
+    );
 }
 
 #[test]
 fn fingerprint_is_deterministic() {
     // Same binary parsed twice must produce the same fingerprint.
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin1 = GoBinary::open(&path).expect("open binary");
     let pcln1 = Pclntab::parse(&bin1).expect("parse pclntab");
     let fp1 = unstrip::fingerprint::compute(&bin1, &pcln1).expect("fingerprint");
     let bin2 = GoBinary::open(&path).expect("re-open");
     let pcln2 = Pclntab::parse(&bin2).expect("re-parse");
     let fp2 = unstrip::fingerprint::compute(&bin2, &pcln2).expect("re-fingerprint");
-    assert_eq!(fp1.sha256, fp2.sha256, "fingerprint must be stable across runs");
+    assert_eq!(
+        fp1.sha256, fp2.sha256,
+        "fingerprint must be stable across runs"
+    );
     assert!(fp1.sha256.len() == 64, "sha256 hex must be 64 chars");
 }
 
@@ -307,8 +399,12 @@ fn fingerprint_stable_across_trimpath_rebuilds() {
     // adds `-trimpath`. Both must produce byte-identical fingerprints (and
     // byte-identical behavioral fingerprints) so analysts can rely on the
     // hash as a stable cluster ID across CI configurations.
-    let Some(p1) = fixture("depsdemo.rebuild1.stripped") else { return };
-    let Some(p2) = fixture("depsdemo.rebuild2.stripped") else { return };
+    let Some(p1) = fixture("depsdemo.rebuild1.stripped") else {
+        return;
+    };
+    let Some(p2) = fixture("depsdemo.rebuild2.stripped") else {
+        return;
+    };
 
     let bin1 = GoBinary::open(&p1).expect("open rebuild1");
     let pcln1 = Pclntab::parse(&bin1).expect("parse rebuild1");
@@ -335,50 +431,82 @@ fn fingerprint_iteration_is_internally_deterministic() {
     // Parse the same binary 10 times, assert the hash is byte-identical
     // every run. This catches HashMap-iteration-order bugs that only
     // manifest occasionally on certain hash seeds.
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open");
     let pcln = Pclntab::parse(&bin).expect("parse");
-    let expected = unstrip::fingerprint::compute(&bin, &pcln).expect("fp").sha256;
+    let expected = unstrip::fingerprint::compute(&bin, &pcln)
+        .expect("fp")
+        .sha256;
     for run in 1..10 {
         let bin = GoBinary::open(&path).expect("re-open");
         let pcln = Pclntab::parse(&bin).expect("re-parse");
-        let got = unstrip::fingerprint::compute(&bin, &pcln).expect("fp").sha256;
-        assert_eq!(got, expected, "fingerprint must be deterministic across runs (run {run})");
+        let got = unstrip::fingerprint::compute(&bin, &pcln)
+            .expect("fp")
+            .sha256;
+        assert_eq!(
+            got, expected,
+            "fingerprint must be deterministic across runs (run {run})"
+        );
     }
-    let expected_b = unstrip::fingerprint::compute_behavioral(&bin).expect("bfp").sha256;
+    let expected_b = unstrip::fingerprint::compute_behavioral(&bin)
+        .expect("bfp")
+        .sha256;
     for run in 1..10 {
         let bin = GoBinary::open(&path).expect("re-open");
-        let got = unstrip::fingerprint::compute_behavioral(&bin).expect("bfp").sha256;
-        assert_eq!(got, expected_b, "behavioral fingerprint must be deterministic across runs (run {run})");
+        let got = unstrip::fingerprint::compute_behavioral(&bin)
+            .expect("bfp")
+            .sha256;
+        assert_eq!(
+            got, expected_b,
+            "behavioral fingerprint must be deterministic across runs (run {run})"
+        );
     }
 }
 
 #[test]
 fn fingerprint_differs_across_distinct_binaries() {
-    let Some(p1) = fixture("depsdemo.linux-amd64.stripped") else { return };
-    let Some(p2) = fixture("hello.linux-amd64.stripped") else { return };
+    let Some(p1) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let Some(p2) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
     let bin1 = GoBinary::open(&p1).expect("open");
     let pcln1 = Pclntab::parse(&bin1).expect("parse");
     let fp1 = unstrip::fingerprint::compute(&bin1, &pcln1).expect("fp");
     let bin2 = GoBinary::open(&p2).expect("open");
     let pcln2 = Pclntab::parse(&bin2).expect("parse");
     let fp2 = unstrip::fingerprint::compute(&bin2, &pcln2).expect("fp");
-    assert_ne!(fp1.sha256, fp2.sha256, "different sources must yield different fingerprints");
+    assert_ne!(
+        fp1.sha256, fp2.sha256,
+        "different sources must yield different fingerprints"
+    );
 }
 
 #[test]
 fn recovers_symbols_from_go_1_18() {
-    let Some(path) = fixture("hello.go118.stripped") else { return };
+    let Some(path) = fixture("hello.go118.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open Go 1.18 binary");
     let pcln = Pclntab::parse(&bin).expect("parse 1.18 pclntab");
-    assert!(pcln.magic_is_official(), "Go 1.18 magic 0xfffffff0 should be recognized");
+    assert!(
+        pcln.magic_is_official(),
+        "Go 1.18 magic 0xfffffff0 should be recognized"
+    );
     let funcs = pcln.functions().expect("walk functab");
     assert!(funcs.len() > 100);
     // Go 1.18 binaries should also yield moduledata with the older layout.
     let md = unstrip::ModuleData::locate(&bin).expect("locate 1.18 moduledata");
     assert!(md.types > 0 && md.etypes > md.types);
     let types = unstrip::types::recover_all(&bin, &md).expect("recover 1.18 types");
-    assert!(types.len() > 50, "Go 1.18 should still yield real types, got {}", types.len());
+    assert!(
+        types.len() > 50,
+        "Go 1.18 should still yield real types, got {}",
+        types.len()
+    );
 }
 
 #[test]
@@ -387,7 +515,9 @@ fn exporter_python_parses_for_all_targets() {
     // each one is syntactically valid Python. Catches escape bugs in
     // function names or struct decls that would silently break the user's
     // RE-tool import.
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open");
     let pcln = Pclntab::parse(&bin).expect("parse");
     let funcs = pcln.functions().expect("functions");
@@ -427,13 +557,19 @@ fn exporter_python_parses_for_all_targets() {
         // Pass 2: every _struct(decl) string must contain a balanced struct
         // body. Extract the decl literal and check brace pairing.
         for line in script.lines() {
-            let Some(decl) = extract_struct_decl(line) else { continue };
+            let Some(decl) = extract_struct_decl(line) else {
+                continue;
+            };
             assert!(
                 decl.matches('{').count() == decl.matches('}').count(),
                 "{target:?} struct decl has mismatched braces: {decl}"
             );
             // Every line inside the body must end with `;` or be a brace.
-            for body_line in decl.lines().skip(1).take_while(|l| !l.trim().starts_with('}')) {
+            for body_line in decl
+                .lines()
+                .skip(1)
+                .take_while(|l| !l.trim().starts_with('}'))
+            {
                 let l = body_line.trim();
                 if l.is_empty() {
                     continue;
@@ -522,7 +658,9 @@ fn capabilities_detects_cobra_dep() {
     // include "shell command execution" via os/exec.Command which cobra
     // imports for shell completion. (If the set comes back empty
     // entirely, the matcher's broken.)
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open");
     let pcln = Pclntab::parse(&bin).expect("parse");
     let funcs = pcln.functions().expect("funcs");
@@ -538,13 +676,18 @@ fn capabilities_detects_cobra_dep() {
 
 #[test]
 fn dispatch_resolver_ghidra_embeds_itabs() {
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open");
     let md = unstrip::ModuleData::locate(&bin).expect("md");
     let itabs_v = unstrip::itabs::recover_all(&bin, &md).expect("itabs");
     assert!(!itabs_v.is_empty(), "fixture should have itabs");
     let script = unstrip::dispatch::write_ghidra(&itabs_v);
-    assert!(script.contains("ITABS = ["), "script must define ITABS table");
+    assert!(
+        script.contains("ITABS = ["),
+        "script must define ITABS table"
+    );
     assert!(script.contains("_resolve()"), "script must invoke resolver");
     assert!(
         script.contains("'interface':"),
@@ -554,8 +697,12 @@ fn dispatch_resolver_ghidra_embeds_itabs() {
 
 #[test]
 fn diff_two_identical_rebuilds_yields_all_identical() {
-    let Some(p1) = fixture("depsdemo.rebuild1.stripped") else { return };
-    let Some(p2) = fixture("depsdemo.rebuild2.stripped") else { return };
+    let Some(p1) = fixture("depsdemo.rebuild1.stripped") else {
+        return;
+    };
+    let Some(p2) = fixture("depsdemo.rebuild2.stripped") else {
+        return;
+    };
 
     let bin1 = GoBinary::open(&p1).expect("open old");
     let pcln1 = Pclntab::parse(&bin1).expect("parse old");
@@ -571,7 +718,8 @@ fn diff_two_identical_rebuilds_yields_all_identical() {
     assert!(
         report.identical >= report.new_total * 9 / 10,
         "trimpath rebuilds should be >=90% identical; got {} identical of {}",
-        report.identical, report.new_total,
+        report.identical,
+        report.new_total,
     );
 }
 
@@ -579,7 +727,9 @@ fn diff_two_identical_rebuilds_yields_all_identical() {
 fn xrefs_finds_main_main_callees() {
     // Every real binary's main.main calls at least a few other functions.
     // If the CALL scanner returns zero edges from main.main, it's broken.
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open");
     let pcln = Pclntab::parse(&bin).expect("parse");
     let edges = unstrip::xrefs::find_calls(&bin, &pcln).expect("scan");
@@ -605,7 +755,9 @@ fn goroutines_finds_runtime_newproc_sites() {
     // times for the GC's background workers (runtime.gcBgMarkWorker,
     // runtime.forcegchelper, etc). If we can find none of those, the
     // pattern scan is broken.
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open");
     let pcln = Pclntab::parse(&bin).expect("parse");
     let spawns = unstrip::goroutines::find_spawns(&bin, &pcln).expect("scan");
@@ -615,10 +767,7 @@ fn goroutines_finds_runtime_newproc_sites() {
         spawns.len()
     );
     // At least one of them should resolve to a known runtime function.
-    let resolved = spawns
-        .iter()
-        .filter(|s| s.target_name.is_some())
-        .count();
+    let resolved = spawns.iter().filter(|s| s.target_name.is_some()).count();
     assert!(
         resolved > 0,
         "at least one newproc target should resolve via the LEA backtrack heuristic; got {} unresolved out of {}",
@@ -634,15 +783,14 @@ fn symbols_as_elf_writes_valid_symtab() {
     // we recover. We don't shell out to nm; we parse the ELF directly so
     // the test runs on any host.
     use std::io::Read;
-    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
     let bin = GoBinary::open(&path).expect("open");
     let pcln = Pclntab::parse(&bin).expect("parse");
     let functions = pcln.functions().expect("functions");
 
-    let tmp = std::env::temp_dir().join(format!(
-        "unstrip-symbols-test-{}.bin",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("unstrip-symbols-test-{}.bin", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
 
     let n = unstrip::rewrite::write_symbols_as_elf(&bin, &functions, &tmp, Some(&path))
@@ -678,8 +826,7 @@ fn symbols_as_elf_writes_valid_symtab() {
 
 #[test]
 fn rejects_non_go_binary() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("Cargo.toml");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let result = GoBinary::open(&path);
     assert!(result.is_err(), "Cargo.toml should not parse as a binary");
 }

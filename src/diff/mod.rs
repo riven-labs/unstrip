@@ -63,8 +63,7 @@ pub struct DiffReport {
 pub fn compute(old: &[Function], new: &[Function]) -> DiffReport {
     let _old_by_addr: HashMap<u64, &Function> = old.iter().map(|f| (f.address, f)).collect();
     let new_by_addr: HashMap<u64, &Function> = new.iter().map(|f| (f.address, f)).collect();
-    let new_by_name: HashMap<&str, &Function> =
-        new.iter().map(|f| (f.name.as_str(), f)).collect();
+    let new_by_name: HashMap<&str, &Function> = new.iter().map(|f| (f.name.as_str(), f)).collect();
 
     let mut pairings = Vec::with_capacity(old.len().max(new.len()));
     let mut matched_old: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -174,10 +173,7 @@ pub fn compute(old: &[Function], new: &[Function]) -> DiffReport {
 /// table, but writing those out of unstrip would require the analyst
 /// to export their renames first. For now we ship the structural diff
 /// and let the user post-process.
-pub fn write_port_script(
-    target: crate::export::Target,
-    report: &DiffReport,
-) -> String {
+pub fn write_port_script(target: crate::export::Target, report: &DiffReport) -> String {
     let mut s = String::new();
     let header = match target {
         crate::export::Target::Ida => concat!(

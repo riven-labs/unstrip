@@ -127,10 +127,20 @@ impl KindName {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum KindData {
     None,
-    Pointer { elem: u64 },
-    Slice { elem: u64 },
-    Array { elem: u64, len: u64 },
-    Chan { elem: u64, dir: u64 },
+    Pointer {
+        elem: u64,
+    },
+    Slice {
+        elem: u64,
+    },
+    Array {
+        elem: u64,
+        len: u64,
+    },
+    Chan {
+        elem: u64,
+        dir: u64,
+    },
     Map {
         key: u64,
         elem: u64,
@@ -139,8 +149,12 @@ pub enum KindData {
         #[serde(skip_serializing_if = "Option::is_none")]
         bucket: Option<u64>,
     },
-    Struct { fields: Vec<StructField> },
-    Interface { methods: Vec<InterfaceMethod> },
+    Struct {
+        fields: Vec<StructField>,
+    },
+    Interface {
+        methods: Vec<InterfaceMethod>,
+    },
     Func {
         in_count: u16,
         out_count: u16,
@@ -344,7 +358,11 @@ fn child_addrs(kd: &KindData) -> Vec<u64> {
         }
         KindData::Struct { fields } => fields.iter().map(|f| f.typ).collect(),
         KindData::Interface { methods } => methods.iter().map(|m| m.typ).collect(),
-        KindData::Func { in_types, out_types, .. } => {
+        KindData::Func {
+            in_types,
+            out_types,
+            ..
+        } => {
             // Walk callback signature types so struct types reachable only
             // through function fields end up in the recovered graph.
             let mut v = Vec::with_capacity(in_types.len() + out_types.len());
@@ -401,17 +419,20 @@ fn read_name(bin: &GoBinary, addr: u64) -> Result<String> {
         .read_at_addr(addr, 1 + 10)
         .ok_or_else(|| Error::TypeRecovery(format!("name header at 0x{addr:x} unmapped")))?;
 
-    let (len, varint_bytes) = read_varint(&header[1..])
-        .ok_or_else(|| Error::TypeRecovery(format!("varint at name 0x{addr:x} did not terminate")))?;
+    let (len, varint_bytes) = read_varint(&header[1..]).ok_or_else(|| {
+        Error::TypeRecovery(format!("varint at name 0x{addr:x} did not terminate"))
+    })?;
 
     if len > 1 << 20 {
-        return Err(Error::TypeRecovery(format!("name length {len} unreasonably large")));
+        return Err(Error::TypeRecovery(format!(
+            "name length {len} unreasonably large"
+        )));
     }
 
     let total = 1 + varint_bytes + len as usize;
-    let body = bin
-        .read_at_addr(addr, total)
-        .ok_or_else(|| Error::TypeRecovery(format!("name body at 0x{addr:x} ({total} bytes) unmapped")))?;
+    let body = bin.read_at_addr(addr, total).ok_or_else(|| {
+        Error::TypeRecovery(format!("name body at 0x{addr:x} ({total} bytes) unmapped"))
+    })?;
 
     let start = 1 + varint_bytes;
     let s = std::str::from_utf8(&body[start..start + len as usize])
@@ -532,11 +553,12 @@ fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
 
     // The parameter pointer array starts at extra_addr + 4 (past in/out counts),
     // optionally offset by UncommonType (16 bytes) if TFlagUncommon is set.
-    let params_offset = 4usize + if tflag & TFLAG_UNCOMMON != 0 {
-        UNCOMMON_TYPE_SIZE
-    } else {
-        0
-    };
+    let params_offset = 4usize
+        + if tflag & TFLAG_UNCOMMON != 0 {
+            UNCOMMON_TYPE_SIZE
+        } else {
+            0
+        };
     let params_addr = extra_addr + params_offset as u64;
     let params_bytes = bin
         .read_at_addr(params_addr, total_params * 8)
@@ -599,11 +621,11 @@ fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<Kin
 
     const FIELD_SIZE: usize = 24;
     let total = fields_len as usize * FIELD_SIZE;
-    let buf = bin
-        .read_at_addr(fields_data, total)
-        .ok_or_else(|| Error::TypeRecovery(format!(
+    let buf = bin.read_at_addr(fields_data, total).ok_or_else(|| {
+        Error::TypeRecovery(format!(
             "struct fields array at 0x{fields_data:x} ({total} bytes) unmapped"
-        )))?;
+        ))
+    })?;
 
     let mut fields = Vec::with_capacity(fields_len as usize);
     for i in 0..fields_len as usize {
@@ -612,8 +634,14 @@ fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<Kin
         let typ = u64::from_le_bytes(buf[off + 8..off + 16].try_into().unwrap());
         let offset = u64::from_le_bytes(buf[off + 16..off + 24].try_into().unwrap());
 
-        let (name, embedded) = read_name_with_flags(bin, name_ptr).unwrap_or((String::new(), false));
-        fields.push(StructField { name, typ, offset, embedded });
+        let (name, embedded) =
+            read_name_with_flags(bin, name_ptr).unwrap_or((String::new(), false));
+        fields.push(StructField {
+            name,
+            typ,
+            offset,
+            embedded,
+        });
     }
     let _ = md;
     Ok(KindData::Struct { fields })
@@ -644,13 +672,11 @@ fn decode_interface(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<
     }
     const IMETHOD_SIZE: usize = 8;
     let total = methods_len as usize * IMETHOD_SIZE;
-    let buf = bin
-        .read_at_addr(methods_data, total)
-        .ok_or_else(|| {
-            Error::TypeRecovery(format!(
-                "interface methods array at 0x{methods_data:x} ({total} bytes) unmapped"
-            ))
-        })?;
+    let buf = bin.read_at_addr(methods_data, total).ok_or_else(|| {
+        Error::TypeRecovery(format!(
+            "interface methods array at 0x{methods_data:x} ({total} bytes) unmapped"
+        ))
+    })?;
 
     let mut methods = Vec::with_capacity(methods_len as usize);
     for i in 0..methods_len as usize {
@@ -660,7 +686,10 @@ fn decode_interface(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<
         let name_addr = md.types.wrapping_add(name_off as i64 as u64);
         let typ_addr = md.types.wrapping_add(typ_off as i64 as u64);
         let name = read_name(bin, name_addr).unwrap_or_else(|_| format!("method{i}"));
-        methods.push(InterfaceMethod { name, typ: typ_addr });
+        methods.push(InterfaceMethod {
+            name,
+            typ: typ_addr,
+        });
     }
     Ok(KindData::Interface { methods })
 }

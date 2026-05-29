@@ -84,7 +84,11 @@ pub fn write_info<W: Write>(
         "container:     {} ({}, {})",
         bin.container.as_str(),
         bin.arch.as_str(),
-        if bin.little_endian { "little-endian" } else { "big-endian" },
+        if bin.little_endian {
+            "little-endian"
+        } else {
+            "big-endian"
+        },
     )?;
     writeln!(
         w,
@@ -98,15 +102,32 @@ pub fn write_info<W: Write>(
     if let Some(report) = garble_check {
         if report.any() {
             writeln!(w)?;
-            writeln!(w, "garble heuristic: {}", if report.verdict() { "likely garbled" } else { "indeterminate" })?;
+            writeln!(
+                w,
+                "garble heuristic: {}",
+                if report.verdict() {
+                    "likely garbled"
+                } else {
+                    "indeterminate"
+                }
+            )?;
             if report.magic_rewritten {
-                writeln!(w, "  - pclntab magic is not the standard 0xfffffff1 (garble rewrites it)")?;
+                writeln!(
+                    w,
+                    "  - pclntab magic is not the standard 0xfffffff1 (garble rewrites it)"
+                )?;
             }
             if report.version_overwritten {
-                writeln!(w, "  - runtime.buildVersion is missing or non-standard (garble overwrites it)")?;
+                writeln!(
+                    w,
+                    "  - runtime.buildVersion is missing or non-standard (garble overwrites it)"
+                )?;
             }
             if let Some((hashed, total)) = report.hashed_names {
-                writeln!(w, "  - {hashed}/{total} user-package function names look hashed")?;
+                writeln!(
+                    w,
+                    "  - {hashed}/{total} user-package function names look hashed"
+                )?;
             }
         }
     }
@@ -130,17 +151,26 @@ impl GarbleReport {
     pub fn any(&self) -> bool {
         self.magic_rewritten
             || self.version_overwritten
-            || self.hashed_names.map(|(h, t)| t > 0 && (h * 5) > (t * 2)).unwrap_or(false)
+            || self
+                .hashed_names
+                .map(|(h, t)| t > 0 && (h * 5) > (t * 2))
+                .unwrap_or(false)
     }
 
     /// Verdict: any two of the three signals tripped is enough to call it.
     /// Magic rewrite alone is the strongest single signal and counts double.
     pub fn verdict(&self) -> bool {
         let mut hits = 0;
-        if self.magic_rewritten { hits += 2; }
-        if self.version_overwritten { hits += 1; }
+        if self.magic_rewritten {
+            hits += 2;
+        }
+        if self.version_overwritten {
+            hits += 1;
+        }
         if let Some((h, t)) = self.hashed_names {
-            if t > 0 && (h * 5) > (t * 2) { hits += 1; }
+            if t > 0 && (h * 5) > (t * 2) {
+                hits += 1;
+            }
         }
         hits >= 2
     }
@@ -194,7 +224,9 @@ fn looks_garbled(name: &str) -> bool {
     if last_dot.len() > 10 {
         return false;
     }
-    let identifier_chars = last_dot.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let identifier_chars = last_dot
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !identifier_chars {
         return false;
     }

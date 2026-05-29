@@ -48,7 +48,12 @@ const RULES: &[Rule] = &[
     Rule {
         name: "HTTP server",
         category: "network",
-        type_substrings: &["http.Server", "http.ServeMux", "*http.Handler", "*http.HandlerFunc"],
+        type_substrings: &[
+            "http.Server",
+            "http.ServeMux",
+            "*http.Handler",
+            "*http.HandlerFunc",
+        ],
         itab_substrings: &[],
         function_substrings: &["net/http.ListenAndServe", "net/http.Serve"],
     },
@@ -97,14 +102,23 @@ const RULES: &[Rule] = &[
     Rule {
         name: "TLS client/server",
         category: "crypto",
-        type_substrings: &["tls.Config", "tls.Conn", "tls.Certificate", "tls.ClientHelloInfo"],
+        type_substrings: &[
+            "tls.Config",
+            "tls.Conn",
+            "tls.Certificate",
+            "tls.ClientHelloInfo",
+        ],
         itab_substrings: &[],
         function_substrings: &["crypto/tls.Dial", "crypto/tls.Listen"],
     },
     Rule {
         name: "X.509 / PKI",
         category: "crypto",
-        type_substrings: &["x509.Certificate", "x509.CertPool", "x509.CertificateRequest"],
+        type_substrings: &[
+            "x509.Certificate",
+            "x509.CertPool",
+            "x509.CertificateRequest",
+        ],
         itab_substrings: &[],
         function_substrings: &["crypto/x509.ParseCertificate"],
     },
@@ -127,7 +141,11 @@ const RULES: &[Rule] = &[
         category: "crypto",
         type_substrings: &[],
         itab_substrings: &[],
-        function_substrings: &["crypto/aes.NewCipher", "crypto/cipher.NewCBC", "crypto/cipher.NewGCM"],
+        function_substrings: &[
+            "crypto/aes.NewCipher",
+            "crypto/cipher.NewCBC",
+            "crypto/cipher.NewGCM",
+        ],
     },
     // Cloud SDKs
     Rule {
@@ -168,7 +186,10 @@ const RULES: &[Rule] = &[
     Rule {
         name: "Azure SDK",
         category: "cloud",
-        type_substrings: &["github.com/Azure/azure-sdk-for-go/", "github.com/Azure/go-autorest/"],
+        type_substrings: &[
+            "github.com/Azure/azure-sdk-for-go/",
+            "github.com/Azure/go-autorest/",
+        ],
         itab_substrings: &[],
         function_substrings: &[],
     },
@@ -185,7 +206,13 @@ const RULES: &[Rule] = &[
         category: "filesystem",
         type_substrings: &[],
         itab_substrings: &["*os.File"],
-        function_substrings: &["os.Open", "os.Create", "os.WriteFile", "os.ReadFile", "ioutil.WriteFile"],
+        function_substrings: &[
+            "os.Open",
+            "os.Create",
+            "os.WriteFile",
+            "os.ReadFile",
+            "ioutil.WriteFile",
+        ],
     },
     Rule {
         name: "directory walk",
@@ -199,14 +226,22 @@ const RULES: &[Rule] = &[
         category: "process",
         type_substrings: &["exec.Cmd"],
         itab_substrings: &[],
-        function_substrings: &["os/exec.Command", "os/exec.CommandContext", "syscall.ForkExec"],
+        function_substrings: &[
+            "os/exec.Command",
+            "os/exec.CommandContext",
+            "syscall.ForkExec",
+        ],
     },
     Rule {
         name: "syscall direct invocation",
         category: "process",
         type_substrings: &[],
         itab_substrings: &[],
-        function_substrings: &["syscall.Syscall", "syscall.RawSyscall", "golang.org/x/sys/unix.Syscall"],
+        function_substrings: &[
+            "syscall.Syscall",
+            "syscall.RawSyscall",
+            "golang.org/x/sys/unix.Syscall",
+        ],
     },
     Rule {
         name: "signal handling",
@@ -292,7 +327,11 @@ const RULES: &[Rule] = &[
     Rule {
         name: "Sliver C2 implant",
         category: "offensive-hint",
-        type_substrings: &["bishopfox/sliver", "sliver/sliver/transports", "sliver/protobuf/sliverpb"],
+        type_substrings: &[
+            "bishopfox/sliver",
+            "sliver/sliver/transports",
+            "sliver/protobuf/sliverpb",
+        ],
         itab_substrings: &[],
         function_substrings: &["sliver/sliver/transports.", "sliver/sliver/handlers."],
     },
@@ -359,11 +398,7 @@ pub fn compute(functions: &[Function], types: &[Type], itabs: &[Itab]) -> Capabi
         }
         if evidence.len() < 5 && !rule.function_substrings.is_empty() {
             for f in functions {
-                if rule
-                    .function_substrings
-                    .iter()
-                    .any(|s| f.name.contains(s))
-                {
+                if rule.function_substrings.iter().any(|s| f.name.contains(s)) {
                     evidence.push(f.name.clone());
                     if evidence.len() >= 5 {
                         break;

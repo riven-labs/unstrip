@@ -230,7 +230,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             "ida" => export::Target::Ida,
             "ghidra" => export::Target::Ghidra,
             "binja" | "binaryninja" => export::Target::BinaryNinja,
-            other => return Err(format!("--install-plugin must be ida, ghidra, or binja (got {other:?})").into()),
+            other => {
+                return Err(format!(
+                    "--install-plugin must be ida, ghidra, or binja (got {other:?})"
+                )
+                .into())
+            }
         };
         let report = unstrip::plugin::install(t)?;
         let stdout = io::stdout();
@@ -259,29 +264,20 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             (Some(p), false) => p.clone(),
             (None, true) => {
                 if !args.yes {
-                    return Err(
-                        "--in-place rewrites the input file; pass --yes to confirm".into(),
-                    );
+                    return Err("--in-place rewrites the input file; pass --yes to confirm".into());
                 }
                 binary_path.clone()
             }
             (None, false) => {
                 let mut p = binary_path.clone();
-                let mut fname = p
-                    .file_name()
-                    .map(|f| f.to_os_string())
-                    .unwrap_or_default();
+                let mut fname = p.file_name().map(|f| f.to_os_string()).unwrap_or_default();
                 fname.push(".symbols");
                 p.set_file_name(fname);
                 p
             }
         };
-        let n = unstrip::rewrite::write_symbols_as_elf(
-            &bin,
-            &functions,
-            &out_path,
-            Some(binary_path),
-        )?;
+        let n =
+            unstrip::rewrite::write_symbols_as_elf(&bin, &functions, &out_path, Some(binary_path))?;
         writeln!(out, "wrote {} symbols to {}", n, out_path.display())?;
         out.flush()?;
         return Ok(());
@@ -331,7 +327,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 if !stdlib_counts.is_empty() {
                     writeln!(out)?;
                     writeln!(out, "stdlib interface implementations:")?;
-                    let col = stdlib_counts.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+                    let col = stdlib_counts
+                        .iter()
+                        .map(|(n, _)| n.len())
+                        .max()
+                        .unwrap_or(0);
                     for (name, count) in &stdlib_counts {
                         writeln!(out, "  {:<col$}  {}", name, count, col = col)?;
                     }
@@ -407,9 +407,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let raw_pc = parse_pc(addr_str)?;
         let pc = if let Some(rebase_str) = &args.rebase {
             let delta = parse_pc(rebase_str)?;
-            raw_pc.checked_sub(delta).ok_or_else(|| {
-                format!("--rebase {delta:#x} is larger than --addr {raw_pc:#x}")
-            })?
+            raw_pc
+                .checked_sub(delta)
+                .ok_or_else(|| format!("--rebase {delta:#x} is larger than --addr {raw_pc:#x}"))?
         } else {
             raw_pc
         };
@@ -431,7 +431,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             for (i, f) in frames.iter().enumerate() {
                 let file = f.file.as_deref().unwrap_or("?");
                 let line = f.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
-                let prefix = if i + 1 == frames.len() { "(physical)" } else { "(inlined) " };
+                let prefix = if i + 1 == frames.len() {
+                    "(physical)"
+                } else {
+                    "(inlined) "
+                };
                 writeln!(out, "{prefix} {}  {file}:{line}", f.name)?;
             }
         }
@@ -466,8 +470,19 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 OutFormat::Text => {
                     writeln!(out, "{}", fp.sha256)?;
-                    writeln!(out, "  main module:    {}", fp.components.main_module_path.as_deref().unwrap_or("(none)"))?;
-                    writeln!(out, "  user functions: {}", fp.components.user_function_count)?;
+                    writeln!(
+                        out,
+                        "  main module:    {}",
+                        fp.components
+                            .main_module_path
+                            .as_deref()
+                            .unwrap_or("(none)")
+                    )?;
+                    writeln!(
+                        out,
+                        "  user functions: {}",
+                        fp.components.user_function_count
+                    )?;
                     writeln!(out, "  user types:     {}", fp.components.user_type_count)?;
                     writeln!(out, "  itabs:          {}", fp.itab_count)?;
                     writeln!(out, "  deps:           {}", fp.dep_count)?;
@@ -499,8 +514,10 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 if report.capabilities.is_empty() {
                     writeln!(out, "no capabilities matched.")?;
                 } else {
-                    let mut by_cat: std::collections::BTreeMap<&str, Vec<&unstrip::capabilities::Capability>> =
-                        std::collections::BTreeMap::new();
+                    let mut by_cat: std::collections::BTreeMap<
+                        &str,
+                        Vec<&unstrip::capabilities::Capability>,
+                    > = std::collections::BTreeMap::new();
                     for c in &report.capabilities {
                         by_cat.entry(c.category).or_default().push(c);
                     }
@@ -526,10 +543,13 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let itabs_v = itabs::recover_all(&bin, &md)?;
         let script = match target.as_str() {
             "ghidra" => unstrip::dispatch::write_ghidra(&itabs_v),
-            other => return Err(format!(
-                "--dispatch-resolver does not support '{}' yet (try 'ghidra')",
-                other
-            ).into()),
+            other => {
+                return Err(format!(
+                    "--dispatch-resolver does not support '{}' yet (try 'ghidra')",
+                    other
+                )
+                .into())
+            }
         };
         out.write_all(script.as_bytes())?;
         out.flush()?;
@@ -572,7 +592,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 writeln!(out)?;
                 writeln!(out, "identical:  {}", report.identical)?;
                 writeln!(out, "renamed:    {}", report.renamed)?;
-                writeln!(out, "moved addr: {} (same address, different name)", report.address_moved)?;
+                writeln!(
+                    out,
+                    "moved addr: {} (same address, different name)",
+                    report.address_moved
+                )?;
                 writeln!(out, "added:      {} (in new, not in old)", report.added)?;
                 writeln!(out, "removed:    {} (in old, not in new)", report.removed)?;
                 writeln!(out)?;
@@ -685,7 +709,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let md = ModuleData::locate(&bin)?;
         let mut all = itabs::recover_all(&bin, &md)?;
         if let Some(needle) = &args.filter {
-            all.retain(|it| it.interface_name.contains(needle) || it.concrete_name.contains(needle));
+            all.retain(|it| {
+                it.interface_name.contains(needle) || it.concrete_name.contains(needle)
+            });
         }
         match args.format {
             OutFormat::Json => {
@@ -768,13 +794,16 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
 fn parse_pc(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
     let trimmed = s.trim();
-    let (radix, body) = if let Some(rest) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    let (radix, body) = if let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         (16, rest)
     } else {
         (10, trimmed)
     };
-    let v = u64::from_str_radix(body, radix)
-        .map_err(|e| format!("could not parse PC '{s}': {e}"))?;
+    let v =
+        u64::from_str_radix(body, radix).map_err(|e| format!("could not parse PC '{s}': {e}"))?;
     Ok(v)
 }
 
@@ -824,7 +853,12 @@ fn write_goroutines<W: Write>(
         writeln!(w, "no goroutine spawn or defer call sites found")?;
         return Ok(());
     }
-    let spawner_w = all.iter().map(|s| s.spawner.len()).max().unwrap_or(20).min(30);
+    let spawner_w = all
+        .iter()
+        .map(|s| s.spawner.len())
+        .max()
+        .unwrap_or(20)
+        .min(30);
     for s in all {
         let target = match (&s.target_name, s.target_addr) {
             (Some(n), Some(addr)) => format!("{n} (0x{addr:x})"),
@@ -851,8 +885,18 @@ fn write_goroutines<W: Write>(
 }
 
 fn write_itabs<W: Write>(w: &mut W, all: &[unstrip::Itab]) -> io::Result<()> {
-    let iw = all.iter().map(|i| i.interface_name.len()).max().unwrap_or(20).min(60);
-    let cw = all.iter().map(|i| i.concrete_name.len()).max().unwrap_or(20).min(60);
+    let iw = all
+        .iter()
+        .map(|i| i.interface_name.len())
+        .max()
+        .unwrap_or(20)
+        .min(60);
+    let cw = all
+        .iter()
+        .map(|i| i.concrete_name.len())
+        .max()
+        .unwrap_or(20)
+        .min(60);
     for it in all {
         let marker = if it.incomplete { "  [INCOMPLETE]" } else { "" };
         writeln!(
@@ -866,11 +910,7 @@ fn write_itabs<W: Write>(w: &mut W, all: &[unstrip::Itab]) -> io::Result<()> {
             cw = cw,
         )?;
         for m in &it.methods {
-            writeln!(
-                w,
-                "    .{}() -> 0x{:x}",
-                m.interface_method, m.concrete_fn,
-            )?;
+            writeln!(w, "    .{}() -> 0x{:x}", m.interface_method, m.concrete_fn,)?;
         }
     }
     Ok(())
@@ -892,7 +932,11 @@ fn write_types<W: Write>(w: &mut W, all: &[unstrip::Type]) -> io::Result<()> {
             unstrip::types::KindData::Struct { fields } => {
                 for f in fields {
                     let tag = if f.embedded { " (embedded)" } else { "" };
-                    writeln!(w, "    +{:04x}  {}: type@0x{:x}{}", f.offset, f.name, f.typ, tag)?;
+                    writeln!(
+                        w,
+                        "    +{:04x}  {}: type@0x{:x}{}",
+                        f.offset, f.name, f.typ, tag
+                    )?;
                 }
             }
             unstrip::types::KindData::Interface { methods } => {
@@ -912,13 +956,23 @@ fn write_buildinfo<W: Write>(w: &mut W, info: &BuildInfo) -> io::Result<()> {
         writeln!(w, "path:          {p}")?;
     }
     if let Some(m) = &info.main {
-        let ver = if m.version.is_empty() { "(devel)" } else { &m.version };
+        let ver = if m.version.is_empty() {
+            "(devel)"
+        } else {
+            &m.version
+        };
         writeln!(w, "main module:   {}  {}", m.path, ver)?;
     }
     if !info.deps.is_empty() {
         writeln!(w)?;
         writeln!(w, "dependencies ({})", info.deps.len())?;
-        let max_path = info.deps.iter().map(|m| m.path.len()).max().unwrap_or(0).min(60);
+        let max_path = info
+            .deps
+            .iter()
+            .map(|m| m.path.len())
+            .max()
+            .unwrap_or(0)
+            .min(60);
         for m in &info.deps {
             writeln!(w, "  {:<path_w$}  {}", m.path, m.version, path_w = max_path)?;
         }
@@ -927,17 +981,26 @@ fn write_buildinfo<W: Write>(w: &mut W, info: &BuildInfo) -> io::Result<()> {
         writeln!(w)?;
         writeln!(w, "replacements ({})", info.replaces.len())?;
         for r in &info.replaces {
-            writeln!(w, "  {} {}  =>  {} {}", r.from.path, r.from.version, r.to.path, r.to.version)?;
+            writeln!(
+                w,
+                "  {} {}  =>  {} {}",
+                r.from.path, r.from.version, r.to.path, r.to.version
+            )?;
         }
     }
     if !info.settings.is_empty() {
         writeln!(w)?;
         writeln!(w, "build settings")?;
-        let max_key = info.settings.iter().map(|s| s.key.len()).max().unwrap_or(0).min(30);
+        let max_key = info
+            .settings
+            .iter()
+            .map(|s| s.key.len())
+            .max()
+            .unwrap_or(0)
+            .min(30);
         for s in &info.settings {
             writeln!(w, "  {:<k$}  {}", s.key, s.value, k = max_key)?;
         }
     }
     Ok(())
 }
-

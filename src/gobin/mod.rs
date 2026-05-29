@@ -67,7 +67,11 @@ pub struct Section {
 
 impl Section {
     pub fn contains_addr(&self, addr: u64) -> bool {
-        addr >= self.addr && addr < self.addr.saturating_add(self.vmsize.max(self.file_size as u64))
+        addr >= self.addr
+            && addr
+                < self
+                    .addr
+                    .saturating_add(self.vmsize.max(self.file_size as u64))
     }
 
     pub fn file_offset_of(&self, addr: u64) -> Option<usize> {
@@ -122,7 +126,8 @@ impl GoBinary {
     }
 
     pub fn file_offset_for_addr(&self, addr: u64) -> Option<usize> {
-        self.section_for_addr(addr).and_then(|s| s.file_offset_of(addr))
+        self.section_for_addr(addr)
+            .and_then(|s| s.file_offset_of(addr))
     }
 
     /// Read `len` bytes from the binary at the given runtime virtual address.
@@ -327,7 +332,9 @@ fn classify_mach_section(segname: &str, sectname: &str) -> SectionKind {
     }
     match (segname, sectname) {
         ("__TEXT", "__text") => SectionKind::Text,
-        ("__TEXT", "__rodata") | ("__DATA_CONST", "__const") | ("__TEXT", "__const") => SectionKind::ReadOnlyData,
+        ("__TEXT", "__rodata") | ("__DATA_CONST", "__const") | ("__TEXT", "__const") => {
+            SectionKind::ReadOnlyData
+        }
         ("__DATA", "__data") => SectionKind::Data,
         ("__DATA", "__noptrdata") => SectionKind::NoPtrData,
         ("__DATA", "__bss") | ("__DATA", "__noptrbss") => SectionKind::Bss,
@@ -476,7 +483,10 @@ fn finish(bytes: Vec<u8>, d: Described) -> Result<GoBinary> {
     if d.pclntab_offset >= bytes.len() || d.pclntab_offset + d.pclntab_size > bytes.len() {
         return Err(Error::BadPclntab {
             offset: d.pclntab_offset,
-            reason: format!("section bounds out of range (file is {} bytes)", bytes.len()),
+            reason: format!(
+                "section bounds out of range (file is {} bytes)",
+                bytes.len()
+            ),
         });
     }
     Ok(GoBinary {

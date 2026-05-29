@@ -26,7 +26,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::Error;
-use crate::gobin::{GoBinary, Container};
+use crate::gobin::{Container, GoBinary};
 use crate::pclntab::Function;
 use crate::Result;
 
@@ -87,20 +87,28 @@ pub fn write_symbols_as_elf(
         return Err(Error::Rewrite("input does not start with ELF magic".into()));
     }
     if bin.bytes[4] != ELFCLASS64 {
-        return Err(Error::Rewrite("--symbols-as elf only supports ELF64".into()));
+        return Err(Error::Rewrite(
+            "--symbols-as elf only supports ELF64".into(),
+        ));
     }
     if bin.bytes[5] != ELFDATA2LSB {
-        return Err(Error::Rewrite("--symbols-as elf only supports little-endian ELF".into()));
+        return Err(Error::Rewrite(
+            "--symbols-as elf only supports little-endian ELF".into(),
+        ));
     }
 
     // The original section header table lives at e_shoff; read its
     // contents so we can re-emit them in the new table at end-of-file.
     let original_shoff = u64::from_le_bytes(
-        bin.bytes[EHDR_E_SHOFF..EHDR_E_SHOFF + 8].try_into().unwrap(),
+        bin.bytes[EHDR_E_SHOFF..EHDR_E_SHOFF + 8]
+            .try_into()
+            .unwrap(),
     ) as usize;
-    let original_shnum =
-        u16::from_le_bytes(bin.bytes[EHDR_E_SHNUM..EHDR_E_SHNUM + 2].try_into().unwrap())
-            as usize;
+    let original_shnum = u16::from_le_bytes(
+        bin.bytes[EHDR_E_SHNUM..EHDR_E_SHNUM + 2]
+            .try_into()
+            .unwrap(),
+    ) as usize;
     let original_shstrndx = u16::from_le_bytes(
         bin.bytes[EHDR_E_SHSTRNDX..EHDR_E_SHSTRNDX + 2]
             .try_into()
@@ -126,8 +134,8 @@ pub fn write_symbols_as_elf(
     // sh_name on every original section header is an offset into this
     // table; we preserve those offsets by placing the original bytes
     // verbatim at the start of our combined strtab.
-    let orig_shstrtab_hdr = &original_shdrs[original_shstrndx * SHDR_SIZE
-        ..original_shstrndx * SHDR_SIZE + SHDR_SIZE];
+    let orig_shstrtab_hdr =
+        &original_shdrs[original_shstrndx * SHDR_SIZE..original_shstrndx * SHDR_SIZE + SHDR_SIZE];
     let orig_shstrtab_off =
         u64::from_le_bytes(orig_shstrtab_hdr[24..32].try_into().unwrap()) as usize;
     let orig_shstrtab_size =
@@ -136,9 +144,8 @@ pub fn write_symbols_as_elf(
         return Err(Error::Rewrite("original shstrtab overruns file".into()));
     }
     let mut shstrtab = Vec::with_capacity(orig_shstrtab_size + 64);
-    shstrtab.extend_from_slice(
-        &bin.bytes[orig_shstrtab_off..orig_shstrtab_off + orig_shstrtab_size],
-    );
+    shstrtab
+        .extend_from_slice(&bin.bytes[orig_shstrtab_off..orig_shstrtab_off + orig_shstrtab_size]);
     let shstrtab_symtab_off = shstrtab.len() as u32;
     shstrtab.extend_from_slice(b".symtab\0");
     let shstrtab_strtab_off = shstrtab.len() as u32;
@@ -161,12 +168,12 @@ pub fn write_symbols_as_elf(
     let mut symtab = Vec::with_capacity((functions.len() + 1) * SYM_SIZE);
     symtab.extend_from_slice(&[0u8; SYM_SIZE]);
     for (f, &name_off) in functions.iter().zip(strtab_offsets.iter()) {
-        symtab.extend_from_slice(&name_off.to_le_bytes());          // st_name
-        symtab.push(SYM_INFO_GLOBAL_FUNC);                          // st_info
-        symtab.push(0);                                             // st_other
-        symtab.extend_from_slice(&1u16.to_le_bytes());              // st_shndx; SHN_ABS would be cleaner but most tools accept any nonzero index. Use the first text section index instead.
-        symtab.extend_from_slice(&f.address.to_le_bytes());         // st_value
-        // st_size: distance to next function or 0 if unknown.
+        symtab.extend_from_slice(&name_off.to_le_bytes()); // st_name
+        symtab.push(SYM_INFO_GLOBAL_FUNC); // st_info
+        symtab.push(0); // st_other
+        symtab.extend_from_slice(&1u16.to_le_bytes()); // st_shndx; SHN_ABS would be cleaner but most tools accept any nonzero index. Use the first text section index instead.
+        symtab.extend_from_slice(&f.address.to_le_bytes()); // st_value
+                                                            // st_size: distance to next function or 0 if unknown.
         symtab.extend_from_slice(&0u64.to_le_bytes());
     }
     let symbol_count = functions.len() + 1;
@@ -212,8 +219,7 @@ pub fn write_symbols_as_elf(
     let mut text_shndx: u16 = 1;
     for i in 0..original_shnum {
         let off = i * SHDR_SIZE;
-        let sh_flags =
-            u64::from_le_bytes(original_shdrs[off + 8..off + 16].try_into().unwrap());
+        let sh_flags = u64::from_le_bytes(original_shdrs[off + 8..off + 16].try_into().unwrap());
         if sh_flags & 0x4 != 0 {
             text_shndx = i as u16;
             break;
@@ -235,16 +241,16 @@ pub fn write_symbols_as_elf(
     let new_shstrtab_shndx = new_shnum_before_extras as u16 + 2;
 
     out.extend_from_slice(&make_shdr(
-        shstrtab_symtab_off,                  // sh_name (index in our new .shstrtab)
-        SHT_SYMTAB,                           // sh_type
-        0,                                    // sh_flags (none for .symtab in stripped binary)
-        0,                                    // sh_addr (not loaded at runtime)
-        symtab_off,                           // sh_offset
-        symtab_size,                          // sh_size
-        new_strtab_shndx as u32,              // sh_link -> .strtab
-        1,                                    // sh_info; one local symbol (null entry)
-        8,                                    // sh_addralign
-        SYM_SIZE as u64,                      // sh_entsize
+        shstrtab_symtab_off,     // sh_name (index in our new .shstrtab)
+        SHT_SYMTAB,              // sh_type
+        0,                       // sh_flags (none for .symtab in stripped binary)
+        0,                       // sh_addr (not loaded at runtime)
+        symtab_off,              // sh_offset
+        symtab_size,             // sh_size
+        new_strtab_shndx as u32, // sh_link -> .strtab
+        1,                       // sh_info; one local symbol (null entry)
+        8,                       // sh_addralign
+        SYM_SIZE as u64,         // sh_entsize
     ));
     out.extend_from_slice(&make_shdr(
         shstrtab_strtab_off,
@@ -277,8 +283,7 @@ pub fn write_symbols_as_elf(
     // Patch the ELF header.
     out[EHDR_E_SHOFF..EHDR_E_SHOFF + 8].copy_from_slice(&new_shoff.to_le_bytes());
     out[EHDR_E_SHNUM..EHDR_E_SHNUM + 2].copy_from_slice(&new_shnum.to_le_bytes());
-    out[EHDR_E_SHSTRNDX..EHDR_E_SHSTRNDX + 2]
-        .copy_from_slice(&new_shstrtab_shndx.to_le_bytes());
+    out[EHDR_E_SHSTRNDX..EHDR_E_SHSTRNDX + 2].copy_from_slice(&new_shstrtab_shndx.to_le_bytes());
 
     fs::write(out_path, &out).map_err(Error::Io)?;
 

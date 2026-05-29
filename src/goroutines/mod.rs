@@ -110,8 +110,24 @@ pub fn find_spawns(bin: &GoBinary, pcln: &Pclntab<'_>) -> Result<Vec<GoroutineSp
 
     let mut out = Vec::new();
     match bin.arch {
-        Arch::X86_64 => scan_amd64(bin, text_bytes, text_start_va, &spawner_set, &by_addr, pcln, &mut out)?,
-        Arch::Aarch64 => scan_arm64(bin, text_bytes, text_start_va, &spawner_set, &by_addr, pcln, &mut out)?,
+        Arch::X86_64 => scan_amd64(
+            bin,
+            text_bytes,
+            text_start_va,
+            &spawner_set,
+            &by_addr,
+            pcln,
+            &mut out,
+        )?,
+        Arch::Aarch64 => scan_arm64(
+            bin,
+            text_bytes,
+            text_start_va,
+            &spawner_set,
+            &by_addr,
+            pcln,
+            &mut out,
+        )?,
         _ => unreachable!(),
     }
     Ok(out)
@@ -288,8 +304,16 @@ fn resolve_arm64_target(
         if candidate_adrp + 8 > text_bytes.len() {
             continue;
         }
-        let adrp = u32::from_le_bytes(text_bytes[candidate_adrp..candidate_adrp + 4].try_into().unwrap());
-        let add = u32::from_le_bytes(text_bytes[candidate_adrp + 4..candidate_adrp + 8].try_into().unwrap());
+        let adrp = u32::from_le_bytes(
+            text_bytes[candidate_adrp..candidate_adrp + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let add = u32::from_le_bytes(
+            text_bytes[candidate_adrp + 4..candidate_adrp + 8]
+                .try_into()
+                .unwrap(),
+        );
 
         // ADRP encoding: top byte 0x90 OR 0xb0 (the immlo bits steal
         // the high two bits). Easiest check: bits [31:24] roughly 0x90 to 0xb0.

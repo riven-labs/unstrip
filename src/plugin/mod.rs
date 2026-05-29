@@ -60,7 +60,8 @@ pub fn install(target: Target) -> Result<InstallReport> {
 
     let installed_at = dir.join(filename);
     let mut f = fs::File::create(&installed_at).map_err(crate::error::Error::Io)?;
-    f.write_all(contents.as_bytes()).map_err(crate::error::Error::Io)?;
+    f.write_all(contents.as_bytes())
+        .map_err(crate::error::Error::Io)?;
 
     Ok(InstallReport {
         target,
@@ -76,7 +77,12 @@ fn default_plugin_dir(target: Target) -> Result<PathBuf> {
         Target::Ida => {
             if cfg!(target_os = "windows") {
                 std::env::var("APPDATA")
-                    .map(|a| PathBuf::from(a).join("Hex-Rays").join("IDA Pro").join("plugins"))
+                    .map(|a| {
+                        PathBuf::from(a)
+                            .join("Hex-Rays")
+                            .join("IDA Pro")
+                            .join("plugins")
+                    })
                     .unwrap_or_else(|_| home.join(".idapro").join("plugins"))
             } else {
                 home.join(".idapro").join("plugins")
@@ -89,7 +95,10 @@ fn default_plugin_dir(target: Target) -> Result<PathBuf> {
                     .map(|a| PathBuf::from(a).join("Binary Ninja").join("plugins"))
                     .unwrap_or_else(|_| home.join(".binaryninja").join("plugins"))
             } else if cfg!(target_os = "macos") {
-                home.join("Library").join("Application Support").join("Binary Ninja").join("plugins")
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Binary Ninja")
+                    .join("plugins")
             } else {
                 home.join(".binaryninja").join("plugins")
             }
@@ -103,7 +112,9 @@ fn dirs_like_home() -> Result<PathBuf> {
         std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .map(PathBuf::from)
-            .map_err(|_| crate::error::Error::PluginInstall("no USERPROFILE or HOME env var".into()))
+            .map_err(|_| {
+                crate::error::Error::PluginInstall("no USERPROFILE or HOME env var".into())
+            })
     } else {
         std::env::var("HOME")
             .map(PathBuf::from)
@@ -117,16 +128,23 @@ mod tests {
 
     #[test]
     fn install_respects_env_override() {
-        let tmpdir = std::env::temp_dir().join(format!("unstrip-plugin-test-{}", std::process::id()));
+        let tmpdir =
+            std::env::temp_dir().join(format!("unstrip-plugin-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmpdir);
         std::env::set_var("UNSTRIP_PLUGIN_DIR", &tmpdir);
         for target in [Target::Ida, Target::Ghidra, Target::BinaryNinja] {
             let report = install(target).expect("install");
-            assert!(report.installed_at.exists(), "plugin file must exist after install");
+            assert!(
+                report.installed_at.exists(),
+                "plugin file must exist after install"
+            );
             assert!(report.installed_at.starts_with(&tmpdir));
             // File must be non-empty (template embedded successfully).
             let size = fs::metadata(&report.installed_at).unwrap().len();
-            assert!(size > 200, "plugin script too small ({size} bytes) for {target:?}");
+            assert!(
+                size > 200,
+                "plugin script too small ({size} bytes) for {target:?}"
+            );
         }
         std::env::remove_var("UNSTRIP_PLUGIN_DIR");
         let _ = fs::remove_dir_all(&tmpdir);

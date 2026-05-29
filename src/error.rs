@@ -20,11 +20,19 @@ pub enum Error {
     #[error("pclntab at offset 0x{offset:x}: {reason}")]
     BadPclntab { offset: usize, reason: String },
 
-    #[error("pclntab magic 0x{magic:08x} is not a supported Go version (want 0xfffffff1 for Go 1.20+)")]
+    #[error(
+        "pclntab magic 0x{magic:08x} is not a supported Go version (want 0xfffffff1 for Go 1.20+)"
+    )]
     UnsupportedPclntabVersion { magic: u32 },
 
-    #[error("read past end of pclntab: wanted {wanted} bytes at offset {offset}, have {available}")]
-    ShortRead { wanted: usize, offset: usize, available: usize },
+    #[error(
+        "read past end of pclntab: wanted {wanted} bytes at offset {offset}, have {available}"
+    )]
+    ShortRead {
+        wanted: usize,
+        offset: usize,
+        available: usize,
+    },
 
     #[error("string at offset {offset} is not valid utf-8")]
     BadString { offset: usize },

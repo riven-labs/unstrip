@@ -74,7 +74,10 @@ impl<'a> Pclntab<'a> {
         if data[4] != 0 || data[5] != 0 {
             return Err(Error::BadPclntab {
                 offset: bin.pclntab_offset,
-                reason: format!("expected zero pad at [4..6], got {:02x} {:02x}", data[4], data[5]),
+                reason: format!(
+                    "expected zero pad at [4..6], got {:02x} {:02x}",
+                    data[4], data[5]
+                ),
             });
         }
 
@@ -115,7 +118,10 @@ impl<'a> Pclntab<'a> {
             if off >= data.len() {
                 return Err(Error::BadPclntab {
                     offset: bin.pclntab_offset,
-                    reason: format!("{name}=0x{off:x} is past end of pclntab (0x{:x})", data.len()),
+                    reason: format!(
+                        "{name}=0x{off:x} is past end of pclntab (0x{:x})",
+                        data.len()
+                    ),
                 });
             }
         }
@@ -123,7 +129,11 @@ impl<'a> Pclntab<'a> {
         // textStart in the header is the runtime-resolved VA. If the binary
         // sets it to zero (rare, but happens for some shared objects), fall
         // back to the .text section address we discovered in the container.
-        let text_start = if text_start == 0 { bin.text_addr } else { text_start };
+        let text_start = if text_start == 0 {
+            bin.text_addr
+        } else {
+            text_start
+        };
 
         Ok(Pclntab {
             data,
@@ -215,7 +225,9 @@ impl<'a> Pclntab<'a> {
     /// physical function is reached.
     pub fn lookup_inline(&self, bin: &crate::gobin::GoBinary, pc: u64) -> Vec<InlineFrame> {
         let mut frames = Vec::new();
-        let Some(leaf) = self.lookup(pc) else { return frames };
+        let Some(leaf) = self.lookup(pc) else {
+            return frames;
+        };
         let physical_frame = InlineFrame {
             name: leaf.name.clone(),
             file: leaf.file.clone(),
@@ -237,7 +249,8 @@ impl<'a> Pclntab<'a> {
                 return frames;
             }
         };
-        let read_text_off = |i: usize| read_u32(self.data, self.funcdata_off + i * 8, self.little_endian).ok();
+        let read_text_off =
+            |i: usize| read_u32(self.data, self.funcdata_off + i * 8, self.little_endian).ok();
         let mut lo = 0;
         let mut hi = n;
         while lo < hi {
@@ -252,7 +265,12 @@ impl<'a> Pclntab<'a> {
             return frames;
         }
         let idx = lo - 1;
-        let Some(func_off) = read_u32(self.data, self.funcdata_off + idx * 8 + 4, self.little_endian).ok() else {
+        let Some(func_off) = read_u32(
+            self.data,
+            self.funcdata_off + idx * 8 + 4,
+            self.little_endian,
+        )
+        .ok() else {
             frames.push(physical_frame);
             return frames;
         };
@@ -276,7 +294,10 @@ impl<'a> Pclntab<'a> {
         }
         let npcdata = match read_u32(self.data, func_start + 28, self.little_endian) {
             Ok(v) => v as usize,
-            Err(_) => { frames.push(physical_frame); return frames; }
+            Err(_) => {
+                frames.push(physical_frame);
+                return frames;
+            }
         };
         let nfuncdata = self.data[func_start + 43] as usize;
 
@@ -296,7 +317,10 @@ impl<'a> Pclntab<'a> {
             self.little_endian,
         ) {
             Ok(v) => v,
-            Err(_) => { frames.push(physical_frame); return frames; }
+            Err(_) => {
+                frames.push(physical_frame);
+                return frames;
+            }
         };
         if inltree_funcdata == u32::MAX {
             frames.push(physical_frame);
@@ -307,17 +331,21 @@ impl<'a> Pclntab<'a> {
         // PCDATA_InlTreeIndex: offset into pctab. The pc-value table is
         // decoded with the current PC offset (relative to function entry) to
         // produce the current inltree index, or -1 for "not inlined here".
-        let pcdata_inltree_off = match read_u32(self.data, pcdata_off + PCDATA_INLTREE_INDEX * 4, self.little_endian) {
+        let pcdata_inltree_off = match read_u32(
+            self.data,
+            pcdata_off + PCDATA_INLTREE_INDEX * 4,
+            self.little_endian,
+        ) {
             Ok(v) => v as usize,
-            Err(_) => { frames.push(physical_frame); return frames; }
+            Err(_) => {
+                frames.push(physical_frame);
+                return frames;
+            }
         };
         let func_entry_pc = self.text_start + read_text_off(idx).unwrap_or(0) as u64;
         let target_off = (pc - func_entry_pc) as u32;
-        let mut current_idx = pcvalue_at(
-            &self.data[self.pctab_off..],
-            pcdata_inltree_off,
-            target_off,
-        );
+        let mut current_idx =
+            pcvalue_at(&self.data[self.pctab_off..], pcdata_inltree_off, target_off);
 
         // Walk: each inlinedCall is 16 bytes (funcID+pad+nameOff+parentPc+startLine).
         // Cap the per-PC inline depth at 32. Real call chains are rarely deeper
@@ -336,17 +364,25 @@ impl<'a> Pclntab<'a> {
             }
             iter_guard += 1;
             let entry_addr = inltree_addr + (current_idx as u64) * 16;
-            let Some(entry) = bin.read_at_addr(entry_addr, 16) else { break };
+            let Some(entry) = bin.read_at_addr(entry_addr, 16) else {
+                break;
+            };
             let name_off = i32::from_le_bytes(entry[4..8].try_into().unwrap()) as usize;
             let parent_pc = i32::from_le_bytes(entry[8..12].try_into().unwrap());
             let start_line = i32::from_le_bytes(entry[12..16].try_into().unwrap());
 
-            let name = self.read_name(name_off).unwrap_or_else(|_| format!("inlined@{current_idx}"));
+            let name = self
+                .read_name(name_off)
+                .unwrap_or_else(|_| format!("inlined@{current_idx}"));
             let file_and_line = self.file_and_line_for_pc(func_start, current_pc_off);
             frames.push(InlineFrame {
                 name,
                 file: file_and_line.0,
-                line: file_and_line.1.or(if start_line > 0 { Some(start_line as u32) } else { None }),
+                line: file_and_line.1.or(if start_line > 0 {
+                    Some(start_line as u32)
+                } else {
+                    None
+                }),
                 inlined: true,
             });
 
@@ -367,7 +403,11 @@ impl<'a> Pclntab<'a> {
     /// Decode (file, line) at a specific PC offset within a function. Uses
     /// the function's pcfile and pcln pc-value tables, advanced to the
     /// target offset rather than just the first entry.
-    fn file_and_line_for_pc(&self, func_start: usize, target_off: u32) -> (Option<String>, Option<u32>) {
+    fn file_and_line_for_pc(
+        &self,
+        func_start: usize,
+        target_off: u32,
+    ) -> (Option<String>, Option<u32>) {
         let Ok(pcfile_off) = read_u32(self.data, func_start + 20, self.little_endian) else {
             return (None, None);
         };
@@ -378,7 +418,11 @@ impl<'a> Pclntab<'a> {
             return (None, None);
         };
 
-        let file_idx = pcvalue_at(&self.data[self.pctab_off..], pcfile_off as usize, target_off);
+        let file_idx = pcvalue_at(
+            &self.data[self.pctab_off..],
+            pcfile_off as usize,
+            target_off,
+        );
         let line = pcvalue_at(&self.data[self.pctab_off..], pcln_off as usize, target_off);
 
         let file = if file_idx >= 0 {
@@ -535,7 +579,6 @@ impl<'a> Pclntab<'a> {
         let file = self.resolve_file(cu_offset, file_idx as usize);
         Some((file, if line > 0 { Some(line as u32) } else { None }))
     }
-
 }
 
 /// Walk a pc-value table until `target_off` falls inside the current run.

@@ -56,14 +56,12 @@ pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Itab>> {
         )));
     }
     let n = md.itablinks.len as usize;
-    let table_bytes = bin
-        .read_at_addr(md.itablinks.data, n * 8)
-        .ok_or_else(|| {
-            Error::ItabRecovery(format!(
-                "itablinks at 0x{:x} (len {}) unmapped",
-                md.itablinks.data, md.itablinks.len
-            ))
-        })?;
+    let table_bytes = bin.read_at_addr(md.itablinks.data, n * 8).ok_or_else(|| {
+        Error::ItabRecovery(format!(
+            "itablinks at 0x{:x} (len {}) unmapped",
+            md.itablinks.data, md.itablinks.len
+        ))
+    })?;
 
     let mut out = Vec::with_capacity(n);
     for chunk in table_bytes.chunks_exact(8) {
@@ -88,8 +86,10 @@ fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Itab> {
     let type_ptr = u64::from_le_bytes(buf[8..16].try_into().unwrap());
     let hash = u32::from_le_bytes(buf[16..20].try_into().unwrap());
 
-    let interface_name = read_type_name(bin, md, inter_ptr).unwrap_or_else(|_| format!("iface@0x{inter_ptr:x}"));
-    let concrete_name = read_type_name(bin, md, type_ptr).unwrap_or_else(|_| format!("type@0x{type_ptr:x}"));
+    let interface_name =
+        read_type_name(bin, md, inter_ptr).unwrap_or_else(|_| format!("iface@0x{inter_ptr:x}"));
+    let concrete_name =
+        read_type_name(bin, md, type_ptr).unwrap_or_else(|_| format!("type@0x{type_ptr:x}"));
 
     // Try to read the interface's method list to learn how long the fun array
     // is and what each slot maps to. Failure here is non-fatal, we still
@@ -152,7 +152,11 @@ fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Itab> {
 /// dereferencing. Without that gate, an attacker-controlled `inter` pointer
 /// in a hostile itab could make us read a `methods_len` from arbitrary
 /// memory and then walk an N-sized array off that.
-fn read_interface_method_names(bin: &GoBinary, md: &ModuleData, inter_addr: u64) -> Result<Vec<String>> {
+fn read_interface_method_names(
+    bin: &GoBinary,
+    md: &ModuleData,
+    inter_addr: u64,
+) -> Result<Vec<String>> {
     if inter_addr < md.types || inter_addr >= md.etypes {
         return Err(Error::ItabRecovery(format!(
             "interface ptr 0x{inter_addr:x} not in types region [0x{:x}, 0x{:x})",
@@ -171,9 +175,9 @@ fn read_interface_method_names(bin: &GoBinary, md: &ModuleData, inter_addr: u64)
     }
     let arr = bin
         .read_at_addr(methods_data, methods_len as usize * 8)
-        .ok_or_else(|| Error::ItabRecovery(format!(
-            "imethod array at 0x{methods_data:x} unmapped"
-        )))?;
+        .ok_or_else(|| {
+            Error::ItabRecovery(format!("imethod array at 0x{methods_data:x} unmapped"))
+        })?;
     let mut out = Vec::with_capacity(methods_len as usize);
     for chunk in arr.chunks_exact(8) {
         let name_off = i32::from_le_bytes(chunk[0..4].try_into().unwrap());
@@ -188,7 +192,11 @@ fn read_type_name(bin: &GoBinary, md: &ModuleData, type_addr: u64) -> Result<Str
     let buf = bin
         .read_at_addr(type_addr, TYPE_HEADER_SIZE)
         .ok_or_else(|| Error::ItabRecovery(format!("type header at 0x{type_addr:x} unmapped")))?;
-    let str_off = i32::from_le_bytes(buf[TYPE_STR_OFFSET..TYPE_STR_OFFSET + 4].try_into().unwrap());
+    let str_off = i32::from_le_bytes(
+        buf[TYPE_STR_OFFSET..TYPE_STR_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
     let name_addr = md.types.wrapping_add(str_off as i64 as u64);
     types::read_name_public(bin, name_addr).map_err(|e| Error::ItabRecovery(e.to_string()))
 }

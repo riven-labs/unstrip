@@ -78,7 +78,8 @@ fn decode(bin: &GoBinary, header_offset: usize) -> Result<BuildInfo> {
     // layout. When 1.18/1.19 pclntab support lands, the pointer-format
     // decoder lands with it (under fixture coverage).
     Err(Error::BuildInfo(
-        "pre-Go-1.18 pointer-indirected buildinfo format is not supported (need Go 1.18+ binary)".into(),
+        "pre-Go-1.18 pointer-indirected buildinfo format is not supported (need Go 1.18+ binary)"
+            .into(),
     ))
 }
 
@@ -122,7 +123,8 @@ fn trim_modinfo_framing(raw: &[u8]) -> Result<&str> {
         )));
     }
     let inner = &raw[16..raw.len() - 16];
-    std::str::from_utf8(inner).map_err(|_| Error::BuildInfo("modinfo body is not valid utf-8".into()))
+    std::str::from_utf8(inner)
+        .map_err(|_| Error::BuildInfo("modinfo body is not valid utf-8".into()))
 }
 
 fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {

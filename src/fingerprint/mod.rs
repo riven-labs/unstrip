@@ -39,10 +39,7 @@ pub struct Components {
 
 /// Compute the fingerprint by extracting all the structural identity bits
 /// and hashing them in a canonical order.
-pub fn compute(
-    bin: &GoBinary,
-    pcln: &Pclntab<'_>,
-) -> Result<Fingerprint> {
+pub fn compute(bin: &GoBinary, pcln: &Pclntab<'_>) -> Result<Fingerprint> {
     let functions = pcln.functions().unwrap_or_default();
     let buildinfo = BuildInfo::parse(bin).ok();
     let md = ModuleData::locate(bin).ok();
@@ -94,12 +91,18 @@ pub fn compute_behavioral_from(itabs: &[Itab]) -> BehavioralFingerprint {
         hasher.update(b"\n");
     }
     let digest = hasher.finalize();
-    let sha256 = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let sha256 = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     BehavioralFingerprint {
         sha256,
         interface_count: counts.len(),
         total_implementations: counts.iter().map(|(_, c)| c).sum(),
-        counts: counts.into_iter().map(|(n, c)| (n.to_string(), c)).collect(),
+        counts: counts
+            .into_iter()
+            .map(|(n, c)| (n.to_string(), c))
+            .collect(),
     }
 }
 
@@ -131,7 +134,12 @@ pub fn compute_from(
     // builds with different lockfiles; we still include it because the
     // fingerprint should distinguish "same source, different dep versions".
     let mut deps: Vec<String> = buildinfo
-        .map(|b| b.deps.iter().map(|m| format!("{}@{}", m.path, m.version)).collect())
+        .map(|b| {
+            b.deps
+                .iter()
+                .map(|m| format!("{}@{}", m.path, m.version))
+                .collect()
+        })
         .unwrap_or_default();
     deps.sort();
     hasher.update(b"deps:\n");
@@ -185,7 +193,10 @@ pub fn compute_from(
     }
 
     let digest = hasher.finalize();
-    let sha256 = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let sha256 = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
 
     Fingerprint {
         sha256,
@@ -209,15 +220,73 @@ fn is_user_symbol(name: &str) -> bool {
     // Runtime and stdlib prefixes. Exhaustive enough that fingerprints stay
     // stable across Go minor versions while still including app code.
     const STDLIB_PREFIXES: &[&str] = &[
-        "runtime.", "runtime/", "internal/", "sync.", "sync/", "syscall.", "syscall/",
-        "reflect.", "reflect/", "fmt.", "fmt/", "io.", "io/", "os.", "os/", "errors.",
-        "strconv.", "strings.", "strings/", "bytes.", "bytes/", "encoding/", "crypto/",
-        "math.", "math/", "sort.", "sort/", "time.", "time/", "context.", "context/",
-        "bufio.", "bufio/", "regexp.", "regexp/", "path.", "path/", "net.", "net/",
-        "hash.", "hash/", "html.", "html/", "log.", "log/", "unicode.", "unicode/",
-        "compress/", "container/", "database/", "debug/", "image.", "image/", "mime.",
-        "mime/", "plugin.", "runtime_", "text.", "text/", "vendor/", "cmd/",
-        "type:", "type.", "go:", "go.", "_cgo_", "x_cgo_",
+        "runtime.",
+        "runtime/",
+        "internal/",
+        "sync.",
+        "sync/",
+        "syscall.",
+        "syscall/",
+        "reflect.",
+        "reflect/",
+        "fmt.",
+        "fmt/",
+        "io.",
+        "io/",
+        "os.",
+        "os/",
+        "errors.",
+        "strconv.",
+        "strings.",
+        "strings/",
+        "bytes.",
+        "bytes/",
+        "encoding/",
+        "crypto/",
+        "math.",
+        "math/",
+        "sort.",
+        "sort/",
+        "time.",
+        "time/",
+        "context.",
+        "context/",
+        "bufio.",
+        "bufio/",
+        "regexp.",
+        "regexp/",
+        "path.",
+        "path/",
+        "net.",
+        "net/",
+        "hash.",
+        "hash/",
+        "html.",
+        "html/",
+        "log.",
+        "log/",
+        "unicode.",
+        "unicode/",
+        "compress/",
+        "container/",
+        "database/",
+        "debug/",
+        "image.",
+        "image/",
+        "mime.",
+        "mime/",
+        "plugin.",
+        "runtime_",
+        "text.",
+        "text/",
+        "vendor/",
+        "cmd/",
+        "type:",
+        "type.",
+        "go:",
+        "go.",
+        "_cgo_",
+        "x_cgo_",
     ];
     !STDLIB_PREFIXES.iter().any(|p| name.starts_with(p))
 }

@@ -222,7 +222,9 @@ pub fn callees_from(edges: &[CallEdge], from: &str, depth: usize) -> Vec<String>
 /// Emit the call graph in Graphviz dot format. Pass through the dot
 /// formatter for `dot -Tsvg -o callgraph.svg` rendering.
 pub fn to_dot(edges: &[CallEdge]) -> String {
-    let mut s = String::from("digraph callgraph {\n  rankdir=LR;\n  node [shape=box, fontname=\"monospace\"];\n");
+    let mut s = String::from(
+        "digraph callgraph {\n  rankdir=LR;\n  node [shape=box, fontname=\"monospace\"];\n",
+    );
     let pairs = forward_graph(edges);
     for (caller, callee) in pairs {
         s.push_str(&format!("  {} -> {};\n", quote(&caller), quote(&callee)));
