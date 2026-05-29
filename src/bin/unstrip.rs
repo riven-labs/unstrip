@@ -156,6 +156,28 @@ struct Args {
     #[arg(long)]
     capabilities: bool,
 
+    /// Recover printable string literals from the binary's read-only
+    /// data regions (.rodata / .noptrdata on ELF; __rodata / __noptrdata
+    /// on Mach-O; .rdata on PE). Pair with --filter to search by
+    /// substring (e.g. "usage" surfaces the CLI banner on a stripped Go
+    /// tool, "https://" surfaces module homepages, env-var names like
+    /// "_NO_" surface configuration toggles). Garble does not rewrite
+    /// string literals in its default mode, so this is the surface that
+    /// identifies obfuscated binaries when symbols are hashed.
+    #[arg(long)]
+    strings: bool,
+
+    /// With --strings, the minimum printable-run length. Below 8 the
+    /// output is dominated by struct field name fragments and other
+    /// non-literal noise.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    strings_min: usize,
+
+    /// With --strings, cap the number of runs emitted at this count.
+    /// Useful for sampling on large binaries; defaults to unlimited.
+    #[arg(long, value_name = "N")]
+    strings_max: Option<usize>,
+
     /// Emit an RE-tool script that surfaces the recovered itab dispatch
     /// table when invoked at a virtual call site, then exit. Only Ghidra
     /// is supported today: run the resulting script in the Script Manager,
@@ -590,6 +612,29 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 f => return Err(format!("--fingerprint does not support --format {:?}", f).into()),
             }
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
+    if args.strings {
+        let opts = unstrip::strings::Options {
+            min_len: args.strings_min,
+            max: args.strings_max,
+            filter: args.filter.clone(),
+        };
+        let recovered = unstrip::strings::extract(&bin, &opts);
+        match args.format {
+            OutFormat::Json => {
+                serde_json::to_writer_pretty(&mut out, &recovered)?;
+                writeln!(out)?;
+            }
+            OutFormat::Text => {
+                for s in &recovered {
+                    writeln!(out, "0x{:016x}  {:<14}  {}", s.addr, s.section, s.text)?;
+                }
+            }
+            f => return Err(format!("--strings does not support --format {:?}", f).into()),
         }
         out.flush()?;
         return Ok(());

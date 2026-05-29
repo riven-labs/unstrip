@@ -16,6 +16,7 @@ pub mod pclntab;
 pub mod plugin;
 pub mod rewrite;
 pub mod stdlib;
+pub mod strings;
 pub mod types;
 pub mod xrefs;
 

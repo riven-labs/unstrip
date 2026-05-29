@@ -229,6 +229,60 @@ fn itabs_filter_matches_method_names() {
 }
 
 #[test]
+fn strings_recover_identifiable_literals_from_real_binary() {
+    // --strings on a real Go binary should surface human-readable
+    // literals from .rodata. Depsdemo links cobra, so the cobra usage
+    // string should appear; this is the "I can identify a binary by
+    // its CLI banner" workflow the field test depended on.
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let opts = unstrip::strings::Options {
+        min_len: 8,
+        max: None,
+        filter: None,
+    };
+    let all = unstrip::strings::extract(&bin, &opts);
+    assert!(
+        all.len() > 100,
+        "real Go binary should yield hundreds of >=8-char .rodata runs, got {}",
+        all.len()
+    );
+    // Cobra's standard usage banner is "Usage:" - it appears in every
+    // cobra-using binary's .rodata.
+    assert!(
+        all.iter().any(|s| s.text.contains("Usage:")),
+        "cobra binary must contain a 'Usage:' literal"
+    );
+}
+
+#[test]
+fn strings_substring_filter_is_applied() {
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let opts = unstrip::strings::Options {
+        min_len: 4,
+        max: None,
+        filter: Some("Usage".into()),
+    };
+    let hits = unstrip::strings::extract(&bin, &opts);
+    assert!(
+        !hits.is_empty(),
+        "filter for 'Usage' should produce at least one hit on a cobra binary"
+    );
+    for s in &hits {
+        assert!(
+            s.text.contains("Usage"),
+            "filtered string {:?} does not contain needle",
+            s.text
+        );
+    }
+}
+
+#[test]
 fn parses_buildinfo_with_real_deps() {
     let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
         return;
