@@ -537,6 +537,22 @@ fn capabilities_detects_cobra_dep() {
 }
 
 #[test]
+fn dispatch_resolver_ghidra_embeds_itabs() {
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let bin = GoBinary::open(&path).expect("open");
+    let md = unstrip::ModuleData::locate(&bin).expect("md");
+    let itabs_v = unstrip::itabs::recover_all(&bin, &md).expect("itabs");
+    assert!(!itabs_v.is_empty(), "fixture should have itabs");
+    let script = unstrip::dispatch::write_ghidra(&itabs_v);
+    assert!(script.contains("ITABS = ["), "script must define ITABS table");
+    assert!(script.contains("_resolve()"), "script must invoke resolver");
+    assert!(
+        script.contains("'interface':"),
+        "script must serialize interface entries"
+    );
+}
+
+#[test]
 fn diff_two_identical_rebuilds_yields_all_identical() {
     let Some(p1) = fixture("depsdemo.rebuild1.stripped") else { return };
     let Some(p2) = fixture("depsdemo.rebuild2.stripped") else { return };

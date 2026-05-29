@@ -1,6 +1,7 @@
 pub mod buildinfo;
 pub mod capabilities;
 pub mod diff;
+pub mod dispatch;
 pub mod error;
 pub mod export;
 pub mod fingerprint;

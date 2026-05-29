@@ -145,6 +145,16 @@ struct Args {
     #[arg(long)]
     capabilities: bool,
 
+    /// Emit an RE-tool script that surfaces the recovered itab dispatch
+    /// table when invoked at a virtual call site, then exit. Only Ghidra
+    /// is supported today: run the resulting script in the Script Manager,
+    /// then place the cursor on a `CALL [reg + slot*8]` instruction and
+    /// invoke "Unstrip: Resolve dispatch at cursor" from Tools to see every
+    /// recovered (interface, concrete) pair whose method table contains
+    /// that slot.
+    #[arg(long, value_name = "ghidra")]
+    dispatch_resolver: Option<String>,
+
     /// With `--diff`, emit a port-symbols script for the chosen RE tool
     /// instead of the text/json report. The script applies the names
     /// from the OLD binary at their new addresses in the binary you're
@@ -507,6 +517,21 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
             f => return Err(format!("--capabilities does not support --format {:?}", f).into()),
         }
+        out.flush()?;
+        return Ok(());
+    }
+
+    if let Some(target) = &args.dispatch_resolver {
+        let md = ModuleData::locate(&bin)?;
+        let itabs_v = itabs::recover_all(&bin, &md)?;
+        let script = match target.as_str() {
+            "ghidra" => unstrip::dispatch::write_ghidra(&itabs_v),
+            other => return Err(format!(
+                "--dispatch-resolver does not support '{}' yet (try 'ghidra')",
+                other
+            ).into()),
+        };
+        out.write_all(script.as_bytes())?;
         out.flush()?;
         return Ok(());
     }

@@ -270,6 +270,24 @@ $ unstrip ./sliver-client --goroutines | head
 
 When the target resolves (40-50% of sites in real binaries), you see exactly which function the goroutine runs. When the LEA pattern doesn't match the heuristic (the funcval came from a register or stack slot), the call site and source file:line still show so you can open the source. amd64 and arm64 only today.
 
+### Dispatch resolver for Ghidra
+
+`--dispatch-resolver ghidra` emits a Ghidra Python script that embeds the recovered itab dispatch table and, when invoked at a virtual call site, prints every `(interface, concrete impl)` pair whose method table contains the dereferenced slot:
+
+```
+$ unstrip ./target --dispatch-resolver ghidra > unstrip_dispatch.py
+# Inside Ghidra: Script Manager -> add unstrip_dispatch.py
+# Place cursor on `CALL qword ptr [reg + 0x18]` and run the action.
+# Output (console):
+#   unstrip dispatch: looking for itabs with a method at slot 3 (offset 0x18)
+#     io.Writer => *os.File :: Write -> 0x4b9020
+#     io.Writer => *bytes.Buffer :: Write -> 0x4c1a40
+#     io.Writer => *bufio.Writer :: Write -> 0x4cd900
+#   unstrip dispatch: 3 candidates
+```
+
+This turns virtual dispatch through an itab, the worst class of stripped-Go reversing target, into a five-second lookup. The slot-offset heuristic pulls the integer scalar from the call's second operand; combined with the itab table unstrip already recovers, you get the candidate target set without re-running any analysis. amd64 today; arm64 BLR/BR-through-register support is straightforward to add once we have a test fixture.
+
 ### Capabilities
 
 `--capabilities` matches the recovered types, itabs, and function names against a curated rule set and reports what the binary appears to do. First-pass answer to "what is this?":
