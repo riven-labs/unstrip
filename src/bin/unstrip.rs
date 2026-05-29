@@ -793,11 +793,25 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     serde_json::to_writer_pretty(&mut out, &result)?;
                     writeln!(out)?;
                 } else {
-                    for node in &result.nodes {
-                        writeln!(out, "{} -> {}", from, node.name)?;
+                    // Sort by depth so the BFS layering is visible at
+                    // the top of the output; ties broken by name for
+                    // stable ordering. Indent encodes depth from root.
+                    let mut sorted: Vec<&unstrip::xrefs::XrefNode> = result.nodes.iter().collect();
+                    sorted.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+                    writeln!(out, "{}", from)?;
+                    for node in sorted {
+                        writeln!(out, "{}{}", "  ".repeat(node.depth), node.name)?;
                     }
                     if result.truncated {
-                        eprintln!("warning: truncated at {} nodes", result.max_nodes);
+                        // Truncation footer goes to STDOUT (same stream
+                        // as the graph) so piping to `less` does not
+                        // hide it. The whole point of the cap is that
+                        // the operator must know they got truncated.
+                        writeln!(
+                            out,
+                            "... (truncated at {} nodes; raise --max-nodes)",
+                            result.max_nodes
+                        )?;
                     }
                 }
             }
@@ -807,11 +821,18 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     serde_json::to_writer_pretty(&mut out, &result)?;
                     writeln!(out)?;
                 } else {
-                    for node in &result.nodes {
-                        writeln!(out, "{} -> {}", node.name, to)?;
+                    let mut sorted: Vec<&unstrip::xrefs::XrefNode> = result.nodes.iter().collect();
+                    sorted.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+                    writeln!(out, "{}", to)?;
+                    for node in sorted {
+                        writeln!(out, "{}{}", "  ".repeat(node.depth), node.name)?;
                     }
                     if result.truncated {
-                        eprintln!("warning: truncated at {} nodes", result.max_nodes);
+                        writeln!(
+                            out,
+                            "... (truncated at {} nodes; raise --max-nodes)",
+                            result.max_nodes
+                        )?;
                     }
                 }
             }

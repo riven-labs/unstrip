@@ -164,6 +164,10 @@ pub fn forward_graph(edges: &[CallEdge]) -> Vec<(String, String)> {
 pub struct XrefNode {
     pub name: String,
     pub addr: Option<u64>,
+    /// BFS distance from the root passed to `callers_of` / `callees_from`.
+    /// Direct callers/callees are depth 1; their callers/callees are
+    /// depth 2; and so on up to the requested traversal depth.
+    pub depth: usize,
 }
 
 /// Result of a transitive xref BFS. `truncated` is true when the BFS
@@ -195,20 +199,22 @@ pub fn callers_of(edges: &[CallEdge], target: &str, depth: usize, max_nodes: usi
             .entry(e.caller_name.as_str())
             .or_insert(e.caller_addr);
     }
-    let mut seen = std::collections::BTreeSet::new();
+    let mut depth_of: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut truncated = false;
     let mut frontier: Vec<&str> = vec![target];
-    'outer: for _ in 0..depth {
+    'outer: for d in 1..=depth {
         let mut next = Vec::new();
         for f in &frontier {
             if let Some(callers) = by_callee.get(f) {
                 for c in callers {
-                    if seen.insert(c.to_string()) {
-                        next.push(*c);
-                        if seen.len() >= max_nodes {
-                            truncated = true;
-                            break 'outer;
-                        }
+                    if depth_of.contains_key(*c) {
+                        continue;
+                    }
+                    depth_of.insert((*c).to_string(), d);
+                    next.push(*c);
+                    if depth_of.len() >= max_nodes {
+                        truncated = true;
+                        break 'outer;
                     }
                 }
             }
@@ -218,11 +224,15 @@ pub fn callers_of(edges: &[CallEdge], target: &str, depth: usize, max_nodes: usi
         }
         frontier = next;
     }
-    let nodes = seen
+    let nodes = depth_of
         .into_iter()
-        .map(|name| {
+        .map(|(name, d)| {
             let addr = addr_of.get(name.as_str()).copied();
-            XrefNode { name, addr }
+            XrefNode {
+                name,
+                addr,
+                depth: d,
+            }
         })
         .collect();
     XrefResult {
@@ -251,20 +261,22 @@ pub fn callees_from(edges: &[CallEdge], from: &str, depth: usize, max_nodes: usi
             .entry(e.callee_name.as_str())
             .or_insert(e.callee_addr);
     }
-    let mut seen = std::collections::BTreeSet::new();
+    let mut depth_of: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut truncated = false;
     let mut frontier: Vec<&str> = vec![from];
-    'outer: for _ in 0..depth {
+    'outer: for d in 1..=depth {
         let mut next = Vec::new();
         for f in &frontier {
             if let Some(callees) = by_caller.get(f) {
                 for c in callees {
-                    if seen.insert(c.to_string()) {
-                        next.push(*c);
-                        if seen.len() >= max_nodes {
-                            truncated = true;
-                            break 'outer;
-                        }
+                    if depth_of.contains_key(*c) {
+                        continue;
+                    }
+                    depth_of.insert((*c).to_string(), d);
+                    next.push(*c);
+                    if depth_of.len() >= max_nodes {
+                        truncated = true;
+                        break 'outer;
                     }
                 }
             }
@@ -274,11 +286,15 @@ pub fn callees_from(edges: &[CallEdge], from: &str, depth: usize, max_nodes: usi
         }
         frontier = next;
     }
-    let nodes = seen
+    let nodes = depth_of
         .into_iter()
-        .map(|name| {
+        .map(|(name, d)| {
             let addr = addr_of.get(name.as_str()).copied();
-            XrefNode { name, addr }
+            XrefNode {
+                name,
+                addr,
+                depth: d,
+            }
         })
         .collect();
     XrefResult {

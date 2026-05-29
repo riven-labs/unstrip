@@ -886,6 +886,37 @@ fn xrefs_json_shape_has_root_direction_nodes_truncated() {
 }
 
 #[test]
+fn xrefs_node_depth_tracks_bfs_distance_from_root() {
+    // Depth-by-depth BFS layering is the surface --xrefs text output
+    // uses to indent: depth 1 = direct callees, depth 2 = their
+    // callees, etc. The text-mode formatter renders one entry per
+    // node prefixed by `"  ".repeat(depth)`, so every node must
+    // carry a depth in [1, requested_depth].
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let pcln = Pclntab::parse(&bin).expect("parse pclntab");
+    let edges = unstrip::xrefs::find_calls(&bin, &pcln).expect("find_calls");
+
+    let result = unstrip::xrefs::callees_from(&edges, "main.main", 3, usize::MAX);
+    assert!(!result.nodes.is_empty(), "expected at least one callee");
+    for node in &result.nodes {
+        assert!(
+            (1..=3).contains(&node.depth),
+            "node {} depth {} out of [1, 3]",
+            node.name,
+            node.depth
+        );
+    }
+    // Direct callees of main.main must appear at depth 1.
+    assert!(
+        result.nodes.iter().any(|n| n.depth == 1),
+        "BFS must find at least one direct callee at depth 1"
+    );
+}
+
+#[test]
 fn goroutines_finds_runtime_newproc_sites() {
     // Every real Go binary calls runtime.newproc at least a handful of
     // times for the GC's background workers (runtime.gcBgMarkWorker,
