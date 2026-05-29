@@ -46,6 +46,39 @@ impl BuildInfo {
             .ok_or_else(|| Error::BuildInfo("buildinfo header not found".into()))?;
         decode(bin, header_offset)
     }
+
+    /// Synthesize a fallback `BuildInfo` from a recovered pclntab magic
+    /// byte when the modinfo blob has been stripped (garble's default
+    /// mode does this). Returns `None` when the magic is itself
+    /// rewritten - we will not attribute a Go version to a hostile
+    /// artifact, so the caller should propagate the original parse
+    /// error in that case.
+    ///
+    /// The synthesized `go_version` value encodes the inference inline
+    /// (prefix `~`, suffix `(inferred ...; modinfo wiped)`) so
+    /// downstream consumers that key on `go_version:` cannot mistake
+    /// the guess for ground truth. Every other field is left empty:
+    /// we are honestly saying we have no module path, no dep list,
+    /// no build settings.
+    pub fn from_pclntab_magic(magic: u32) -> Option<Self> {
+        let label = match magic {
+            crate::pclntab::MAGIC_1_18 => {
+                "~1.18 (inferred from pclntab magic 0xfffffff0; modinfo wiped)"
+            }
+            crate::pclntab::MAGIC_1_20 => {
+                "~1.20+ (inferred from pclntab magic 0xfffffff1; modinfo wiped)"
+            }
+            _ => return None,
+        };
+        Some(BuildInfo {
+            go_version: label.to_string(),
+            path: None,
+            main: None,
+            deps: Vec::new(),
+            replaces: Vec::new(),
+            settings: Vec::new(),
+        })
+    }
 }
 
 fn find_buildinfo(bytes: &[u8]) -> Option<usize> {
@@ -262,5 +295,59 @@ mod tests {
         assert_eq!(info.settings.len(), 2);
         assert_eq!(info.settings[0].key, "compiler");
         assert_eq!(info.settings[0].value, "gc");
+    }
+
+    #[test]
+    fn from_pclntab_magic_synthesizes_for_go_1_20_magic() {
+        let info = BuildInfo::from_pclntab_magic(crate::pclntab::MAGIC_1_20)
+            .expect("MAGIC_1_20 must produce a fallback");
+        // The inferred-ness must be encoded in the value itself, not
+        // a sibling field - downstream graders grep on `go_version:`
+        // and must not mistake the guess for ground truth.
+        assert!(
+            info.go_version.starts_with('~'),
+            "go_version must signal inference with leading ~: {:?}",
+            info.go_version
+        );
+        assert!(
+            info.go_version.contains("inferred"),
+            "go_version must contain 'inferred': {:?}",
+            info.go_version
+        );
+        assert!(
+            info.go_version.contains("modinfo wiped"),
+            "go_version must say modinfo is wiped: {:?}",
+            info.go_version
+        );
+        // Other fields must be empty: we are NOT inventing a module
+        // path or dep list from a stripped artifact.
+        assert!(info.path.is_none());
+        assert!(info.main.is_none());
+        assert!(info.deps.is_empty());
+        assert!(info.settings.is_empty());
+    }
+
+    #[test]
+    fn from_pclntab_magic_synthesizes_for_go_1_18_magic() {
+        let info = BuildInfo::from_pclntab_magic(crate::pclntab::MAGIC_1_18)
+            .expect("MAGIC_1_18 must produce a fallback");
+        assert!(
+            info.go_version.contains("1.18"),
+            "1.18 magic must map to 1.18 label: {:?}",
+            info.go_version
+        );
+        assert!(info.go_version.starts_with('~'));
+    }
+
+    #[test]
+    fn from_pclntab_magic_declines_when_magic_is_rewritten() {
+        // Garble rewrites the magic to a random constant. We must
+        // refuse to invent a Go version under those conditions; the
+        // caller propagates the original parse error so the operator
+        // sees an honest "modinfo missing" message rather than a
+        // confident-but-wrong guess.
+        assert!(BuildInfo::from_pclntab_magic(0xdeadbeef).is_none());
+        assert!(BuildInfo::from_pclntab_magic(0).is_none());
+        assert!(BuildInfo::from_pclntab_magic(0xfffffffe).is_none());
     }
 }

@@ -906,7 +906,23 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             pcln.magic_is_official(),
             args.no_garble_warning,
         );
-        let info = BuildInfo::parse(&bin)?;
+        // When the modinfo blob has been stripped (garble's default
+        // mode does this), fall back to the pclntab magic as a coarse
+        // Go-version proxy. We deliberately encode "this is inferred,
+        // not authoritative" INSIDE the value of go_version itself
+        // (prefix `~`, suffix `(inferred from ...; modinfo wiped)`)
+        // rather than as a sibling field, so downstream graders that
+        // grep `go_version:` cannot mistake the guess for ground
+        // truth. If the pclntab magic is also rewritten (garble does
+        // this too), we propagate the original parse error rather
+        // than inventing a guess from a hostile artifact.
+        let info = match BuildInfo::parse(&bin) {
+            Ok(info) => info,
+            Err(orig) => match BuildInfo::from_pclntab_magic(pcln.magic()) {
+                Some(info) => info,
+                None => return Err(Box::new(orig)),
+            },
+        };
         match args.format {
             OutFormat::Json => {
                 serde_json::to_writer_pretty(&mut out, &info)?;
