@@ -517,6 +517,55 @@ fn extract_struct_decl(line: &str) -> Option<String> {
 }
 
 #[test]
+fn symbols_as_elf_writes_valid_symtab() {
+    // Rewrite a real stripped binary with --symbols-as elf and verify the
+    // resulting file has a valid Elf64_Sym table containing every function
+    // we recover. We don't shell out to nm; we parse the ELF directly so
+    // the test runs on any host.
+    use std::io::Read;
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let functions = pcln.functions().expect("functions");
+
+    let tmp = std::env::temp_dir().join(format!(
+        "unstrip-symbols-test-{}.bin",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+
+    let n = unstrip::rewrite::write_symbols_as_elf(&bin, &functions, &tmp, Some(&path))
+        .expect("rewrite");
+    assert_eq!(n, functions.len(), "should write one symbol per function");
+
+    // Re-open the written file and verify goblin can parse it and find
+    // our .symtab section with the right entry count.
+    let mut new_bytes = Vec::new();
+    std::fs::File::open(&tmp)
+        .expect("reopen")
+        .read_to_end(&mut new_bytes)
+        .expect("read");
+    let parsed = goblin::Object::parse(&new_bytes).expect("re-parse ELF");
+    let elf = match parsed {
+        goblin::Object::Elf(e) => e,
+        _ => panic!("output is not ELF"),
+    };
+    let symtab = elf
+        .section_headers
+        .iter()
+        .find(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".symtab"))
+        .expect("output must have a .symtab section");
+    // Elf64_Sym is 24 bytes; we wrote N+1 entries (null + one per function).
+    let expected_size = (functions.len() + 1) * 24;
+    assert_eq!(
+        symtab.sh_size as usize, expected_size,
+        ".symtab size should match (N+1) * sizeof(Elf64_Sym)"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
 fn rejects_non_go_binary() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("Cargo.toml");

@@ -98,6 +98,30 @@ struct Args {
     #[arg(long, value_name = "ida|ghidra|binja")]
     install_plugin: Option<String>,
 
+    /// Write a new binary containing a populated .symtab/.strtab built
+    /// from the recovered functions. The resulting file is byte-identical
+    /// to the input plus a few appended sections, so it still runs, but
+    /// `nm`, `gdb`, `objdump --syms`, `perf`, eBPF stack traces, and
+    /// `delve` all see the symbols. Today supports ELF64 little-endian
+    /// only.
+    #[arg(long, value_name = "elf")]
+    symbols_as: Option<String>,
+
+    /// With `--symbols-as`, write the result to this path. Defaults to
+    /// `<input>.symbols` next to the input.
+    #[arg(long, short = 'o', value_name = "PATH")]
+    output: Option<PathBuf>,
+
+    /// With `--symbols-as`, overwrite the input file in place. Mutually
+    /// exclusive with `--output`. Refuses to run without an explicit
+    /// `--yes` confirmation since this rewrites the original file.
+    #[arg(long)]
+    in_place: bool,
+
+    /// Confirm a destructive operation (currently only `--in-place`).
+    #[arg(long)]
+    yes: bool,
+
     /// Filter recovered functions (or types, with --types) by substring.
     #[arg(long)]
     filter: Option<String>,
@@ -158,6 +182,44 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
+
+    if let Some(target) = &args.symbols_as {
+        if target != "elf" {
+            return Err(format!("--symbols-as supports `elf` only today, got {target:?}").into());
+        }
+        let functions = pcln.functions()?;
+        let out_path = match (&args.output, args.in_place) {
+            (Some(_), true) => return Err("--output and --in-place are mutually exclusive".into()),
+            (Some(p), false) => p.clone(),
+            (None, true) => {
+                if !args.yes {
+                    return Err(
+                        "--in-place rewrites the input file; pass --yes to confirm".into(),
+                    );
+                }
+                binary_path.clone()
+            }
+            (None, false) => {
+                let mut p = binary_path.clone();
+                let mut fname = p
+                    .file_name()
+                    .map(|f| f.to_os_string())
+                    .unwrap_or_default();
+                fname.push(".symbols");
+                p.set_file_name(fname);
+                p
+            }
+        };
+        let n = unstrip::rewrite::write_symbols_as_elf(
+            &bin,
+            &functions,
+            &out_path,
+            Some(binary_path),
+        )?;
+        writeln!(out, "wrote {} symbols to {}", n, out_path.display())?;
+        out.flush()?;
+        return Ok(());
+    }
 
     if args.info {
         let version = detect_go_version(&bin.bytes);

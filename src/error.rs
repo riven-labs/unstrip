@@ -43,4 +43,7 @@ pub enum Error {
 
     #[error("plugin install: {0}")]
     PluginInstall(String),
+
+    #[error("rewrite: {0}")]
+    Rewrite(String),
 }

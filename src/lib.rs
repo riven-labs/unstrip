@@ -8,6 +8,7 @@ pub mod moduledata;
 pub mod output;
 pub mod pclntab;
 pub mod plugin;
+pub mod rewrite;
 pub mod stdlib;
 pub mod types;
 
