@@ -1,0 +1,477 @@
+use serde::Serialize;
+
+use crate::error::Error;
+use crate::gobin::GoBinary;
+use crate::moduledata::ModuleData;
+use crate::Result;
+
+/// A recovered Go type. v1 captures the universally-present header fields
+/// (size, kind, hash, name). Kind-specific decoding for slices, pointers,
+/// structs, and maps lives in [`KindData`]; we attempt those opportunistically
+/// and fall through to `Other` on failure rather than aborting a whole pass.
+#[derive(Debug, Clone, Serialize)]
+pub struct Type {
+    pub addr: u64,
+    pub name: String,
+    pub kind: KindName,
+    pub size: u64,
+    pub ptr_bytes: u64,
+    pub hash: u32,
+    pub tflag: u8,
+    pub kind_data: KindData,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
+pub enum KindName {
+    Invalid,
+    Bool,
+    Int,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Uint,
+    Uint8,
+    Uint16,
+    Uint32,
+    Uint64,
+    Uintptr,
+    Float32,
+    Float64,
+    Complex64,
+    Complex128,
+    Array,
+    Chan,
+    Func,
+    Interface,
+    Map,
+    Pointer,
+    Slice,
+    String,
+    Struct,
+    UnsafePointer,
+    Unknown(u8),
+}
+
+impl KindName {
+    pub fn from_byte(b: u8) -> Self {
+        // Kind enum values from `internal/abi/type.go`. The high bits are
+        // flags (KindDirectIface = 1<<5, KindGCProg = 1<<6); mask them off.
+        match b & 0x1f {
+            0 => KindName::Invalid,
+            1 => KindName::Bool,
+            2 => KindName::Int,
+            3 => KindName::Int8,
+            4 => KindName::Int16,
+            5 => KindName::Int32,
+            6 => KindName::Int64,
+            7 => KindName::Uint,
+            8 => KindName::Uint8,
+            9 => KindName::Uint16,
+            10 => KindName::Uint32,
+            11 => KindName::Uint64,
+            12 => KindName::Uintptr,
+            13 => KindName::Float32,
+            14 => KindName::Float64,
+            15 => KindName::Complex64,
+            16 => KindName::Complex128,
+            17 => KindName::Array,
+            18 => KindName::Chan,
+            19 => KindName::Func,
+            20 => KindName::Interface,
+            21 => KindName::Map,
+            22 => KindName::Pointer,
+            23 => KindName::Slice,
+            24 => KindName::String,
+            25 => KindName::Struct,
+            26 => KindName::UnsafePointer,
+            other => KindName::Unknown(other),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KindName::Invalid => "invalid",
+            KindName::Bool => "bool",
+            KindName::Int => "int",
+            KindName::Int8 => "int8",
+            KindName::Int16 => "int16",
+            KindName::Int32 => "int32",
+            KindName::Int64 => "int64",
+            KindName::Uint => "uint",
+            KindName::Uint8 => "uint8",
+            KindName::Uint16 => "uint16",
+            KindName::Uint32 => "uint32",
+            KindName::Uint64 => "uint64",
+            KindName::Uintptr => "uintptr",
+            KindName::Float32 => "float32",
+            KindName::Float64 => "float64",
+            KindName::Complex64 => "complex64",
+            KindName::Complex128 => "complex128",
+            KindName::Array => "array",
+            KindName::Chan => "chan",
+            KindName::Func => "func",
+            KindName::Interface => "interface",
+            KindName::Map => "map",
+            KindName::Pointer => "pointer",
+            KindName::Slice => "slice",
+            KindName::String => "string",
+            KindName::Struct => "struct",
+            KindName::UnsafePointer => "unsafe.Pointer",
+            KindName::Unknown(_) => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KindData {
+    None,
+    Pointer { elem: u64 },
+    Slice { elem: u64 },
+    Array { elem: u64, len: u64 },
+    Chan { elem: u64, dir: u64 },
+    Map { key: u64, elem: u64 },
+    Struct { fields: Vec<StructField> },
+    Interface { methods: Vec<InterfaceMethod> },
+    Func { in_count: u16, out_count: u16, variadic: bool },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InterfaceMethod {
+    pub name: String,
+    pub typ: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StructField {
+    pub name: String,
+    pub typ: u64,
+    pub offset: u64,
+    pub embedded: bool,
+}
+
+const TYPE_HEADER_SIZE_64: usize = 48;
+
+/// Walks the typelinks slice to recover every linked-in Go type, then
+/// follows each type's child references (pointer.elem, slice.elem, etc.) to
+/// pull in the dependent types, typelinks alone misses struct types when
+/// the program only ever holds the pointer flavor.
+///
+/// `typelinks` is a `[]int32` of offsets relative to `moduledata.types`.
+/// Each offset points at the start of a `_type` struct. We read the common
+/// header, resolve the name, dispatch to a kind-specific decoder, then queue
+/// any addresses the decoder produced and parse those too. Deduplicated by
+/// address; bounded by the [types, etypes) region.
+pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
+    let ps = bin.pointer_size();
+    if ps != 8 {
+        // 32-bit Go support exists but the offsets and struct sizes shift.
+        // Wire it in when we have a 32-bit fixture to test against.
+        return Err(Error::TypeRecovery(format!(
+            "type recovery requires pointer size 8, got {ps}"
+        )));
+    }
+
+    const MAX_TYPELINKS: u64 = 5_000_000;
+    if md.typelinks.len > MAX_TYPELINKS {
+        return Err(Error::TypeRecovery(format!(
+            "typelinks length {} exceeds sanity cap {}",
+            md.typelinks.len, MAX_TYPELINKS
+        )));
+    }
+
+    // Structural cap on total reachable types: the types region itself is
+    // bounded, and each type takes at least one header (48 bytes on 64-bit),
+    // so this is a hard ceiling regardless of what typelinks claims.
+    let types_region = md.etypes.saturating_sub(md.types) as usize;
+    let max_types = types_region / TYPE_HEADER_SIZE_64;
+
+    let typelinks_bytes = bin
+        .read_at_addr(md.typelinks.data, (md.typelinks.len as usize) * 4)
+        .ok_or_else(|| {
+            Error::TypeRecovery(format!(
+                "typelinks at 0x{:x} (len {}) is unmapped",
+                md.typelinks.data, md.typelinks.len
+            ))
+        })?;
+
+    let mut seen: std::collections::BTreeMap<u64, Type> = std::collections::BTreeMap::new();
+    let mut queue: Vec<u64> = Vec::with_capacity(md.typelinks.len as usize);
+    for chunk in typelinks_bytes.chunks_exact(4) {
+        let off = i32::from_le_bytes(chunk.try_into().unwrap());
+        queue.push(md.types.wrapping_add(off as i64 as u64));
+    }
+
+    while let Some(addr) = queue.pop() {
+        if seen.len() >= max_types {
+            // Hit the structural ceiling, every byte of the types region is
+            // claimed. Anything left in the queue is either a duplicate or
+            // pointing outside the region (and would be rejected below).
+            break;
+        }
+        if seen.contains_key(&addr) {
+            continue;
+        }
+        if addr < md.types || addr >= md.etypes {
+            continue;
+        }
+        let t = match parse_type(bin, md, addr) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        for child in child_addrs(&t.kind_data) {
+            // Only queue children inside the types region. Cuts attacker
+            // ability to make us walk arbitrary memory via crafted pointers.
+            // Cap the queue too so a wide fan-out can't blow memory before
+            // the seen-set ceiling stops processing.
+            if queue.len() >= 4 * max_types {
+                break;
+            }
+            if child >= md.types && child < md.etypes && !seen.contains_key(&child) {
+                queue.push(child);
+            }
+        }
+        seen.insert(addr, t);
+    }
+
+    Ok(seen.into_values().collect())
+}
+
+fn child_addrs(kd: &KindData) -> Vec<u64> {
+    match kd {
+        KindData::Pointer { elem } | KindData::Slice { elem } => vec![*elem],
+        KindData::Array { elem, .. } => vec![*elem],
+        KindData::Chan { elem, .. } => vec![*elem],
+        KindData::Map { key, elem } => vec![*key, *elem],
+        KindData::Struct { fields } => fields.iter().map(|f| f.typ).collect(),
+        KindData::Interface { methods } => methods.iter().map(|m| m.typ).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Type> {
+    let buf = bin
+        .read_at_addr(addr, TYPE_HEADER_SIZE_64)
+        .ok_or_else(|| Error::TypeRecovery(format!("type header at 0x{addr:x} unmapped")))?;
+
+    let size = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+    let ptr_bytes = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+    let hash = u32::from_le_bytes(buf[16..20].try_into().unwrap());
+    let tflag = buf[20];
+    let kind_byte = buf[23];
+    let str_off = i32::from_le_bytes(buf[40..44].try_into().unwrap());
+
+    let kind = KindName::from_byte(kind_byte);
+
+    let name_addr = md.types.wrapping_add(str_off as i64 as u64);
+    let name = read_name(bin, name_addr).unwrap_or_else(|_| format!("type@0x{addr:x}"));
+
+    let kind_data = decode_kind(bin, md, addr, kind).unwrap_or(KindData::None);
+
+    Ok(Type {
+        addr,
+        name,
+        kind,
+        size,
+        ptr_bytes,
+        hash,
+        tflag,
+        kind_data,
+    })
+}
+
+/// Public re-export of name resolution for other modules (itabs).
+pub fn read_name_public(bin: &GoBinary, addr: u64) -> Result<String> {
+    read_name(bin, addr)
+}
+
+/// Reads a Go runtime `Name` structure at `addr`. Format:
+///   byte 0: flag byte (bit 0 = exported, bit 1 = has tag, bit 3 = embedded)
+///   bytes 1..: varint length of the name
+///   next N bytes: the name itself (UTF-8)
+fn read_name(bin: &GoBinary, addr: u64) -> Result<String> {
+    let header = bin
+        .read_at_addr(addr, 1 + 10)
+        .ok_or_else(|| Error::TypeRecovery(format!("name header at 0x{addr:x} unmapped")))?;
+
+    let (len, varint_bytes) = read_varint(&header[1..])
+        .ok_or_else(|| Error::TypeRecovery(format!("varint at name 0x{addr:x} did not terminate")))?;
+
+    if len > 1 << 20 {
+        return Err(Error::TypeRecovery(format!("name length {len} unreasonably large")));
+    }
+
+    let total = 1 + varint_bytes + len as usize;
+    let body = bin
+        .read_at_addr(addr, total)
+        .ok_or_else(|| Error::TypeRecovery(format!("name body at 0x{addr:x} ({total} bytes) unmapped")))?;
+
+    let start = 1 + varint_bytes;
+    let s = std::str::from_utf8(&body[start..start + len as usize])
+        .map_err(|_| Error::TypeRecovery("name is not valid utf-8".into()))?;
+    Ok(s.to_string())
+}
+
+fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
+    // A varint encoding a u64 needs at most 10 bytes. Anything longer is
+    // malformed input and we reject rather than overshift.
+    const MAX_BYTES: usize = 10;
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    for (i, &b) in buf.iter().take(MAX_BYTES).enumerate() {
+        result |= ((b & 0x7f) as u64) << shift;
+        if b & 0x80 == 0 {
+            return Some((result, i + 1));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
+}
+
+/// Kind-specific decoding. Each kind's `_type` is followed by extra fields:
+///   Pointer:   elem *Type
+///   Slice:     elem *Type
+///   Array:     elem *Type, slice *Type, len uintptr
+///   Chan:      elem *Type, dir uintptr
+///   Map:       key *Type, elem *Type, bucket *Type, hasher fn, keysize, valuesize, ...
+///   Struct:    pkgpath Name, fields []structField (slice header), then the field array
+///   Interface: pkgpath Name, methods []imethod (slice header), then the method array
+///   Func:      inCount uint16, outCount uint16, ...args follow as *Type entries
+fn decode_kind(bin: &GoBinary, md: &ModuleData, type_addr: u64, kind: KindName) -> Result<KindData> {
+    let extra_addr = type_addr + TYPE_HEADER_SIZE_64 as u64;
+    match kind {
+        KindName::Pointer => {
+            let elem = read_uptr(bin, extra_addr)?;
+            Ok(KindData::Pointer { elem })
+        }
+        KindName::Slice => {
+            let elem = read_uptr(bin, extra_addr)?;
+            Ok(KindData::Slice { elem })
+        }
+        KindName::Array => {
+            let elem = read_uptr(bin, extra_addr)?;
+            let _slice = read_uptr(bin, extra_addr + 8)?;
+            let len = read_uptr(bin, extra_addr + 16)?;
+            Ok(KindData::Array { elem, len })
+        }
+        KindName::Chan => {
+            let elem = read_uptr(bin, extra_addr)?;
+            let dir = read_uptr(bin, extra_addr + 8)?;
+            Ok(KindData::Chan { elem, dir })
+        }
+        KindName::Map => {
+            let key = read_uptr(bin, extra_addr)?;
+            let elem = read_uptr(bin, extra_addr + 8)?;
+            Ok(KindData::Map { key, elem })
+        }
+        KindName::Struct => decode_struct(bin, md, extra_addr),
+        KindName::Interface => decode_interface(bin, md, extra_addr),
+        KindName::Func => {
+            // funcType: in/out counts come immediately after the header, but the
+            // header itself is followed by the funcType-specific fields which
+            // start with two uint16 counts.
+            let buf = bin
+                .read_at_addr(extra_addr, 4)
+                .ok_or_else(|| Error::TypeRecovery("func extra unmapped".into()))?;
+            let in_count = u16::from_le_bytes(buf[0..2].try_into().unwrap());
+            let raw_out = u16::from_le_bytes(buf[2..4].try_into().unwrap());
+            let variadic = raw_out & (1 << 15) != 0;
+            let out_count = raw_out & 0x7fff;
+            Ok(KindData::Func { in_count, out_count, variadic })
+        }
+        _ => Ok(KindData::None),
+    }
+}
+
+/// Struct extra layout (after _type header):
+///   pkgPath Name
+///   fields  slice header (data, len, cap)
+///   then each structField: { name Name, typ *Type, offset uintptr } = 24 bytes on 64-bit
+fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<KindData> {
+    let _pkg_path = read_uptr(bin, extra_addr)?;
+    let fields_data = read_uptr(bin, extra_addr + 8)?;
+    let fields_len = read_uptr(bin, extra_addr + 16)?;
+    if fields_len > 1024 {
+        return Err(Error::TypeRecovery(format!(
+            "struct field count {fields_len} unreasonably large"
+        )));
+    }
+
+    const FIELD_SIZE: usize = 24;
+    let total = fields_len as usize * FIELD_SIZE;
+    let buf = bin
+        .read_at_addr(fields_data, total)
+        .ok_or_else(|| Error::TypeRecovery(format!(
+            "struct fields array at 0x{fields_data:x} ({total} bytes) unmapped"
+        )))?;
+
+    let mut fields = Vec::with_capacity(fields_len as usize);
+    for i in 0..fields_len as usize {
+        let off = i * FIELD_SIZE;
+        let name_ptr = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        let typ = u64::from_le_bytes(buf[off + 8..off + 16].try_into().unwrap());
+        let offset = u64::from_le_bytes(buf[off + 16..off + 24].try_into().unwrap());
+
+        let (name, embedded) = read_name_with_flags(bin, name_ptr).unwrap_or((String::new(), false));
+        fields.push(StructField { name, typ, offset, embedded });
+    }
+    let _ = md;
+    Ok(KindData::Struct { fields })
+}
+
+fn read_name_with_flags(bin: &GoBinary, addr: u64) -> Result<(String, bool)> {
+    let header = bin
+        .read_at_addr(addr, 1 + 10)
+        .ok_or_else(|| Error::TypeRecovery(format!("name header at 0x{addr:x} unmapped")))?;
+    let flag_byte = header[0];
+    let embedded = flag_byte & (1 << 3) != 0;
+    let name = read_name(bin, addr)?;
+    Ok((name, embedded))
+}
+
+/// InterfaceType extra layout (after _type header):
+///   pkgPath Name (1 ptr = 8 bytes)
+///   methods slice header (data, len, cap = 24 bytes)
+/// Then [len]Imethod, each = (NameOff i32, TypeOff i32) = 8 bytes.
+fn decode_interface(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<KindData> {
+    let _pkg_path = read_uptr(bin, extra_addr)?;
+    let methods_data = read_uptr(bin, extra_addr + 8)?;
+    let methods_len = read_uptr(bin, extra_addr + 16)?;
+    if methods_len > 1024 {
+        return Err(Error::TypeRecovery(format!(
+            "interface method count {methods_len} unreasonably large"
+        )));
+    }
+    const IMETHOD_SIZE: usize = 8;
+    let total = methods_len as usize * IMETHOD_SIZE;
+    let buf = bin
+        .read_at_addr(methods_data, total)
+        .ok_or_else(|| {
+            Error::TypeRecovery(format!(
+                "interface methods array at 0x{methods_data:x} ({total} bytes) unmapped"
+            ))
+        })?;
+
+    let mut methods = Vec::with_capacity(methods_len as usize);
+    for i in 0..methods_len as usize {
+        let off = i * IMETHOD_SIZE;
+        let name_off = i32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+        let typ_off = i32::from_le_bytes(buf[off + 4..off + 8].try_into().unwrap());
+        let name_addr = md.types.wrapping_add(name_off as i64 as u64);
+        let typ_addr = md.types.wrapping_add(typ_off as i64 as u64);
+        let name = read_name(bin, name_addr).unwrap_or_else(|_| format!("method{i}"));
+        methods.push(InterfaceMethod { name, typ: typ_addr });
+    }
+    Ok(KindData::Interface { methods })
+}
+
+fn read_uptr(bin: &GoBinary, addr: u64) -> Result<u64> {
+    let buf = bin
+        .read_at_addr(addr, 8)
+        .ok_or_else(|| Error::TypeRecovery(format!("uintptr at 0x{addr:x} unmapped")))?;
+    Ok(u64::from_le_bytes(buf.try_into().unwrap()))
+}

@@ -1,0 +1,51 @@
+# Ghidra script: recover and apply Go symbols + types from the current program.
+# @category unstrip
+# @menupath Tools.Load Go symbols (unstrip)
+# @keybinding Ctrl-Shift-G
+# @runtime PyGhidra
+#
+# Shells out to the unstrip binary on $PATH against the currently-loaded
+# program's executable path. Pipes the emitted Ghidra Python script back
+# into the running interpreter so the symbols and types apply in-place.
+
+import os
+import subprocess
+import tempfile
+
+
+def run():
+    program = getCurrentProgram()
+    if program is None:
+        print("unstrip: no program loaded")
+        return
+    exe = program.getExecutablePath()
+    if not exe or not os.path.exists(exe):
+        print("unstrip: cannot locate executable on disk; got %r" % exe)
+        return
+
+    out_fd, out_path = tempfile.mkstemp(suffix=".py", prefix="unstrip_")
+    os.close(out_fd)
+    try:
+        rc = subprocess.call(
+            ["unstrip", exe, "--format", "ghidra"],
+            stdout=open(out_path, "w"),
+            stderr=subprocess.PIPE,
+        )
+        if rc != 0:
+            print("unstrip exited with code %d" % rc)
+            return
+        with open(out_path, "r") as f:
+            script = f.read()
+        # Run the emitted script in this script's globals so it has access
+        # to currentProgram, monitor, etc.
+        exec(compile(script, out_path, "exec"), globals())
+    except OSError as e:
+        print("unstrip: failed to invoke binary: %s" % e)
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+run()

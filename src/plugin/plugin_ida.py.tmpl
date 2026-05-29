@@ -1,0 +1,66 @@
+# IDA wrapper around the `unstrip` CLI.
+# Adds a "Load Go symbols (unstrip)" menu item under Edit -> Plugins.
+# Shells out to the unstrip binary on $PATH against the currently-loaded
+# input file and runs the emitted IDC script inline.
+
+import idaapi, ida_kernwin, ida_loader
+import os, subprocess, tempfile
+
+PLUGIN_NAME = "Load Go symbols (unstrip)"
+PLUGIN_HOTKEY = "Ctrl-Shift-G"
+
+
+def _resolve_input_path():
+    p = ida_loader.get_path(ida_loader.PATH_TYPE_CMD)
+    if p and os.path.exists(p):
+        return p
+    return ida_kernwin.ask_file(False, "*.*", "Locate the Go binary to recover symbols from")
+
+
+def _run():
+    binary = _resolve_input_path()
+    if not binary:
+        ida_kernwin.warning("unstrip: no input binary selected")
+        return
+    out_fd, out_path = tempfile.mkstemp(suffix=".py", prefix="unstrip_")
+    os.close(out_fd)
+    try:
+        rc = subprocess.call(
+            ["unstrip", binary, "--format", "ida"],
+            stdout=open(out_path, "w"),
+            stderr=subprocess.PIPE,
+        )
+        if rc != 0:
+            ida_kernwin.warning("unstrip exited with code %d" % rc)
+            return
+        with open(out_path, "r") as f:
+            exec(compile(f.read(), out_path, "exec"), {"__name__": "__unstrip__"})
+        ida_kernwin.info("unstrip: symbols loaded")
+    except FileNotFoundError:
+        ida_kernwin.warning("unstrip binary not found on PATH; install via `cargo install unstrip`")
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+class UnstripPlugin(idaapi.plugin_t):
+    flags = idaapi.PLUGIN_KEEP
+    comment = "Recover symbols, types, and itabs from stripped Go binaries."
+    help = "Run: Edit -> Plugins -> Load Go symbols (unstrip)"
+    wanted_name = PLUGIN_NAME
+    wanted_hotkey = PLUGIN_HOTKEY
+
+    def init(self):
+        return idaapi.PLUGIN_OK
+
+    def run(self, arg):
+        _run()
+
+    def term(self):
+        pass
+
+
+def PLUGIN_ENTRY():
+    return UnstripPlugin()

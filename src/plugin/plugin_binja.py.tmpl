@@ -1,0 +1,61 @@
+# Binary Ninja plugin: recover and apply Go symbols + types from the
+# currently-loaded BinaryView. Registers under Plugins -> Load Go symbols
+# (unstrip).
+
+import os
+import subprocess
+import tempfile
+
+from binaryninja import PluginCommand, BinaryView, show_message_box, MessageBoxButtonSet, MessageBoxIcon
+
+
+def _run(bv: BinaryView):
+    exe = bv.file.original_filename or bv.file.filename
+    if not exe or not os.path.exists(exe):
+        show_message_box(
+            "unstrip",
+            "Could not locate the binary on disk.",
+            MessageBoxButtonSet.OKButtonSet,
+            MessageBoxIcon.ErrorIcon,
+        )
+        return
+
+    out_fd, out_path = tempfile.mkstemp(suffix=".py", prefix="unstrip_")
+    os.close(out_fd)
+    try:
+        rc = subprocess.call(
+            ["unstrip", exe, "--format", "binja"],
+            stdout=open(out_path, "w"),
+            stderr=subprocess.PIPE,
+        )
+        if rc != 0:
+            show_message_box(
+                "unstrip",
+                "unstrip exited with code %d" % rc,
+                MessageBoxButtonSet.OKButtonSet,
+                MessageBoxIcon.ErrorIcon,
+            )
+            return
+        with open(out_path, "r") as f:
+            script = f.read()
+        # The emitted script expects `bv` in scope.
+        exec(compile(script, out_path, "exec"), {"bv": bv, "__name__": "__unstrip__"})
+    except FileNotFoundError:
+        show_message_box(
+            "unstrip",
+            "unstrip binary not on PATH. Install via `cargo install unstrip`.",
+            MessageBoxButtonSet.OKButtonSet,
+            MessageBoxIcon.ErrorIcon,
+        )
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+PluginCommand.register(
+    "Load Go symbols (unstrip)",
+    "Recover symbols, types, and itabs from stripped Go binaries.",
+    _run,
+)
