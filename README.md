@@ -359,7 +359,7 @@ for e in &graph.edges {
 
 `NodeKind::Physical` nodes are real pclntab functions with their entry PC as `addr`. `NodeKind::AnonymousInline` nodes carry their parent's PC plus the inline-tree start line, and their `addr` is a synthetic high-bit-tagged ID (`Node::is_anonymous_addr`) so they cannot collide with a real text VA. Anonymous-inline records appear when the compiler kept the inlined call's topology but the binary was built with `-tiny`, `-ldflags=-s -w`, or garble's name obfuscation, all of which zero the callee's `name_off`. The topology is intact in all these cases; only the name is gone.
 
-Witnessed format-stable across **Go 1.22 through 1.24** by the coverage probe (see `internal/inlinecov/REPORT.md`). Go 1.22 is the supported floor; Go 1.20 and 1.21 share the layout but are not witnessed by this codebase. Later toolchains (Go 1.26+) are best-effort. Garble's `entryoff` XOR rewrite provably does not touch the inline-tree FUNCDATA section, so the decoder runs unchanged on garble-obfuscated binaries (callee names come back obfuscated, not stripped).
+Witnessed format-stable across **Go 1.22 through 1.24** by the coverage probe (see `internal/inlinecov/REPORT.md`). Go 1.22 is the supported floor; Go 1.20 and 1.21 share the layout but are not witnessed by this codebase. Later toolchains (Go 1.26+) are best-effort pending witness. Garble's `entryoff` XOR rewrite provably does not touch the inline-tree FUNCDATA section, so the decoder runs unchanged on garble-obfuscated binaries (callee names come back obfuscated, not stripped).
 
 Direct (non-inlined) call edges land in v1.2 from pcdata reconstruction. `EdgeKind::Direct` is reserved now so adding it does not break callers; today only `EdgeKind::Inlined` is emitted.
 

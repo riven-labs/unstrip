@@ -11,7 +11,7 @@
 //! `runtime.inlinedCall` layout, same `FUNCDATA_InlTree=3`, same
 //! `PCDATA_InlTreeIndex=2`. Go 1.22 is the supported floor; Go 1.20
 //! and 1.21 share the layout but are not witnessed by this codebase.
-//! Later toolchains (Go 1.26+) are best-effort: the layout has been
+//! Later toolchains (Go 1.26+) are best-effort pending witness: the layout has been
 //! stable since Go 1.20 and is unlikely to drift soon, but a returned
 //! error on an unrecognized funcdata layout is the honest fallback if
 //! it does. Garble's `entryoff` XOR rewrite provably does not touch
