@@ -270,6 +270,33 @@ $ unstrip ./sliver-client --goroutines | head
 
 When the target resolves (40-50% of sites in real binaries), you see exactly which function the goroutine runs. When the LEA pattern doesn't match the heuristic (the funcval came from a register or stack slot), the call site and source file:line still show so you can open the source. amd64 and arm64 only today.
 
+### Capabilities
+
+`--capabilities` matches the recovered types, itabs, and function names against a curated rule set and reports what the binary appears to do. First-pass answer to "what is this?":
+
+```
+$ unstrip ./sliver-client --capabilities
+[crypto]
+  TLS client/server
+  X.509 / PKI
+  RSA, ECDSA, AES
+[network]
+  HTTP server, HTTP client, gRPC, DNS, raw TCP, raw UDP
+[offensive-hint]
+  shell command execution
+  raw socket / ICMP
+  Sliver C2 implant
+[process]
+  child process spawn
+  syscall direct invocation
+  signal handling
+[serialization]
+  JSON encoding
+  Protocol Buffers
+```
+
+The rules cover HTTP servers and clients, TLS, X.509, RSA/ECDSA/AES, AWS/GCP/Azure SDKs, Kubernetes client, Docker/containerd, SQL/SQLite/Postgres/Redis/MongoDB, JSON/proto/YAML, file and child-process operations, raw sockets, and known offensive frameworks (Sliver). Each match includes up to five evidence strings showing exactly which recovered type or function triggered it.
+
 ### Triage hints
 
 `--info` includes a count of stdlib interface implementations the binary ships. Useful for the first-pass question "does this binary speak HTTP, do crypto, write files?"

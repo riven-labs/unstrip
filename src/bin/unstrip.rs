@@ -138,6 +138,13 @@ struct Args {
     #[arg(long, value_name = "OLD_BINARY")]
     diff: Option<PathBuf>,
 
+    /// Match the recovered types, itabs, and functions against a curated
+    /// set of patterns and report what the binary appears to do: HTTP
+    /// server, AWS S3, child-process spawn, raw socket, Sliver implant,
+    /// etc. First-pass triage answer to "what is this binary?".
+    #[arg(long)]
+    capabilities: bool,
+
     /// With `--diff`, emit a port-symbols script for the chosen RE tool
     /// instead of the text/json report. The script applies the names
     /// from the OLD binary at their new addresses in the binary you're
@@ -457,6 +464,48 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 f => return Err(format!("--fingerprint does not support --format {:?}", f).into()),
             }
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
+    if args.capabilities {
+        let functions = pcln.functions().unwrap_or_default();
+        let (types_v, itabs_v) = match ModuleData::locate(&bin) {
+            Ok(md) => {
+                let t = unstrip::types::recover_all(&bin, &md).unwrap_or_default();
+                let i = itabs::recover_all(&bin, &md).unwrap_or_default();
+                (t, i)
+            }
+            Err(_) => (Vec::new(), Vec::new()),
+        };
+        let report = unstrip::capabilities::compute(&functions, &types_v, &itabs_v);
+        match args.format {
+            OutFormat::Json => {
+                serde_json::to_writer_pretty(&mut out, &report)?;
+                writeln!(out)?;
+            }
+            OutFormat::Text => {
+                if report.capabilities.is_empty() {
+                    writeln!(out, "no capabilities matched.")?;
+                } else {
+                    let mut by_cat: std::collections::BTreeMap<&str, Vec<&unstrip::capabilities::Capability>> =
+                        std::collections::BTreeMap::new();
+                    for c in &report.capabilities {
+                        by_cat.entry(c.category).or_default().push(c);
+                    }
+                    for (cat, items) in by_cat {
+                        writeln!(out, "[{cat}]")?;
+                        for c in items {
+                            writeln!(out, "  {}", c.name)?;
+                            for e in c.evidence.iter().take(3) {
+                                writeln!(out, "      {e}")?;
+                            }
+                        }
+                    }
+                }
+            }
+            f => return Err(format!("--capabilities does not support --format {:?}", f).into()),
         }
         out.flush()?;
         return Ok(());

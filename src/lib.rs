@@ -1,4 +1,5 @@
 pub mod buildinfo;
+pub mod capabilities;
 pub mod diff;
 pub mod error;
 pub mod export;

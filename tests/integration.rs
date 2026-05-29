@@ -517,6 +517,26 @@ fn extract_struct_decl(line: &str) -> Option<String> {
 }
 
 #[test]
+fn capabilities_detects_cobra_dep() {
+    // depsdemo links cobra and only cobra. The capability set should
+    // include "shell command execution" via os/exec.Command which cobra
+    // imports for shell completion. (If the set comes back empty
+    // entirely, the matcher's broken.)
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let funcs = pcln.functions().expect("funcs");
+    let md = unstrip::ModuleData::locate(&bin).expect("md");
+    let types_v = unstrip::types::recover_all(&bin, &md).expect("types");
+    let itabs_v = unstrip::itabs::recover_all(&bin, &md).expect("itabs");
+    let report = unstrip::capabilities::compute(&funcs, &types_v, &itabs_v);
+    assert!(
+        !report.capabilities.is_empty(),
+        "real Go binary should match at least one capability"
+    );
+}
+
+#[test]
 fn diff_two_identical_rebuilds_yields_all_identical() {
     let Some(p1) = fixture("depsdemo.rebuild1.stripped") else { return };
     let Some(p2) = fixture("depsdemo.rebuild2.stripped") else { return };
