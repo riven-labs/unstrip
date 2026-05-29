@@ -308,6 +308,256 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
+// ---------------------------------------------------------------------------
+//
+// Inlined call graph.
+//
+// `inline_callgraph` walks every physical function's `FUNCDATA_InlTree` and
+// stitches the inlined-call records into a directed graph. v1.1 ships
+// inlined edges only; pcdata-derived direct-call edges land in v1.2 (the
+// `EdgeKind::Direct` variant is reserved now so its addition does not
+// break callers).
+//
+// Edge semantics: `Edge { from, to, call_site, kind: Inlined }` means
+// "the physical function at `from` inlined a call at `call_site` whose
+// callee is the node at `to`". `call_site` is the link-time VA of the
+// inlined call within the physical caller's text.
+//
+// Node identity:
+//   - `NodeKind::Physical` nodes use the function's real entry PC as
+//     their `addr`. Every function in pclntab is emitted exactly once.
+//   - `NodeKind::AnonymousInline` nodes have no name (the compiler
+//     emitted `name_off == 0`, typically because `-tiny` zeroed it).
+//     They carry their parent's PC and their inline-tree start line,
+//     and their `addr` is a synthetic, deterministic ID drawn from the
+//     anonymous-ID space (high bit set) so they never collide with a
+//     real text VA. Two anonymous-inline records with the same
+//     `(parent_addr, parent_pc, start_line)` collapse to one node.
+//
+// Cycles: inline trees themselves are acyclic by Go compiler invariant
+// (the compiler will not inline a function into itself). Across
+// functions, an A->B inlined edge and a B->A inlined edge can both
+// exist when both directions inlined a peer call site — the graph
+// allows that. No cycle-breaking is performed; consumers walking the
+// graph are responsible for their own visit tracking if they need it.
+
+/// A node in the inlined call graph: either a physical function from
+/// pclntab or a synthetic anonymous-inline placeholder for an inlined
+/// call site whose callee name was stripped (`name_off == 0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Node {
+    /// Real text VA for `Physical` nodes; a synthetic high-bit-tagged
+    /// ID for `AnonymousInline` nodes (see [`Self::is_anonymous_addr`]).
+    pub addr: u64,
+    /// Function name. Empty string for anonymous-inline nodes.
+    pub name: String,
+    pub kind: NodeKind,
+}
+
+impl Node {
+    /// Synthetic anonymous-inline addresses have the top bit set so they
+    /// cannot collide with a 63-bit text VA produced by any real Go
+    /// binary on a 64-bit target.
+    const ANONYMOUS_ADDR_BIT: u64 = 1 << 63;
+
+    /// True if `addr` was synthesized by the anonymous-inline ID
+    /// generator rather than read out of pclntab.
+    pub fn is_anonymous_addr(addr: u64) -> bool {
+        addr & Self::ANONYMOUS_ADDR_BIT != 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeKind {
+    /// Real function from pclntab. `addr` is its link-time entry PC.
+    Physical,
+    /// Inlined callee whose name was stripped from the inline tree.
+    /// Topology is fully recovered; only the name is gone.
+    AnonymousInline {
+        /// Entry PC of the physical function the inlined record was
+        /// found in. Anchors the anonymous node to a real call site.
+        parent: u64,
+        /// `startLine` field from the inlined-call record.
+        start_line: i32,
+    },
+}
+
+/// An edge in the inlined call graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edge {
+    /// `addr` of the caller node.
+    pub from: u64,
+    /// `addr` of the callee node.
+    pub to: u64,
+    /// Link-time VA of the call site within the caller's text.
+    pub call_site: u64,
+    pub kind: EdgeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    /// The caller inlined the callee at `call_site`.
+    Inlined,
+    /// Reserved for v1.2 pcdata-derived direct-call edges. Not
+    /// emitted by [`inline_callgraph`] today.
+    Direct,
+}
+
+/// The inlined call graph for a Go binary.
+///
+/// Built by [`inline_callgraph`]; see the function's docs for the
+/// Go envelope this is witnessed on.
+#[derive(Debug, Clone, Default)]
+pub struct CallGraph {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+}
+
+impl CallGraph {
+    /// Look up a node by `addr`. O(n); for callers walking the graph
+    /// in bulk, build a `HashMap<u64, &Node>` once.
+    pub fn node(&self, addr: u64) -> Option<&Node> {
+        self.nodes.iter().find(|n| n.addr == addr)
+    }
+
+    /// All outgoing edges from `from`. O(n).
+    pub fn edges_from(&self, from: u64) -> impl Iterator<Item = &Edge> {
+        self.edges.iter().filter(move |e| e.from == from)
+    }
+
+    /// All incoming edges to `to`. O(n).
+    pub fn edges_to(&self, to: u64) -> impl Iterator<Item = &Edge> {
+        self.edges.iter().filter(move |e| e.to == to)
+    }
+}
+
+/// Build the inlined call graph for `bin`.
+///
+/// For every physical function recovered from `pcln`, decodes its
+/// `FUNCDATA_InlTree` and emits one `Edge` per inlined call record
+/// (those with `parent_pc != -1` — the `-1` root entry represents
+/// the physical function itself and produces no edge). Inlined
+/// callees with a resolvable name dedupe across the binary (one
+/// `Node` per distinct name); anonymous-inline records dedupe within
+/// their parent function by `(parent, parent_pc, start_line)`.
+///
+/// Witnessed across Go 1.22-1.24 by the coverage probe (see
+/// `internal/inlinecov/REPORT.md`). Garble-obfuscated binaries
+/// produce a graph with obfuscated callee names; structure is
+/// unchanged.
+pub fn inline_callgraph(bin: &GoBinary, pcln: &Pclntab) -> Result<CallGraph> {
+    use std::collections::HashMap;
+
+    let funcs = pcln.functions_with_offsets()?;
+
+    let mut graph = CallGraph::default();
+    // Track named-callee nodes by name so we emit one per distinct
+    // inlined callee, not one per call site.
+    let mut named_nodes: HashMap<String, u64> = HashMap::new();
+    // Track anonymous-inline nodes by their identity tuple within
+    // their parent function so the same inlined record across
+    // multiple PCs collapses to one node.
+    let mut anon_nodes: HashMap<(u64, i32, i32), u64> = HashMap::new();
+    // Dedupe edges by full identity so a parent function recorded
+    // twice in the corpus does not produce duplicate edges.
+    let mut edge_keys: std::collections::HashSet<(u64, u64, u64)> =
+        std::collections::HashSet::new();
+    // Counter for synthesizing anonymous-inline addresses.
+    let mut next_anon: u64 = 1;
+
+    // Emit a Physical node for every real function. Some of these
+    // will have no inline tree at all (the ~50% of Go functions
+    // that inline nothing) — they remain in the graph as isolated
+    // nodes so consumers can iterate every function uniformly.
+    for f in &funcs {
+        graph.nodes.push(Node {
+            addr: f.address,
+            name: f.name.clone(),
+            kind: NodeKind::Physical,
+        });
+        named_nodes.insert(f.name.clone(), f.address);
+    }
+
+    for f in &funcs {
+        let entries = match decode_inline_tree(bin, pcln, f) {
+            Ok(v) => v,
+            // A single function with a corrupt inline tree must not
+            // poison the whole graph. Skip it; its physical node is
+            // already in the graph.
+            Err(_) => continue,
+        };
+
+        for entry in &entries {
+            // parent_pc == -1 marks the synthetic root entry that
+            // represents the physical function itself, not an
+            // inlined call. No edge to emit.
+            if entry.parent_pc == -1 {
+                continue;
+            }
+
+            let call_site = f.address.wrapping_add(entry.parent_pc as u64);
+            let resolved = resolve_leaf_name(pcln, entry);
+
+            let callee_addr = match resolved {
+                Some(name) => *named_nodes.entry(name.clone()).or_insert_with(|| {
+                    // Inlined callee whose name we know but which has
+                    // no physical body in this binary (the compiler
+                    // fully inlined it away). Allocate a synthetic
+                    // address in the anonymous space and emit a node
+                    // labelled with the recovered name. The node's
+                    // kind stays AnonymousInline because we have no
+                    // physical entry PC to back it; the name is the
+                    // identity, the addr is just a handle.
+                    let addr = Node::ANONYMOUS_ADDR_BIT | next_anon;
+                    next_anon += 1;
+                    graph.nodes.push(Node {
+                        addr,
+                        name,
+                        kind: NodeKind::AnonymousInline {
+                            parent: f.address,
+                            start_line: entry.start_line,
+                        },
+                    });
+                    addr
+                }),
+                None => {
+                    // True anonymous-inline (name_off == 0). Dedupe
+                    // within the parent by (parent, parent_pc,
+                    // start_line); different parent_pcs within the
+                    // same function are distinct inlined call sites
+                    // and get distinct nodes.
+                    let key = (f.address, entry.parent_pc, entry.start_line);
+                    *anon_nodes.entry(key).or_insert_with(|| {
+                        let addr = Node::ANONYMOUS_ADDR_BIT | next_anon;
+                        next_anon += 1;
+                        graph.nodes.push(Node {
+                            addr,
+                            name: String::new(),
+                            kind: NodeKind::AnonymousInline {
+                                parent: f.address,
+                                start_line: entry.start_line,
+                            },
+                        });
+                        addr
+                    })
+                }
+            };
+
+            let ek = (f.address, callee_addr, call_site);
+            if edge_keys.insert(ek) {
+                graph.edges.push(Edge {
+                    from: f.address,
+                    to: callee_addr,
+                    call_site,
+                    kind: EdgeKind::Inlined,
+                });
+            }
+        }
+    }
+
+    Ok(graph)
+}
+
 fn read_u32(buf: &[u8], off: usize, little_endian: bool) -> Result<u32> {
     if off + 4 > buf.len() {
         return Err(Error::ShortRead {
