@@ -213,9 +213,11 @@ $ gdb -q helm.symbols -ex 'info functions main.main' -ex quit
 
 Use `--in-place --yes` to overwrite the input file. Today supports ELF64 little-endian only; Mach-O and PE rewrite ships later.
 
-### Diff two builds and port annotations
+### Port symbols between builds
 
-`--diff <OLD_BINARY>` compares two stripped binaries by recovered function set: pairs functions at the same address (`identical`), then pairs functions with the same Go name at different addresses (`renamed`), then reports what's `added` or `removed`. The "I renamed 400 functions in Ghidra on v1.0, v1.1 just dropped" workflow:
+`--diff <OLD_BINARY>` is a name-port helper, not a structural binary differ. It pairs functions across two builds in two passes: first by exact address match (`identical`), then by exact Go symbol name at a new address (`renamed`). Everything else falls into `added` or `removed`. It does not hash basic blocks, fingerprint control-flow graphs, or follow functions across inlining, splitting, or compiler-driven renames. If a function was inlined away, renamed by the toolchain, or restructured, this tool will report it as `removed` plus `added` rather than matching it.
+
+For real structural diffing across optimization and inlining changes, reach for BinDiff or Diaphora. `--diff` here exists for the narrow but common case where you annotated v1.0 in your disassembler, v1.1 just shipped, and you want the symbol names you already recovered to land on the obvious counterparts in the new build:
 
 ```
 $ unstrip ./malware-v1.1.bin --diff ./malware-v1.0.bin
