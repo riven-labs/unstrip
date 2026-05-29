@@ -181,6 +181,16 @@ $ unstrip ./samples/myapp --format ghidra > apply.py
 
 Function names sanitize down to valid disassembler labels; the original Go name (with parens, brackets, generics arguments) is preserved as a function comment.
 
+For a menu-item install instead of running the script every time:
+
+```
+unstrip --install-plugin ida      # installs to ~/.idapro/plugins/
+unstrip --install-plugin ghidra   # installs to ~/ghidra_scripts/
+unstrip --install-plugin binja    # installs to the Binary Ninja plugins dir
+```
+
+The IDA plugin registers as `Edit -> Plugins -> Load Go symbols (unstrip)` (hotkey `Ctrl-Shift-G`). The Ghidra installer drops a script under Script Manager. The Binary Ninja installer registers a `Plugins -> Load Go symbols (unstrip)` command. All three shell out to the `unstrip` binary on PATH against the currently-loaded program and apply the emitted script in-process.
+
 ### Behavioral classification
 
 `--info` includes a count of stdlib interface implementations the binary ships. Useful for fast triage: "does this binary speak HTTP, do crypto, write files?"

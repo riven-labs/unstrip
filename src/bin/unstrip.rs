@@ -37,8 +37,18 @@ struct Args {
     buildinfo: bool,
 
     /// Recover Go type information (names, kinds, sizes, struct fields), then exit.
+    /// Default mode (`Focused`) walks typelinks plus child references and
+    /// omits primitive leaves (`uint8`, `int32`, ...) and other catalog-
+    /// padding. For GoReSym-shape catalog breadth, also pass `--types-full`.
     #[arg(long)]
     types: bool,
+
+    /// With `--types`, also surface every type-header-shaped entry
+    /// in the `[md.types, md.etypes)` region the focused walk missed.
+    /// Produces a much larger catalog including primitive leaves. Use when
+    /// you want one-for-one parity with GoReSym's type count.
+    #[arg(long)]
+    types_full: bool,
 
     /// Recover (interface, concrete) pairs from runtime.itablinks, then exit.
     #[arg(long)]
@@ -361,7 +371,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.types {
         let md = ModuleData::locate(&bin)?;
-        let mut all = types::recover_all(&bin, &md)?;
+        let mode = if args.types_full {
+            types::Mode::Full
+        } else {
+            types::Mode::Focused
+        };
+        let mut all = types::recover_with_mode(&bin, &md, mode)?;
         if let Some(needle) = &args.filter {
             all.retain(|t| t.name.contains(needle));
         }

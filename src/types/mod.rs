@@ -131,10 +131,26 @@ pub enum KindData {
     Slice { elem: u64 },
     Array { elem: u64, len: u64 },
     Chan { elem: u64, dir: u64 },
-    Map { key: u64, elem: u64 },
+    Map {
+        key: u64,
+        elem: u64,
+        /// Address of the runtime's internal bucket struct holding the
+        /// hash/key/value/overflow layout. None when unmapped or truncated.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bucket: Option<u64>,
+    },
     Struct { fields: Vec<StructField> },
     Interface { methods: Vec<InterfaceMethod> },
-    Func { in_count: u16, out_count: u16, variadic: bool },
+    Func {
+        in_count: u16,
+        out_count: u16,
+        variadic: bool,
+        /// Addresses of input parameter type entries. Populated when the
+        /// funcType layout decode succeeds; empty otherwise.
+        in_types: Vec<u64>,
+        /// Addresses of output (return value) type entries.
+        out_types: Vec<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +169,82 @@ pub struct StructField {
 
 const TYPE_HEADER_SIZE_64: usize = 48;
 
+/// Recover types using the `Mode::Focused` strategy: typelinks-driven walk
+/// plus child reference following. Skips primitive-leaf entries and other
+/// catalog-padding the typelinks walk doesn't reach naturally. This is the
+/// default and produces the type set most analysts actually look up by name.
+pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
+    recover_with_mode(bin, md, Mode::Focused)
+}
+
+/// Recover types in the requested mode. `Mode::Full` adds a linear scan of
+/// `[md.types, md.etypes)` to surface every type-header-shaped entry the
+/// typelinks walk missed, matching GoReSym's catalog breadth for users
+/// who want one-for-one parity.
+pub fn recover_with_mode(bin: &GoBinary, md: &ModuleData, mode: Mode) -> Result<Vec<Type>> {
+    let mut types = recover_focused(bin, md)?;
+    if matches!(mode, Mode::Full) {
+        let seen: std::collections::HashSet<u64> = types.iter().map(|t| t.addr).collect();
+        let extras = linear_scan_types_region(bin, md, &seen);
+        types.extend(extras);
+    }
+    Ok(types)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Typelinks + child references. Default. Skips primitive leaves and
+    /// other catalog-padding entries.
+    Focused,
+    /// Focused, then linear-scan the types region for every type-header-shaped
+    /// entry we missed. Matches GoReSym's catalog breadth.
+    Full,
+}
+
+/// Linear scan the types region for any 48-byte chunks that look like
+/// `_type` headers we haven't already parsed. Catches primitive leaves
+/// (uint8, int32, ...) the typelinks walk doesn't reach.
+fn linear_scan_types_region(
+    bin: &GoBinary,
+    md: &ModuleData,
+    already_seen: &std::collections::HashSet<u64>,
+) -> Vec<Type> {
+    let mut out = Vec::new();
+    if md.etypes <= md.types {
+        return out;
+    }
+    let region_size = (md.etypes - md.types) as usize;
+    let Some(bytes) = bin.read_at_addr(md.types, region_size) else {
+        return out;
+    };
+
+    // Walk 8-byte-aligned offsets and try to parse a type header at each.
+    // Real types are aligned at uintptr boundaries; trying every 8 bytes
+    // catches them all without false-positive thrashing.
+    let mut offset = 0usize;
+    while offset + TYPE_HEADER_SIZE_64 <= bytes.len() {
+        let addr = md.types + offset as u64;
+        if already_seen.contains(&addr) {
+            offset += 8;
+            continue;
+        }
+        if let Ok(t) = parse_type(bin, md, addr) {
+            // Only emit if the header looks plausible: nonzero size, valid
+            // kind, non-empty resolvable name. Without these filters we
+            // emit hundreds of random false positives per binary.
+            if t.size > 0
+                && !matches!(t.kind, KindName::Invalid | KindName::Unknown(_))
+                && !t.name.is_empty()
+                && !t.name.starts_with("type@0x")
+            {
+                out.push(t);
+            }
+        }
+        offset += 8;
+    }
+    out
+}
+
 /// Walks the typelinks slice to recover every linked-in Go type, then
 /// follows each type's child references (pointer.elem, slice.elem, etc.) to
 /// pull in the dependent types, typelinks alone misses struct types when
@@ -163,7 +255,7 @@ const TYPE_HEADER_SIZE_64: usize = 48;
 /// header, resolve the name, dispatch to a kind-specific decoder, then queue
 /// any addresses the decoder produced and parse those too. Deduplicated by
 /// address; bounded by the [types, etypes) region.
-pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
+fn recover_focused(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
     let ps = bin.pointer_size();
     if ps != 8 {
         // 32-bit Go support exists but the offsets and struct sizes shift.
@@ -243,9 +335,23 @@ fn child_addrs(kd: &KindData) -> Vec<u64> {
         KindData::Pointer { elem } | KindData::Slice { elem } => vec![*elem],
         KindData::Array { elem, .. } => vec![*elem],
         KindData::Chan { elem, .. } => vec![*elem],
-        KindData::Map { key, elem } => vec![*key, *elem],
+        KindData::Map { key, elem, bucket } => {
+            let mut v = vec![*key, *elem];
+            if let Some(b) = bucket {
+                v.push(*b);
+            }
+            v
+        }
         KindData::Struct { fields } => fields.iter().map(|f| f.typ).collect(),
         KindData::Interface { methods } => methods.iter().map(|m| m.typ).collect(),
+        KindData::Func { in_types, out_types, .. } => {
+            // Walk callback signature types so struct types reachable only
+            // through function fields end up in the recovered graph.
+            let mut v = Vec::with_capacity(in_types.len() + out_types.len());
+            v.extend_from_slice(in_types);
+            v.extend_from_slice(out_types);
+            v
+        }
         _ => Vec::new(),
     }
 }
@@ -267,7 +373,7 @@ fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Type> {
     let name_addr = md.types.wrapping_add(str_off as i64 as u64);
     let name = read_name(bin, name_addr).unwrap_or_else(|_| format!("type@0x{addr:x}"));
 
-    let kind_data = decode_kind(bin, md, addr, kind).unwrap_or(KindData::None);
+    let kind_data = decode_kind(bin, md, addr, kind, tflag).unwrap_or(KindData::None);
 
     Ok(Type {
         addr,
@@ -341,7 +447,13 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
 ///   Struct:    pkgpath Name, fields []structField (slice header), then the field array
 ///   Interface: pkgpath Name, methods []imethod (slice header), then the method array
 ///   Func:      inCount uint16, outCount uint16, ...args follow as *Type entries
-fn decode_kind(bin: &GoBinary, md: &ModuleData, type_addr: u64, kind: KindName) -> Result<KindData> {
+fn decode_kind(
+    bin: &GoBinary,
+    md: &ModuleData,
+    type_addr: u64,
+    kind: KindName,
+    tflag: u8,
+) -> Result<KindData> {
     let extra_addr = type_addr + TYPE_HEADER_SIZE_64 as u64;
     match kind {
         KindName::Pointer => {
@@ -363,28 +475,112 @@ fn decode_kind(bin: &GoBinary, md: &ModuleData, type_addr: u64, kind: KindName) 
             let dir = read_uptr(bin, extra_addr + 8)?;
             Ok(KindData::Chan { elem, dir })
         }
-        KindName::Map => {
-            let key = read_uptr(bin, extra_addr)?;
-            let elem = read_uptr(bin, extra_addr + 8)?;
-            Ok(KindData::Map { key, elem })
-        }
+        KindName::Map => decode_map(bin, extra_addr),
         KindName::Struct => decode_struct(bin, md, extra_addr),
         KindName::Interface => decode_interface(bin, md, extra_addr),
-        KindName::Func => {
-            // funcType: in/out counts come immediately after the header, but the
-            // header itself is followed by the funcType-specific fields which
-            // start with two uint16 counts.
-            let buf = bin
-                .read_at_addr(extra_addr, 4)
-                .ok_or_else(|| Error::TypeRecovery("func extra unmapped".into()))?;
-            let in_count = u16::from_le_bytes(buf[0..2].try_into().unwrap());
-            let raw_out = u16::from_le_bytes(buf[2..4].try_into().unwrap());
-            let variadic = raw_out & (1 << 15) != 0;
-            let out_count = raw_out & 0x7fff;
-            Ok(KindData::Func { in_count, out_count, variadic })
-        }
+        KindName::Func => decode_func(bin, extra_addr, tflag),
         _ => Ok(KindData::None),
     }
+}
+
+/// FuncType extra layout (Go 1.18+, 64-bit):
+///   offset  0  InCount  (u16)
+///   offset  2  OutCount (u16, top bit = variadic)
+///   offset  4..  if TFlag bit 0 (TFlagUncommon) set: UncommonType (16 bytes)
+///   then       [InCount + OutCount] *Type
+///
+/// The parameter type pointers are the key piece. Without them, struct
+/// types reachable only through callback fields (cobra command handlers,
+/// grpc interceptors, anything passing functions as values) never make it
+/// into the recovered type graph.
+const TFLAG_UNCOMMON: u8 = 1;
+const UNCOMMON_TYPE_SIZE: usize = 16;
+
+fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
+    let buf = bin
+        .read_at_addr(extra_addr, 4)
+        .ok_or_else(|| Error::TypeRecovery("func extra unmapped".into()))?;
+    let in_count = u16::from_le_bytes(buf[0..2].try_into().unwrap());
+    let raw_out = u16::from_le_bytes(buf[2..4].try_into().unwrap());
+    let variadic = raw_out & (1 << 15) != 0;
+    let out_count = raw_out & 0x7fff;
+
+    // Sanity cap before allocating: a real Go function has at most a few
+    // dozen params. 1024 is a hard ceiling that prevents an attacker-
+    // controlled funcType from triggering a giant read.
+    const MAX_PARAMS: u16 = 1024;
+    if in_count > MAX_PARAMS || out_count > MAX_PARAMS {
+        return Ok(KindData::Func {
+            in_count,
+            out_count,
+            variadic,
+            in_types: Vec::new(),
+            out_types: Vec::new(),
+        });
+    }
+
+    let total_params = in_count as usize + out_count as usize;
+    if total_params == 0 {
+        return Ok(KindData::Func {
+            in_count,
+            out_count,
+            variadic,
+            in_types: Vec::new(),
+            out_types: Vec::new(),
+        });
+    }
+
+    // The parameter pointer array starts at extra_addr + 4 (past in/out counts),
+    // optionally offset by UncommonType (16 bytes) if TFlagUncommon is set.
+    let params_offset = 4usize + if tflag & TFLAG_UNCOMMON != 0 {
+        UNCOMMON_TYPE_SIZE
+    } else {
+        0
+    };
+    let params_addr = extra_addr + params_offset as u64;
+    let params_bytes = bin
+        .read_at_addr(params_addr, total_params * 8)
+        .ok_or_else(|| Error::TypeRecovery("func params array unmapped".into()))?;
+
+    let mut in_types = Vec::with_capacity(in_count as usize);
+    for i in 0..in_count as usize {
+        let off = i * 8;
+        let ptr = u64::from_le_bytes(params_bytes[off..off + 8].try_into().unwrap());
+        in_types.push(ptr);
+    }
+    let mut out_types = Vec::with_capacity(out_count as usize);
+    for i in 0..out_count as usize {
+        let off = (in_count as usize + i) * 8;
+        let ptr = u64::from_le_bytes(params_bytes[off..off + 8].try_into().unwrap());
+        out_types.push(ptr);
+    }
+
+    Ok(KindData::Func {
+        in_count,
+        out_count,
+        variadic,
+        in_types,
+        out_types,
+    })
+}
+
+/// MapType extra layout (Go 1.18+):
+///   offset  0  Key    *Type
+///   offset  8  Elem   *Type
+///   offset 16  Bucket *Type
+///   then       hasher, keysize, valuesize, bucketsize, flags
+///
+/// Surfacing the bucket type matters because it's a real struct in the
+/// types region holding the hash/key/value/overflow layout the runtime
+/// uses for map storage.
+fn decode_map(bin: &GoBinary, extra_addr: u64) -> Result<KindData> {
+    let key = read_uptr(bin, extra_addr)?;
+    let elem = read_uptr(bin, extra_addr + 8)?;
+    // The bucket pointer is the third *Type; if reading it fails (truncated
+    // or unmapped), fall back to None for bucket without failing the whole
+    // decode.
+    let bucket = read_uptr(bin, extra_addr + 16).ok();
+    Ok(KindData::Map { key, elem, bucket })
 }
 
 /// Struct extra layout (after _type header):

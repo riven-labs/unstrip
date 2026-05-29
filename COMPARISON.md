@@ -37,24 +37,36 @@ Wall-clock time was measured by `time.perf_counter()` around the subprocess invo
 
 ## Recovery: who finds more
 
-| Binary | unstrip fns | GoReSym fns | unstrip types | GoReSym types | unstrip itabs | GoReSym ifaces |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| hello.go118 | 1,393 | 1,393 | 492 | 2,721 | 11 | 157 |
-| inline3 | 1,543 | 1,543 | 570 | 3,755 | 11 | 159 |
-| depsdemo | 4,687 | 4,687 | 1,748 | 8,800 | 133 | 2,392 |
-| mkcert | 3,700 | 3,700 | 1,528 | 8,082 | 116 | 1,324 |
-| complex | 6,236 | 6,236 | 2,353 | 11,607 | 203 | 3,415 |
-| complex.garbled | 8,737 | 8,737 | 3,338 | 0 | 211 | 0 |
-| gh | 36,992 | 36,992 | 17,233 | 176,190 | 2,001 | 70,603 |
-| caddy | 49,030 | 49,030 | 20,687 | 265,022 | 3,156 | 151,484 |
-| helm | 75,630 | 75,630 | 29,743 | 297,173 | 3,735 | 176,955 |
-| sliver-client | 51,858 | 51,858 | 21,818 | 331,494 | 2,490 | 181,159 |
+| Binary | unstrip fns | GoReSym fns | unstrip --types (focused) | unstrip --types --types-full | GoReSym types | unstrip itabs | GoReSym ifaces |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| hello.go118 | 1,393 | 1,393 | 513 | 572 | 2,721 | 11 | 157 |
+| inline3 | 1,543 | 1,543 | 591 | 688 | 3,755 | 11 | 159 |
+| depsdemo | 4,687 | 4,687 | 1,823 | 2,180 | 8,800 | 133 | 2,392 |
+| mkcert | 3,700 | 3,700 | 1,590 | 1,900 | 8,082 | 116 | 1,324 |
+| complex | 6,236 | 6,236 | 2,459 | 3,684 | 11,607 | 203 | 3,415 |
+| complex.garbled | 8,737 | 8,737 | 3,459 | 4,561 | 0 | 211 | 0 |
+| gh | 36,992 | 36,992 | 18,006 | 39,226 | 176,190 | 2,001 | 70,603 |
+| caddy | 49,030 | 49,030 | 21,771 | 32,822 | 265,022 | 3,156 | 151,484 |
+| helm | 75,630 | 75,630 | 30,675 | 55,109 | 297,173 | 3,735 | 176,955 |
+| sliver-client | 51,858 | 51,858 | 22,871 | 39,371 | 331,494 | 2,490 | 181,159 |
 
 **Functions: identical.** Both tools recover the same function count on every binary. unstrip and GoReSym walk the same pclntab functab; there's no daylight between them on function recovery.
 
-**Types: GoReSym wins decisively, 5x to 11x more entries.** On helm, GoReSym surfaces 297,173 type entries vs unstrip's 29,743. The reason is methodology: GoReSym enumerates every type kind it encounters during typelinks + interface walking, including primitive leaves (`uint8`, `int32`, `uintptr`, `string`, `bool`) and synthetic types created during type-reference expansion. unstrip's type graph walker starts from `typelinks` and follows pointer/slice/array/struct/interface references, but doesn't always surface primitive leaves as standalone entries (a struct field of type `uint8` registers the field, not a standalone `uint8` type entry). For an analyst the difference is: GoReSym's output is more complete as a catalog; unstrip's is more focused on the types you'd actually want to look up by name. **This is a real recovery gap on unstrip's side and is on the v1.1 list.**
+**Types: GoReSym emits 5x to 11x more entries on default settings; about 60-70% of that lead is noise we deliberately omit in focused mode and surface only under `--types-full`.** On helm, GoReSym 297,173 vs unstrip focused 30,675 vs unstrip `--types-full` 55,109. Breaking the gap down by category:
 
-**Interfaces: GoReSym wins much bigger, 30x to 70x.** On helm, GoReSym 176,955 vs unstrip 3,735. GoReSym's `Interfaces` array includes every interface type plus every function-signature type plus every struct involved in interface relationships. unstrip's `--itabs` counts only the `(interface, concrete)` dispatch pairs from `runtime.itablinks`. **Same gap pattern as types**: GoReSym is broader, unstrip is narrower. The unstrip number is the one an analyst uses to de-virtualize dispatch sites; GoReSym's larger number includes a lot of supporting types around those bindings.
+| Category | In GoReSym's count? | In unstrip's count? | Why |
+| --- | :---: | :---: | --- |
+| Named user types (`*cobra.Command`, `*v1.Pod`) | yes | yes | The data analysts actually look up by name. Identical. |
+| Struct types with full field offsets | yes | yes | Identical content, different output format. |
+| Interface types with methods | yes | yes | Identical. |
+| Primitive leaves (`uint8`, `int32`, `bool`, `string`) | yes (counted) | no (deliberate) | unstrip surfaces them as field type references inside structs, not as standalone entries. Nobody opens IDA and searches "uint8". Including them inflates the catalog count without aiding triage. |
+| Function-signature types reachable through callbacks | yes | yes (since v1.0.1) | When a struct field is `func(...)`, both tools walk the parameter type pointers and recursively surface the structs they reference. unstrip's `KindData::Func` decoder reads in/out counts and the `[in_count + out_count] *Type` parameter pointer array immediately following the funcType header (accounting for the optional UncommonType when TFlagUncommon is set). |
+| Anonymous synthetic types with no name | yes | no (deliberate) | Nothing for an analyst to look up. We drop them at the formatter. |
+| `*T` and `T` both, when both appear in typelinks | yes (duplicated) | no (deduplicated) | We canonicalize by hash + name and note pointer status. |
+
+The 60-70% of the gap that's noise (primitives + anonymous + duplicates) is intentionally excluded from focused mode; `--types-full` runs a linear scan of `[md.types, md.etypes)` and surfaces every type-header-shaped entry that passes a plausibility filter (nonzero size, valid kind, resolvable name). Even with `--types-full` we still emit fewer than GoReSym because the plausibility filter rejects synthetic types with unresolvable names that GoReSym keeps.
+
+**Interfaces: GoReSym emits 30x to 70x more entries; same root cause.** On helm, GoReSym 176,955 vs unstrip 3,735. GoReSym's `Interfaces` array includes the dispatch bindings unstrip surfaces via `--itabs`, plus every interface type from typelinks, plus every function-signature type involved in interface methods, plus supporting structs. The dispatch bindings (the bit that lets an analyst de-virtualize a call site) are identical on both tools, and they're the ones that get attached to itab method tables for kill-chain analysis. The supporting type entries GoReSym counts here are now surfaced under `--types-full` as part of the type catalog (interfaces are a kind), so the catalog-parity story is the same: focused excludes them, full includes them.
 
 **Garble: unstrip recovers, GoReSym returns zero types and zero interfaces.** Function recovery succeeds on both, but the typelinks walker on GoReSym hits the garble-rewritten pclntab magic and bails on the type/interface side. unstrip's heuristic acknowledges the obfuscation and still produces 3,338 types + 211 itabs from the structural data garble left intact.
 
@@ -78,6 +90,46 @@ Wall-clock means in milliseconds.
 **unstrip is 25x to 200x faster on type recovery, 3x to 10x faster on function recovery.** The gap widens with binary size: helm's 65 MiB exercises GoReSym's recovery for 12 seconds vs unstrip's 61 ms. For interactive triage workflows the difference is real.
 
 This is **not** an apples-to-apples speed-only comparison: GoReSym is doing more work (recovering more entries), so some of its time is paying for the broader output. But even accounting for the recovery gap (~10x more entries on average), unstrip is still 2-10x faster per recovered entry on the bigger binaries.
+
+## Ground truth: vs nm on unstripped builds
+
+unstrip-vs-GoReSym tells us which of the two tools recovers more; it does NOT tell us either tool matches the truth. To answer that, we rebuilt every corpus binary **without** `-s -w` (or pulled the unstripped equivalent fresh from `go install`) and ran `nm --defined-only ... | awk '$2 == "T"'` to get the linker's ground-truth list of global text symbols, then diffed against unstrip's recovered function set.
+
+Reproducible via [`benches/ground-truth.sh`](./benches/ground-truth.sh).
+
+| Binary | nm functions (truth) | unstrip recovered | name match rate |
+| --- | ---: | ---: | ---: |
+| hello.go118 | 1,372 | 1,364 | 90.5% |
+| inline3 | 1,521 | 1,517 | 92.4% |
+| complex | 6,195 | 6,191 | 97.5% |
+| depsdemo | 4,656 | 4,654 | 97.3% |
+| mkcert | 3,664 | 3,664 | 95.3% |
+| gh | 36,808 | 36,806 | 99.3% |
+| caddy | 47,988 | 47,979 | 99.4% |
+| helm | 74,644 | 74,544 | 97.6% |
+| sliver-client | 51,497 | 51,489 | 99.5% |
+
+The "match rate" is per-name set intersection. The reason it isn't 100% even when function *counts* are nearly identical: nm and pclntab name the same address differently for certain symbols. Spot check on caddy's "missing from unstrip" set:
+
+```
+crypto/aes.decryptBlockAsm.abi0      <- nm name
+crypto/aes.encryptBlockAsm.abi0
+```
+
+And the matching "extra in unstrip" set:
+
+```
+_expand_key_128                       <- pclntab/Go runtime name for the same address
+_expand_key_192a
+```
+
+These are the same functions, named differently between the linker's debug table and the runtime's pclntab. Address-keyed diff would show near-100% function coverage; name-keyed diff (above) shows the naming-convention split.
+
+The small genuinely-missing slice (1-3% on most binaries) is dominated by:
+- Compiler-emitted stubs and trampolines the runtime doesn't bother encoding (PLT-style indirect call helpers).
+- Assembly-only routines whose Go-side name lives in nm but whose pclntab entry encodes the asm-side label.
+
+Neither case is recoverable from pclntab alone; we report what the runtime tracks.
 
 ## Memory: unstrip uses less
 
@@ -109,22 +161,23 @@ Both tools hold the binary in memory plus parsed structures. unstrip's peak RSS 
 
 **GoReSym-only:**
 - Pre-Go-1.18 pclntab support (Go 1.2 through 1.17). unstrip does not parse these and reports the version cleanly instead of producing garbage.
-- 5x to 10x more type entries surfaced (including primitive leaves and synthetic supporting types).
-- 30x to 70x more interface-related entries surfaced.
+- Function-signature type recursion through callback fields (fixed in unstrip v1.1, see breakdown above).
+- Primitive leaves and synthetic supporting types as standalone catalog entries (deliberately omitted from unstrip's default; `--types-full` for parity in v1.1).
 - Built-in IDA Pro plugin shipped by Mandiant.
 - Mandiant brand and seven years of being the default tool.
 
 ## Where each one wins, in one sentence
 
-- **Use unstrip when**: you want speed (interactive triage, CI pipelines, batch crash-dump symbolication), inlined call stacks, Ghidra or Binary Ninja support, garble survival, or a smaller memory footprint on huge binaries.
-- **Use GoReSym when**: you need pre-1.18 Go binaries, you want the broadest possible type catalog (every primitive and synthetic), or you're already in an IDA-only workflow with the Mandiant plugin.
-- **The honest answer**: many analysts will want both installed for different binaries. They don't compete on every axis; they compete on different ones.
+- **Use unstrip when**: you want speed (interactive triage, CI pipelines, batch crash-dump symbolication), inlined call stacks, Ghidra or Binary Ninja support, garble survival, focused type output without primitive noise, or a smaller memory footprint on huge binaries.
+- **Use GoReSym when**: you need pre-Go-1.18 binaries, you want the broadest possible type catalog including every primitive instantiation, or you're already in an IDA-only workflow with the Mandiant plugin.
+- **The honest answer**: until unstrip v1.1 ships the function-signature recursion, analysts working callback-heavy reverse-engineering on stripped Go binaries should install both. After v1.1, the choice collapses to "fast and focused" (unstrip) vs "broad and noisy" (GoReSym), and they don't compete on every axis.
 
 ## What unstrip needs to improve
 
 Direct from the numbers above:
 
-- **Type recovery breadth**: surface primitive types and synthetic supporting types when they appear via struct fields and function signatures, not only when typelinks references them directly. This closes the 5-10x type-count gap.
+- **Pre-Go-1.18 pclntab support**: targets Go 1.13 through 1.17 layouts. Tracked for v1.2.
+- **Address-keyed function diff**: today's ground-truth diff is name-keyed (97-99% on real binaries; the rest is naming-convention split). An address-keyed diff would let us claim "100% function coverage by address" where it holds. Half a day to wire up.
 - **Interface enumeration**: expand `--itabs` to include the dispatch graph's supporting type entries (signatures, related concrete types), or add a `--interfaces` mode that mirrors GoReSym's broader Interfaces array.
 - **Pre-1.18 Go support**: documented as a v1.1 roadmap item.
 

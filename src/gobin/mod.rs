@@ -135,6 +135,13 @@ impl GoBinary {
         if end_off > s.file_offset + s.file_size {
             return None;
         }
+        // Belt-and-suspenders: the section bookkeeping should keep us within
+        // self.bytes, but on some containers (PE with virtual_size > raw_size,
+        // truncated input) the section can extend past the file. Reject
+        // explicitly so callers see None instead of a panic.
+        if end_off > self.bytes.len() {
+            return None;
+        }
         Some(&self.bytes[start_off..end_off])
     }
 }
