@@ -213,6 +213,29 @@ $ gdb -q helm.symbols -ex 'info functions main.main' -ex quit
 
 Use `--in-place --yes` to overwrite the input file. Today supports ELF64 little-endian only; Mach-O and PE rewrite ships later.
 
+### Diff two builds and port annotations
+
+`--diff <OLD_BINARY>` compares two stripped binaries by recovered function set: pairs functions at the same address (`identical`), then pairs functions with the same Go name at different addresses (`renamed`), then reports what's `added` or `removed`. The "I renamed 400 functions in Ghidra on v1.0, v1.1 just dropped" workflow:
+
+```
+$ unstrip ./malware-v1.1.bin --diff ./malware-v1.0.bin
+old:        4687 functions
+new:        4823 functions
+
+identical:  4421
+renamed:    198
+moved addr: 12 (same address, different name)
+added:      192 (in new, not in old)
+removed:    68 (in old, not in new)
+```
+
+Pair with `--port-symbols ida|ghidra|binja` to emit a script that renames every paired function in the new binary using whatever name it had in the old one:
+
+```
+$ unstrip ./malware-v1.1.bin --diff ./malware-v1.0.bin --port-symbols ghidra > port.py
+# In Ghidra (with v1.1 loaded): Script Manager -> port.py
+```
+
 ### Cross-references and call graph
 
 `--xrefs` scans `.text` for direct CALL/BL targets and resolves each pair against the recovered function set. Combined with `--from`, `--to`, `--depth`, or `--callgraph`, it answers the questions an analyst opens IDA to ask:

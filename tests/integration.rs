@@ -517,6 +517,29 @@ fn extract_struct_decl(line: &str) -> Option<String> {
 }
 
 #[test]
+fn diff_two_identical_rebuilds_yields_all_identical() {
+    let Some(p1) = fixture("depsdemo.rebuild1.stripped") else { return };
+    let Some(p2) = fixture("depsdemo.rebuild2.stripped") else { return };
+
+    let bin1 = GoBinary::open(&p1).expect("open old");
+    let pcln1 = Pclntab::parse(&bin1).expect("parse old");
+    let bin2 = GoBinary::open(&p2).expect("open new");
+    let pcln2 = Pclntab::parse(&bin2).expect("parse new");
+
+    let old_funcs = pcln1.functions().expect("old funcs");
+    let new_funcs = pcln2.functions().expect("new funcs");
+    let report = unstrip::diff::compute(&old_funcs, &new_funcs);
+
+    assert_eq!(report.added, 0, "trimpath rebuilds should add nothing");
+    assert_eq!(report.removed, 0, "trimpath rebuilds should remove nothing");
+    assert!(
+        report.identical >= report.new_total * 9 / 10,
+        "trimpath rebuilds should be >=90% identical; got {} identical of {}",
+        report.identical, report.new_total,
+    );
+}
+
+#[test]
 fn xrefs_finds_main_main_callees() {
     // Every real binary's main.main calls at least a few other functions.
     // If the CALL scanner returns zero edges from main.main, it's broken.

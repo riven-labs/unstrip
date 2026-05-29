@@ -130,6 +130,21 @@ struct Args {
     #[arg(long)]
     goroutines: bool,
 
+    /// Compare this binary's recovered functions against another binary
+    /// passed as the positional argument. Reports identical / renamed /
+    /// added / removed counts. Pair with `--port-symbols ida|ghidra|binja`
+    /// to emit a script that renames functions in the new binary
+    /// according to whatever names they had in the old one.
+    #[arg(long, value_name = "OLD_BINARY")]
+    diff: Option<PathBuf>,
+
+    /// With `--diff`, emit a port-symbols script for the chosen RE tool
+    /// instead of the text/json report. The script applies the names
+    /// from the OLD binary at their new addresses in the binary you're
+    /// running unstrip on.
+    #[arg(long, value_name = "ida|ghidra|binja")]
+    port_symbols: Option<String>,
+
     /// Build a static call graph by scanning `.text` for direct CALL/BL
     /// targets resolved against the recovered function set. Direct
     /// calls only; virtual dispatch through itabs lives in `--itabs`.
@@ -447,6 +462,70 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(old_path) = &args.diff {
+        let old_bin = GoBinary::open(old_path)?;
+        let old_pcln = Pclntab::parse(&old_bin)?;
+        let old_funcs = old_pcln.functions()?;
+        let new_funcs = pcln.functions()?;
+        let report = unstrip::diff::compute(&old_funcs, &new_funcs);
+
+        if let Some(target) = &args.port_symbols {
+            let t = match target.as_str() {
+                "ida" => unstrip::export::Target::Ida,
+                "ghidra" => unstrip::export::Target::Ghidra,
+                "binja" | "binaryninja" => unstrip::export::Target::BinaryNinja,
+                other => {
+                    return Err(format!(
+                        "--port-symbols must be ida, ghidra, or binja (got {other:?})"
+                    )
+                    .into());
+                }
+            };
+            let script = unstrip::diff::write_port_script(t, &report);
+            out.write_all(script.as_bytes())?;
+            out.flush()?;
+            return Ok(());
+        }
+
+        match args.format {
+            OutFormat::Json => {
+                serde_json::to_writer_pretty(&mut out, &report)?;
+                writeln!(out)?;
+            }
+            OutFormat::Text => {
+                writeln!(out, "old:        {} functions", report.old_total)?;
+                writeln!(out, "new:        {} functions", report.new_total)?;
+                writeln!(out)?;
+                writeln!(out, "identical:  {}", report.identical)?;
+                writeln!(out, "renamed:    {}", report.renamed)?;
+                writeln!(out, "moved addr: {} (same address, different name)", report.address_moved)?;
+                writeln!(out, "added:      {} (in new, not in old)", report.added)?;
+                writeln!(out, "removed:    {} (in old, not in new)", report.removed)?;
+                writeln!(out)?;
+                if let Some(needle) = &args.filter {
+                    writeln!(out, "matching filter '{needle}':")?;
+                    for p in &report.pairings {
+                        let hit = p
+                            .old_name
+                            .as_deref()
+                            .map(|n| n.contains(needle))
+                            .unwrap_or(false)
+                            || p.new_name
+                                .as_deref()
+                                .map(|n| n.contains(needle))
+                                .unwrap_or(false);
+                        if hit {
+                            print_pairing(&mut out, p)?;
+                        }
+                    }
+                }
+            }
+            f => return Err(format!("--diff does not support --format {:?}", f).into()),
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
     if args.xrefs {
         let edges = unstrip::xrefs::find_calls(&bin, &pcln)?;
 
@@ -623,6 +702,44 @@ fn parse_pc(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
     let v = u64::from_str_radix(body, radix)
         .map_err(|e| format!("could not parse PC '{s}': {e}"))?;
     Ok(v)
+}
+
+fn print_pairing<W: Write>(w: &mut W, p: &unstrip::diff::Pairing) -> io::Result<()> {
+    use unstrip::diff::MatchKind;
+    match p.kind {
+        MatchKind::Identical => writeln!(
+            w,
+            "  =  0x{:x}  {}",
+            p.old_addr.unwrap_or(0),
+            p.old_name.as_deref().unwrap_or("?")
+        ),
+        MatchKind::Renamed => writeln!(
+            w,
+            "  R  0x{:x} -> 0x{:x}  {}",
+            p.old_addr.unwrap_or(0),
+            p.new_addr.unwrap_or(0),
+            p.old_name.as_deref().unwrap_or("?")
+        ),
+        MatchKind::AddressMoved => writeln!(
+            w,
+            "  M  0x{:x}  {}  ->  {}",
+            p.old_addr.unwrap_or(0),
+            p.old_name.as_deref().unwrap_or("?"),
+            p.new_name.as_deref().unwrap_or("?")
+        ),
+        MatchKind::Added => writeln!(
+            w,
+            "  +  0x{:x}  {}",
+            p.new_addr.unwrap_or(0),
+            p.new_name.as_deref().unwrap_or("?")
+        ),
+        MatchKind::Removed => writeln!(
+            w,
+            "  -  0x{:x}  {}",
+            p.old_addr.unwrap_or(0),
+            p.old_name.as_deref().unwrap_or("?")
+        ),
+    }
 }
 
 fn write_goroutines<W: Write>(
