@@ -517,6 +517,34 @@ fn extract_struct_decl(line: &str) -> Option<String> {
 }
 
 #[test]
+fn goroutines_finds_runtime_newproc_sites() {
+    // Every real Go binary calls runtime.newproc at least a handful of
+    // times for the GC's background workers (runtime.gcBgMarkWorker,
+    // runtime.forcegchelper, etc). If we can find none of those, the
+    // pattern scan is broken.
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else { return };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let spawns = unstrip::goroutines::find_spawns(&bin, &pcln).expect("scan");
+    assert!(
+        spawns.len() >= 3,
+        "real Go binaries call runtime.newproc at least 3 times for GC workers; got {}",
+        spawns.len()
+    );
+    // At least one of them should resolve to a known runtime function.
+    let resolved = spawns
+        .iter()
+        .filter(|s| s.target_name.is_some())
+        .count();
+    assert!(
+        resolved > 0,
+        "at least one newproc target should resolve via the LEA backtrack heuristic; got {} unresolved out of {}",
+        spawns.len() - resolved,
+        spawns.len()
+    );
+}
+
+#[test]
 fn symbols_as_elf_writes_valid_symtab() {
     // Rewrite a real stripped binary with --symbols-as elf and verify the
     // resulting file has a valid Elf64_Sym table containing every function

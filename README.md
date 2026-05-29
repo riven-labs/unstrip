@@ -213,6 +213,21 @@ $ gdb -q helm.symbols -ex 'info functions main.main' -ex quit
 
 Use `--in-place --yes` to overwrite the input file. Today supports ELF64 little-endian only; Mach-O and PE rewrite ships later.
 
+### Goroutines and deferred calls
+
+`--goroutines` lists every `runtime.newproc` and `runtime.deferproc` call site in `.text` and resolves the target function the goroutine or deferred call will run when possible. Surfaces the control flow hidden behind `go func() { ... }` and `defer` in Go programs that other tools don't:
+
+```
+$ unstrip ./sliver-client --goroutines | head
+0x0000000000424798  runtime.newproc         -> runtime.runFinalizers (0x424880)        runtime/mfinal.go:169
+0x00000000004259c0  runtime.newproc         -> (target unresolved)                     runtime/mgc.go:209
+0x00000000004479d5  runtime.newproc         -> runtime.forcegchelper (0x447a00)        runtime/proc.go:360
+0x000000000045e480  runtime.newproc         -> runtime.ensureSigM.func1 (0x4767e0)     runtime/signal_unix.go:1061
+0x000000000049c4ae  runtime.newproc         -> (target unresolved)                     sync/waitgroup.go:235
+```
+
+When the target resolves (40-50% of sites in real binaries), you see exactly which function the goroutine runs. When the LEA pattern doesn't match the heuristic (the funcval came from a register or stack slot), the call site and source file:line still show so you can open the source. amd64 and arm64 only today.
+
 ### Triage hints
 
 `--info` includes a count of stdlib interface implementations the binary ships. Useful for the first-pass question "does this binary speak HTTP, do crypto, write files?"

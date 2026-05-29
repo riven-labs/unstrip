@@ -46,4 +46,7 @@ pub enum Error {
 
     #[error("rewrite: {0}")]
     Rewrite(String),
+
+    #[error("goroutines: {0}")]
+    Goroutines(String),
 }

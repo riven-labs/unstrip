@@ -122,6 +122,14 @@ struct Args {
     #[arg(long)]
     yes: bool,
 
+    /// List every `runtime.newproc` and `runtime.deferproc` call site
+    /// in `.text`, resolving the target function the goroutine or
+    /// deferred call will run when possible. Surfaces the control flow
+    /// hidden behind `go func() { ... }` and `defer` in Go programs.
+    /// amd64 and arm64 only today.
+    #[arg(long)]
+    goroutines: bool,
+
     /// Filter recovered functions (or types, with --types) by substring.
     #[arg(long)]
     filter: Option<String>,
@@ -413,6 +421,33 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if args.goroutines {
+        let spawns = unstrip::goroutines::find_spawns(&bin, &pcln)?;
+        let filtered: Vec<&unstrip::goroutines::GoroutineSpawn> = match &args.filter {
+            Some(needle) => spawns
+                .iter()
+                .filter(|s| {
+                    s.spawner.contains(needle)
+                        || s.target_name
+                            .as_deref()
+                            .map(|n| n.contains(needle))
+                            .unwrap_or(false)
+                })
+                .collect(),
+            None => spawns.iter().collect(),
+        };
+        match args.format {
+            OutFormat::Json => {
+                serde_json::to_writer_pretty(&mut out, &filtered)?;
+                writeln!(out)?;
+            }
+            OutFormat::Text => write_goroutines(&mut out, &filtered)?,
+            f => return Err(format!("--goroutines does not support --format {:?}", f).into()),
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
     if args.itabs {
         let md = ModuleData::locate(&bin)?;
         let mut all = itabs::recover_all(&bin, &md)?;
@@ -508,6 +543,40 @@ fn parse_pc(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
     let v = u64::from_str_radix(body, radix)
         .map_err(|e| format!("could not parse PC '{s}': {e}"))?;
     Ok(v)
+}
+
+fn write_goroutines<W: Write>(
+    w: &mut W,
+    all: &[&unstrip::goroutines::GoroutineSpawn],
+) -> io::Result<()> {
+    if all.is_empty() {
+        writeln!(w, "no goroutine spawn or defer call sites found")?;
+        return Ok(());
+    }
+    let spawner_w = all.iter().map(|s| s.spawner.len()).max().unwrap_or(20).min(30);
+    for s in all {
+        let target = match (&s.target_name, s.target_addr) {
+            (Some(n), Some(addr)) => format!("{n} (0x{addr:x})"),
+            (None, Some(addr)) => format!("(unnamed @ 0x{addr:x})"),
+            (None, None) => "(target unresolved)".into(),
+            (Some(n), None) => n.clone(),
+        };
+        let loc = match (&s.file, s.line) {
+            (Some(f), Some(l)) => format!(" {f}:{l}"),
+            (Some(f), None) => format!(" {f}"),
+            _ => String::new(),
+        };
+        writeln!(
+            w,
+            "0x{:016x}  {:<spawner_w$}  -> {}{}",
+            s.call_site,
+            s.spawner,
+            target,
+            loc,
+            spawner_w = spawner_w,
+        )?;
+    }
+    Ok(())
 }
 
 fn write_itabs<W: Write>(w: &mut W, all: &[unstrip::Itab]) -> io::Result<()> {

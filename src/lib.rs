@@ -3,6 +3,7 @@ pub mod error;
 pub mod export;
 pub mod fingerprint;
 pub mod gobin;
+pub mod goroutines;
 pub mod itabs;
 pub mod moduledata;
 pub mod output;
