@@ -91,11 +91,19 @@ pub fn find_spawns(bin: &GoBinary, pcln: &Pclntab<'_>) -> Result<Vec<GoroutineSp
     let spawner_set: std::collections::HashMap<u64, &'static str> =
         spawners.iter().copied().collect();
 
-    // Find the text section bounds.
+    // Pick the actual .text section, not the first executable one.
+    // .init and .plt appear before .text in the header table on most
+    // ELFs and would shadow it under a naive first-match.
     let text = bin
         .sections
         .iter()
-        .find(|s| s.kind == SectionKind::Text)
+        .find(|s| s.kind == SectionKind::Text && s.name.ends_with(".text"))
+        .or_else(|| {
+            bin.sections
+                .iter()
+                .filter(|s| s.kind == SectionKind::Text)
+                .max_by_key(|s| s.file_size)
+        })
         .ok_or_else(|| Error::Goroutines("no text section".into()))?;
     let text_start_va = text.addr;
     let text_bytes = &bin.bytes[text.file_offset..text.file_offset + text.file_size];
