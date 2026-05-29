@@ -183,6 +183,13 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     depth: usize,
 
+    /// With `--xrefs --from`/`--to`, cap the BFS at this many discovered
+    /// nodes. A deep traversal on a large binary will otherwise blow
+    /// memory. Output includes a `truncated` flag (JSON) or a warning
+    /// line (text) when the cap is hit. Default 5000.
+    #[arg(long, default_value_t = 5000, value_name = "N")]
+    max_nodes: usize,
+
     /// With `--xrefs`, emit Graphviz dot format suitable for
     /// `dot -Tsvg -o callgraph.svg`. Otherwise text (caller -> callee).
     #[arg(long)]
@@ -636,26 +643,36 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
+        if !matches!(args.format, OutFormat::Text | OutFormat::Json) {
+            return Err(format!("--xrefs does not support --format {:?}", args.format).into());
+        }
+
         match (&args.from, &args.to) {
             (Some(from), None) => {
-                let callees = unstrip::xrefs::callees_from(&edges, from, args.depth);
+                let result = unstrip::xrefs::callees_from(&edges, from, args.depth, args.max_nodes);
                 if matches!(args.format, OutFormat::Json) {
-                    serde_json::to_writer_pretty(&mut out, &callees)?;
+                    serde_json::to_writer_pretty(&mut out, &result)?;
                     writeln!(out)?;
                 } else {
-                    for c in callees {
-                        writeln!(out, "{} -> {}", from, c)?;
+                    for node in &result.nodes {
+                        writeln!(out, "{} -> {}", from, node.name)?;
+                    }
+                    if result.truncated {
+                        eprintln!("warning: truncated at {} nodes", result.max_nodes);
                     }
                 }
             }
             (None, Some(to)) => {
-                let callers = unstrip::xrefs::callers_of(&edges, to, args.depth);
+                let result = unstrip::xrefs::callers_of(&edges, to, args.depth, args.max_nodes);
                 if matches!(args.format, OutFormat::Json) {
-                    serde_json::to_writer_pretty(&mut out, &callers)?;
+                    serde_json::to_writer_pretty(&mut out, &result)?;
                     writeln!(out)?;
                 } else {
-                    for c in callers {
-                        writeln!(out, "{} -> {}", c, to)?;
+                    for node in &result.nodes {
+                        writeln!(out, "{} -> {}", node.name, to)?;
+                    }
+                    if result.truncated {
+                        eprintln!("warning: truncated at {} nodes", result.max_nodes);
                     }
                 }
             }

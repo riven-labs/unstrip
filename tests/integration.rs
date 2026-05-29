@@ -742,11 +742,55 @@ fn xrefs_finds_main_main_callees() {
         "main.main calls more than 3 functions; got {} edges",
         from_main.len()
     );
-    let callees = unstrip::xrefs::callees_from(&edges, "main.main", 1);
+    let result = unstrip::xrefs::callees_from(&edges, "main.main", 1, usize::MAX);
     assert!(
-        callees.iter().any(|c| c.contains("cobra")),
-        "main.main in a cobra-using binary should call something in cobra; got {callees:?}"
+        result.nodes.iter().any(|n| n.name.contains("cobra")),
+        "main.main in a cobra-using binary should call something in cobra; got {:?}",
+        result.nodes
     );
+}
+
+#[test]
+fn xrefs_json_shape_has_root_direction_nodes_truncated() {
+    // Sanity-check the JSON-facing struct: root and direction are set,
+    // depth round-trips, each node carries a name and an addr field
+    // (Option<u64>), and the max_nodes cap forces `truncated = true`.
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let edges = unstrip::xrefs::find_calls(&bin, &pcln).expect("scan");
+
+    let result = unstrip::xrefs::callees_from(&edges, "main.main", 4, 3);
+    assert_eq!(result.root, "main.main");
+    assert_eq!(result.direction, "callees");
+    assert_eq!(result.depth, 4);
+    assert_eq!(result.max_nodes, 3);
+    assert!(result.truncated, "expected cap of 3 to trigger truncation");
+    assert!(result.nodes.len() <= 3, "got {} nodes", result.nodes.len());
+    assert!(
+        result.nodes.iter().any(|n| n.addr.is_some()),
+        "at least one callee should resolve to an address; got {:?}",
+        result.nodes
+    );
+
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert_eq!(json["root"], "main.main");
+    assert_eq!(json["direction"], "callees");
+    assert_eq!(json["depth"], 4);
+    assert_eq!(json["max_nodes"], 3);
+    assert_eq!(json["truncated"], true);
+    let nodes = json["nodes"].as_array().expect("nodes is array");
+    assert!(!nodes.is_empty());
+    for node in nodes {
+        assert!(node["name"].is_string());
+        assert!(node.get("addr").is_some(), "addr key must be present");
+    }
+
+    let callers = unstrip::xrefs::callers_of(&edges, "main.main", 1, usize::MAX);
+    assert_eq!(callers.direction, "callers");
+    assert!(!callers.truncated);
 }
 
 #[test]
