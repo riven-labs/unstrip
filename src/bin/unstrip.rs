@@ -340,38 +340,50 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.detect_garble {
         let funcs = pcln.functions().unwrap_or_default();
-        let verdict = unstrip::garble::detect(&funcs);
+        let version = detect_go_version(&bin.bytes);
+        let assessment =
+            unstrip::garble::assess(&funcs, version.as_deref(), pcln.magic_is_official());
         match args.format {
             OutFormat::Json => {
-                let payload = serde_json::json!({
-                    "is_garbled": verdict.is_garbled,
-                    "confidence": verdict.confidence,
-                    "evidence": verdict.evidence,
-                });
-                serde_json::to_writer_pretty(&mut out, &payload)?;
+                serde_json::to_writer_pretty(&mut out, &assessment)?;
                 writeln!(out)?;
             }
             OutFormat::Text => {
                 writeln!(
                     out,
-                    "is_garbled: {}  confidence: {:.2}",
-                    verdict.is_garbled, verdict.confidence
+                    "verdict: {:?}  confidence: {:.2}",
+                    assessment.verdict, assessment.confidence
                 )?;
-                for line in &verdict.evidence {
-                    writeln!(out, "  - {line}")?;
+                for s in &assessment.signals {
+                    writeln!(
+                        out,
+                        "  [{}] {} -- {}",
+                        if s.fired { "x" } else { " " },
+                        s.id,
+                        s.detail
+                    )?;
                 }
             }
             f => return Err(format!("--detect-garble does not support --format {:?}", f).into()),
         }
         out.flush()?;
-        return Ok(());
+        // Exit-code contract for --detect-garble (public, CI gating):
+        //   0 = garbled, 1 = clean, 2 = indeterminate.
+        // Bypass the run/main success path so the code lands on the
+        // wire verbatim; no other handler needs custom exit semantics.
+        std::process::exit(assessment.exit_code());
     }
 
     if args.info {
         let version = detect_go_version(&bin.bytes);
         let funcs = pcln.functions().unwrap_or_default();
         let report = detect_garble(&funcs, version.as_deref(), pcln.magic_is_official());
-        maybe_warn_garbled(&funcs, args.no_garble_warning);
+        maybe_warn_garbled(
+            &funcs,
+            version.as_deref(),
+            pcln.magic_is_official(),
+            args.no_garble_warning,
+        );
 
         // Behavioral classification: classify itabs against the curated
         // stdlib interface list. Failure is non-fatal (no moduledata, etc.).
@@ -872,7 +884,13 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.buildinfo {
         let funcs_for_warn = pcln.functions().unwrap_or_default();
-        maybe_warn_garbled(&funcs_for_warn, args.no_garble_warning);
+        let version_for_warn = detect_go_version(&bin.bytes);
+        maybe_warn_garbled(
+            &funcs_for_warn,
+            version_for_warn.as_deref(),
+            pcln.magic_is_official(),
+            args.no_garble_warning,
+        );
         let info = BuildInfo::parse(&bin)?;
         match args.format {
             OutFormat::Json => {
@@ -916,20 +934,26 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Fire a one-line stderr warning when the name-shape heuristic returns
-/// high confidence that the input was processed by garble. Gated behind
-/// `--no-garble-warning` for callers that need clean stderr.
-fn maybe_warn_garbled(functions: &[unstrip::pclntab::Function], suppressed: bool) {
+/// Fire a one-line stderr warning when the unified garble assessment
+/// returns a `Garbled` verdict. Routes through the same `assess()` path
+/// `--detect-garble` uses so the warning and the explicit detector never
+/// disagree on the same binary. Gated behind `--no-garble-warning`.
+fn maybe_warn_garbled(
+    functions: &[unstrip::pclntab::Function],
+    go_version: Option<&str>,
+    magic_is_official: bool,
+    suppressed: bool,
+) {
     if suppressed {
         return;
     }
-    let v = unstrip::garble::detect(functions);
-    if v.is_garbled && v.confidence >= 0.9 {
+    let a = unstrip::garble::assess(functions, go_version, magic_is_official);
+    if a.is_garbled() && a.confidence >= 0.75 {
         eprintln!(
             "warning: this binary appears to be obfuscated with garble \
              (confidence {:.2}); reported symbols and build metadata are \
              not authoritative",
-            v.confidence
+            a.confidence
         );
     }
 }
