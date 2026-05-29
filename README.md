@@ -36,6 +36,8 @@ unstrip ./bin --format ghidra > apply.py    # Python script for Ghidra Script Ma
 
 ## Compared to
 
+A reproducible head-to-head against GoReSym (master, post-v1.7.1) on a 10-binary corpus including caddy, gh, helm, mkcert, and a Sliver client lives in [COMPARISON.md](./COMPARISON.md). Headline: identical function recovery, unstrip 25-200x faster on type recovery, GoReSym recovers 5-10x more type entries (a real gap on our side, on the v1.1 list), unique features each way.
+
 | Capability                              | unstrip          | GoReSym    | redress  | gore     |
 |-----------------------------------------|------------------|------------|----------|----------|
 | Function names + file + line            | yes              | yes        | yes      | yes      |
