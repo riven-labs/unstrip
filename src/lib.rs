@@ -5,6 +5,7 @@ pub mod dispatch;
 pub mod error;
 pub mod export;
 pub mod fingerprint;
+pub mod garble;
 pub mod gobin;
 pub mod goroutines;
 pub mod itabs;

@@ -208,6 +208,19 @@ struct Args {
     /// Filter recovered functions (or types, with --types) by substring.
     #[arg(long)]
     filter: Option<String>,
+
+    /// Run the garble obfuscation name-shape heuristic and print a verdict
+    /// to stderr. Independent of --info / --buildinfo so scripts can gate
+    /// on exit code (exits 0 with `is_garbled=true|false` printed; the
+    /// heuristic itself does not fail the run).
+    #[arg(long)]
+    detect_garble: bool,
+
+    /// Suppress the auto garble warning that fires on --info / --buildinfo
+    /// when the heuristic returns confidence >= 0.9. Useful for CI that
+    /// parses stdout and treats stderr as fatal.
+    #[arg(long)]
+    no_garble_warning: bool,
 }
 
 #[derive(Copy, Clone, ValueEnum, PartialEq, Eq, Debug)]
@@ -307,10 +320,40 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if args.detect_garble {
+        let funcs = pcln.functions().unwrap_or_default();
+        let verdict = unstrip::garble::detect(&funcs);
+        match args.format {
+            OutFormat::Json => {
+                let payload = serde_json::json!({
+                    "is_garbled": verdict.is_garbled,
+                    "confidence": verdict.confidence,
+                    "evidence": verdict.evidence,
+                });
+                serde_json::to_writer_pretty(&mut out, &payload)?;
+                writeln!(out)?;
+            }
+            OutFormat::Text => {
+                writeln!(
+                    out,
+                    "is_garbled: {}  confidence: {:.2}",
+                    verdict.is_garbled, verdict.confidence
+                )?;
+                for line in &verdict.evidence {
+                    writeln!(out, "  - {line}")?;
+                }
+            }
+            f => return Err(format!("--detect-garble does not support --format {:?}", f).into()),
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
     if args.info {
         let version = detect_go_version(&bin.bytes);
         let funcs = pcln.functions().unwrap_or_default();
         let report = detect_garble(&funcs, version.as_deref(), pcln.magic_is_official());
+        maybe_warn_garbled(&funcs, args.no_garble_warning);
 
         // Behavioral classification: classify itabs against the curated
         // stdlib interface list. Failure is non-fatal (no moduledata, etc.).
@@ -810,6 +853,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.buildinfo {
+        let funcs_for_warn = pcln.functions().unwrap_or_default();
+        maybe_warn_garbled(&funcs_for_warn, args.no_garble_warning);
         let info = BuildInfo::parse(&bin)?;
         match args.format {
             OutFormat::Json => {
@@ -851,6 +896,24 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     out.flush()?;
     Ok(())
+}
+
+/// Fire a one-line stderr warning when the name-shape heuristic returns
+/// high confidence that the input was processed by garble. Gated behind
+/// `--no-garble-warning` for callers that need clean stderr.
+fn maybe_warn_garbled(functions: &[unstrip::pclntab::Function], suppressed: bool) {
+    if suppressed {
+        return;
+    }
+    let v = unstrip::garble::detect(functions);
+    if v.is_garbled && v.confidence >= 0.9 {
+        eprintln!(
+            "warning: this binary appears to be obfuscated with garble \
+             (confidence {:.2}); reported symbols and build metadata are \
+             not authoritative",
+            v.confidence
+        );
+    }
 }
 
 fn parse_pc(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
