@@ -548,7 +548,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     for (cat, items) in by_cat {
                         writeln!(out, "[{cat}]")?;
                         for c in items {
-                            writeln!(out, "  {}", c.name)?;
+                            writeln!(out, "  {} [{}]", c.name, c.rule_id)?;
                             for e in c.evidence.iter().take(3) {
                                 writeln!(out, "      {e}")?;
                             }

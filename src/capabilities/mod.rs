@@ -20,6 +20,11 @@ use crate::types::Type;
 pub struct Capability {
     pub name: &'static str,
     pub category: &'static str,
+    /// Stable dot-namespaced identifier for the rule that fired. Treat
+    /// as a public contract: rename `name` freely but never an `id`;
+    /// deprecate by adding a new id rather than mutating an existing
+    /// one. See README for the namespace layout.
+    pub rule_id: &'static str,
     /// Concrete evidence: the type names, function names, or itab
     /// concrete-side strings that triggered the match. Truncated to
     /// keep the output scannable.
@@ -32,6 +37,7 @@ pub struct CapabilityReport {
 }
 
 struct Rule {
+    id: &'static str,
     name: &'static str,
     category: &'static str,
     /// Substrings to match against type names. If any matches, the
@@ -46,6 +52,7 @@ struct Rule {
 const RULES: &[Rule] = &[
     // HTTP / web
     Rule {
+        id: "net.http.server",
         name: "HTTP server",
         category: "network",
         type_substrings: &[
@@ -58,6 +65,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["net/http.ListenAndServe", "net/http.Serve"],
     },
     Rule {
+        id: "net.http.client",
         name: "HTTP client",
         category: "network",
         type_substrings: &["http.Client", "http.Transport", "http.Request"],
@@ -65,6 +73,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["net/http.Get", "net/http.Post"],
     },
     Rule {
+        id: "net.websocket",
         name: "WebSocket",
         category: "network",
         type_substrings: &["websocket.Conn", "websocket.Upgrader"],
@@ -72,6 +81,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "net.grpc",
         name: "gRPC",
         category: "network",
         type_substrings: &["grpc.ClientConn", "grpc.Server", "grpc.UnaryServerInfo"],
@@ -79,6 +89,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["google.golang.org/grpc."],
     },
     Rule {
+        id: "net.dns",
         name: "DNS",
         category: "network",
         type_substrings: &["net.Resolver", "net.DNSConfig", "miekg/dns."],
@@ -86,6 +97,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["net.LookupHost", "net.LookupIP"],
     },
     Rule {
+        id: "net.tcp",
         name: "raw TCP",
         category: "network",
         type_substrings: &["net.TCPConn", "net.TCPListener", "net.TCPAddr"],
@@ -93,6 +105,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["net.Dial", "net.Listen"],
     },
     Rule {
+        id: "net.udp",
         name: "raw UDP",
         category: "network",
         type_substrings: &["net.UDPConn", "net.UDPAddr"],
@@ -100,6 +113,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["net.DialUDP", "net.ListenUDP"],
     },
     Rule {
+        id: "crypto.tls",
         name: "TLS client/server",
         category: "crypto",
         type_substrings: &[
@@ -112,6 +126,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["crypto/tls.Dial", "crypto/tls.Listen"],
     },
     Rule {
+        id: "crypto.x509",
         name: "X.509 / PKI",
         category: "crypto",
         type_substrings: &[
@@ -123,6 +138,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["crypto/x509.ParseCertificate"],
     },
     Rule {
+        id: "crypto.rsa",
         name: "RSA",
         category: "crypto",
         type_substrings: &["rsa.PrivateKey", "rsa.PublicKey"],
@@ -130,6 +146,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["crypto/rsa.SignPSS", "crypto/rsa.EncryptOAEP"],
     },
     Rule {
+        id: "crypto.ecdsa",
         name: "ECDSA",
         category: "crypto",
         type_substrings: &["ecdsa.PrivateKey", "ecdsa.PublicKey"],
@@ -137,6 +154,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["crypto/ecdsa.Sign", "crypto/ecdsa.Verify"],
     },
     Rule {
+        id: "crypto.aes",
         name: "AES",
         category: "crypto",
         type_substrings: &[],
@@ -149,6 +167,7 @@ const RULES: &[Rule] = &[
     },
     // Cloud SDKs
     Rule {
+        id: "cloud.aws.s3",
         name: "AWS SDK: S3",
         category: "cloud",
         type_substrings: &["aws-sdk-go-v2/service/s3.", "aws-sdk-go/service/s3."],
@@ -156,6 +175,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "cloud.aws.ec2",
         name: "AWS SDK: EC2",
         category: "cloud",
         type_substrings: &["aws-sdk-go-v2/service/ec2.", "aws-sdk-go/service/ec2."],
@@ -163,6 +183,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "cloud.aws.iam",
         name: "AWS SDK: IAM",
         category: "cloud",
         type_substrings: &["aws-sdk-go-v2/service/iam.", "aws-sdk-go/service/iam."],
@@ -170,6 +191,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "cloud.aws.sts",
         name: "AWS SDK: STS",
         category: "cloud",
         type_substrings: &["aws-sdk-go-v2/service/sts.", "aws-sdk-go/service/sts."],
@@ -177,6 +199,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "cloud.gcp",
         name: "Google Cloud SDK",
         category: "cloud",
         type_substrings: &["cloud.google.com/go/", "google.golang.org/api/"],
@@ -184,6 +207,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "cloud.azure",
         name: "Azure SDK",
         category: "cloud",
         type_substrings: &[
@@ -194,6 +218,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "cloud.k8s.client",
         name: "Kubernetes client",
         category: "cloud",
         type_substrings: &["k8s.io/client-go/", "k8s.io/api/core/", "k8s.io/api/apps/"],
@@ -202,6 +227,7 @@ const RULES: &[Rule] = &[
     },
     // Filesystem / process
     Rule {
+        id: "fs.file.rw",
         name: "file read/write",
         category: "filesystem",
         type_substrings: &[],
@@ -215,6 +241,7 @@ const RULES: &[Rule] = &[
         ],
     },
     Rule {
+        id: "fs.dir.walk",
         name: "directory walk",
         category: "filesystem",
         type_substrings: &[],
@@ -222,6 +249,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["filepath.Walk", "filepath.WalkDir", "os.ReadDir"],
     },
     Rule {
+        id: "proc.spawn",
         name: "child process spawn",
         category: "process",
         type_substrings: &["exec.Cmd"],
@@ -233,6 +261,7 @@ const RULES: &[Rule] = &[
         ],
     },
     Rule {
+        id: "proc.syscall",
         name: "syscall direct invocation",
         category: "process",
         type_substrings: &[],
@@ -244,6 +273,7 @@ const RULES: &[Rule] = &[
         ],
     },
     Rule {
+        id: "proc.signal",
         name: "signal handling",
         category: "process",
         type_substrings: &[],
@@ -252,6 +282,7 @@ const RULES: &[Rule] = &[
     },
     // Persistence / databases
     Rule {
+        id: "db.sql",
         name: "SQL database client",
         category: "database",
         type_substrings: &["sql.DB", "sql.Tx", "sql.Rows", "sql.Stmt"],
@@ -259,6 +290,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["database/sql.Open"],
     },
     Rule {
+        id: "db.sqlite",
         name: "SQLite",
         category: "database",
         type_substrings: &["mattn/go-sqlite3", "modernc.org/sqlite"],
@@ -266,6 +298,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "db.postgres",
         name: "PostgreSQL driver",
         category: "database",
         type_substrings: &["jackc/pgx", "lib/pq"],
@@ -273,6 +306,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "db.redis",
         name: "Redis client",
         category: "database",
         type_substrings: &["go-redis/", "redis.Client", "redigo/redis"],
@@ -280,6 +314,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "db.mongo",
         name: "MongoDB driver",
         category: "database",
         type_substrings: &["mongo.Client", "mongo-driver/mongo"],
@@ -288,6 +323,7 @@ const RULES: &[Rule] = &[
     },
     // Container / orchestration
     Rule {
+        id: "container.docker",
         name: "Docker client",
         category: "containers",
         type_substrings: &["docker/docker/client.", "moby/moby/client."],
@@ -295,6 +331,7 @@ const RULES: &[Rule] = &[
         function_substrings: &[],
     },
     Rule {
+        id: "container.containerd",
         name: "containerd client",
         category: "containers",
         type_substrings: &["containerd.Client", "containerd/containerd"],
@@ -303,6 +340,7 @@ const RULES: &[Rule] = &[
     },
     // Offensive / C2 / persistence hints
     Rule {
+        id: "offensive.shell.exec",
         name: "shell command execution",
         category: "offensive-hint",
         type_substrings: &[],
@@ -310,6 +348,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["os/exec.Command", "exec.LookPath"],
     },
     Rule {
+        id: "offensive.revshell",
         name: "reverse shell shape",
         category: "offensive-hint",
         type_substrings: &[],
@@ -317,6 +356,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["bash", "/bin/sh", "powershell"],
     },
     Rule {
+        id: "offensive.rawsock",
         name: "raw socket / ICMP",
         category: "offensive-hint",
         type_substrings: &["icmp.PacketConn", "ipv4.PacketConn", "ipv6.PacketConn"],
@@ -325,6 +365,7 @@ const RULES: &[Rule] = &[
     },
     // Sliver C2 fingerprint
     Rule {
+        id: "offensive.sliver",
         name: "Sliver C2 implant",
         category: "offensive-hint",
         type_substrings: &[
@@ -337,6 +378,7 @@ const RULES: &[Rule] = &[
     },
     // Encoding / serialization
     Rule {
+        id: "serde.json",
         name: "JSON encoding",
         category: "serialization",
         type_substrings: &[],
@@ -344,6 +386,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["encoding/json.Marshal", "encoding/json.Unmarshal"],
     },
     Rule {
+        id: "serde.protobuf",
         name: "Protocol Buffers",
         category: "serialization",
         type_substrings: &["proto.Message", "protobuf"],
@@ -351,6 +394,7 @@ const RULES: &[Rule] = &[
         function_substrings: &["google.golang.org/protobuf/proto."],
     },
     Rule {
+        id: "serde.yaml",
         name: "YAML",
         category: "serialization",
         type_substrings: &["yaml.Decoder", "yaml.Encoder", "yaml.MapSlice"],
@@ -359,6 +403,7 @@ const RULES: &[Rule] = &[
     },
     // GUI / terminal
     Rule {
+        id: "ui.terminal",
         name: "terminal UI",
         category: "interaction",
         type_substrings: &["bubbletea.Model", "tcell.Screen", "tview.Application"],
@@ -411,10 +456,31 @@ pub fn compute(functions: &[Function], types: &[Type], itabs: &[Itab]) -> Capabi
             out.push(Capability {
                 name: rule.name,
                 category: rule.category,
+                rule_id: rule.id,
                 evidence,
             });
         }
     }
 
     CapabilityReport { capabilities: out }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RULES;
+    use std::collections::HashSet;
+
+    #[test]
+    fn rule_ids_are_unique_and_non_empty() {
+        let mut seen = HashSet::new();
+        for rule in RULES {
+            assert!(!rule.id.is_empty(), "rule {:?} has empty id", rule.name);
+            assert!(
+                seen.insert(rule.id),
+                "duplicate rule id {:?} on rule {:?}",
+                rule.id,
+                rule.name
+            );
+        }
+    }
 }

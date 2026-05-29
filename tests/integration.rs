@@ -672,6 +672,13 @@ fn capabilities_detects_cobra_dep() {
         !report.capabilities.is_empty(),
         "real Go binary should match at least one capability"
     );
+    for cap in &report.capabilities {
+        assert!(
+            !cap.rule_id.is_empty(),
+            "capability {:?} should carry a non-empty rule_id",
+            cap.name
+        );
+    }
 }
 
 #[test]
