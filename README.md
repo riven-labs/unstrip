@@ -333,6 +333,36 @@ stdlib interface implementations:
 
 (`--fingerprint --behavioral` exists for hashing that counter into a SHA-256; coarser than `--fingerprint` and not garble-stable, included for completeness.)
 
+### Inlined call graph (library API, v1.1)
+
+For tools that want to consume unstrip's recovery from Rust, the `unstrip::inline` module exposes the inlined call graph the compiler recorded in `FUNCDATA_InlTree`. One `Node` per physical function; one `Edge` per inlined call site the compiler kept after optimization:
+
+```rust
+use unstrip::gobin::GoBinary;
+use unstrip::inline::{inline_callgraph, EdgeKind, NodeKind};
+use unstrip::moduledata::ModuleData;
+use unstrip::pclntab::Pclntab;
+
+let bin = GoBinary::open("./target")?;
+let md = ModuleData::locate(&bin)?;
+let pcln = Pclntab::parse(&bin)?.with_gofunc(md.gofunc);
+let graph = inline_callgraph(&bin, &pcln)?;
+
+for e in &graph.edges {
+    if matches!(e.kind, EdgeKind::Inlined) {
+        let caller = graph.node(e.from).unwrap();
+        let callee = graph.node(e.to).unwrap();
+        println!("{} -> {} @ 0x{:x}", caller.name, callee.name, e.call_site);
+    }
+}
+```
+
+`NodeKind::Physical` nodes are real pclntab functions with their entry PC as `addr`. `NodeKind::AnonymousInline` nodes carry their parent's PC plus the inline-tree start line, and their `addr` is a synthetic high-bit-tagged ID (`Node::is_anonymous_addr`) so they cannot collide with a real text VA. Anonymous-inline records appear when the compiler kept the inlined call's topology but the binary was built with `-tiny`, `-ldflags=-s -w`, or garble's name obfuscation, all of which zero the callee's `name_off`. The topology is intact in all these cases; only the name is gone.
+
+Witnessed format-stable across **Go 1.22 through 1.24** by the coverage probe (see `internal/inlinecov/REPORT.md`). Go 1.22 is the supported floor; Go 1.20 and 1.21 share the layout but are not witnessed by this codebase. Later toolchains (Go 1.26+) are best-effort. Garble's `entryoff` XOR rewrite provably does not touch the inline-tree FUNCDATA section, so the decoder runs unchanged on garble-obfuscated binaries (callee names come back obfuscated, not stripped).
+
+Direct (non-inlined) call edges land in v1.2 from pcdata reconstruction. `EdgeKind::Direct` is reserved now so adding it does not break callers; today only `EdgeKind::Inlined` is emitted.
+
 ## How it works
 
 Every Go binary built since 1.2 carries a `pclntab`, a self-describing table that maps program counters to function names, source files, and lines. The runtime uses it for stack traces, so `strip` leaves it alone.
