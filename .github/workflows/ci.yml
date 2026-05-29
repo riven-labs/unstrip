@@ -50,13 +50,13 @@ jobs:
         run: cargo test --all --verbose
 
   msrv:
-    name: MSRV (rust 1.75)
+    name: MSRV (rust 1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install MSRV toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.75"
+          toolchain: "1.85"
       - name: cargo check
         run: cargo check --all-targets

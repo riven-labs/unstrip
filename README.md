@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/unstrip.svg)](https://crates.io/crates/unstrip)
 [![CI](https://github.com/riven-labs/unstrip/actions/workflows/ci.yml/badge.svg)](https://github.com/riven-labs/unstrip/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 [![Go versions](https://img.shields.io/badge/go-1.18--1.25-00ADD8.svg)](https://go.dev)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
 
