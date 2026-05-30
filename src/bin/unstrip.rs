@@ -18,310 +18,225 @@ use unstrip::types;
     name = "unstrip",
     version,
     about = "Recover symbols from stripped Go binaries.",
-    long_about = None,
+    long_about = "Recover symbols from stripped Go binaries.\n\nReference: https://github.com/riven-labs/unstrip/blob/main/docs/USAGE.md"
 )]
 struct Args {
     /// Path to the binary to analyze. Omit when using --install-plugin.
     binary: Option<PathBuf>,
 
-    /// Output format.
-    #[arg(short, long, value_enum, default_value_t = OutFormat::Text)]
-    format: OutFormat,
-
-    /// Print container and pclntab metadata, then exit.
-    #[arg(long)]
+    // ----- Analysis modes -----
+    /// Container, Go version, garble heuristic.
+    #[arg(long, help_heading = "Analysis modes")]
     info: bool,
 
-    /// Parse the Go buildinfo blob (module dep tree, build settings), then exit.
-    #[arg(long)]
+    /// Module dep tree and build settings.
+    #[arg(long, help_heading = "Analysis modes")]
     buildinfo: bool,
 
-    /// Recover Go type information (names, kinds, sizes, struct fields), then exit.
-    /// Default mode (`Focused`) walks typelinks plus child references and
-    /// omits primitive leaves (`uint8`, `int32`, ...) and other catalog-
-    /// padding. For GoReSym-shape catalog breadth, also pass `--types-full`.
-    #[arg(long)]
+    /// Recover Go type names, kinds, sizes, struct fields.
+    #[arg(long, help_heading = "Analysis modes")]
     types: bool,
 
-    /// With `--types`, also surface every type-header-shaped entry
-    /// in the `[md.types, md.etypes)` region the focused walk missed.
-    /// Produces a much larger catalog including primitive leaves. Use when
-    /// you want one-for-one parity with GoReSym's type count.
-    #[arg(long)]
-    types_full: bool,
-
-    /// Recover (interface, concrete) pairs from runtime.itablinks, then exit.
-    #[arg(long)]
+    /// Recover (interface, concrete) pairs from runtime.itablinks.
+    #[arg(long, help_heading = "Analysis modes")]
     itabs: bool,
 
-    /// Compute a stable structural fingerprint (sha256) of the binary's
-    /// user-package surface, functions, types, itabs, deps. Same source
-    /// rebuilt with different flags/host produces the same hash. Useful for
-    /// clustering malware families across recompiles.
-    #[arg(long)]
-    fingerprint: bool,
-
-    /// With --fingerprint, hash only the stdlib-interface implementation-count
-    /// vector. Garble-stable: garble doesn't rename stdlib types, so a
-    /// garbled rebuild produces the same behavioral hash. Coarser than the
-    /// regular fingerprint; use as a clustering signal, not a unique ID.
-    #[arg(long)]
-    behavioral: bool,
-
-    /// Reverse-lookup mode: given a single PC, print the containing function name,
-    /// file, and line, then exit. PC must be a link-time VA, the address as your
-    /// disassembler shows it when the binary is loaded at its preferred base, not a
-    /// runtime address from a process where ASLR has rebased it. Use --rebase to
-    /// translate runtime addresses.
-    #[arg(long, value_name = "PC")]
-    addr: Option<String>,
-
-    /// Subtract this offset from --addr before lookup. Use when --addr is a
-    /// runtime PC from a process where ASLR rebased the binary: pass the delta
-    /// (actual_load_base - preferred_load_base) and unstrip translates back to
-    /// the link-time VA on disk. Hex (0x prefix) or decimal.
-    #[arg(long, value_name = "DELTA")]
-    rebase: Option<String>,
-
-    /// Batch reverse-lookup: read PCs from a file (one per line, `#`-comments
-    /// allowed, blank lines skipped) and print one resolution per line. Use
-    /// `-` for stdin. Re-uses one parsed pclntab, so 200 lookups cost about
-    /// the same as 1.
-    #[arg(long, value_name = "PATH")]
-    addr_file: Option<String>,
-
-    /// Install a wrapper plugin into the user's RE-tool plugin directory.
-    /// IDA gets a menu item under Edit -> Plugins; Ghidra gets a script
-    /// under Script Manager; Binary Ninja gets a Plugins menu item. The
-    /// wrapper shells out to this binary on PATH, so install unstrip too.
-    /// Overrides the default install path via $UNSTRIP_PLUGIN_DIR if set.
-    #[arg(long, value_name = "ida|ghidra|binja")]
-    install_plugin: Option<String>,
-
-    /// Write a new binary containing a populated symbol table built from
-    /// the recovered functions. For ELF the result has a synthetic
-    /// `.symtab` + `.strtab` so `nm`, `gdb`, `objdump --syms`, `perf`,
-    /// eBPF stack traces, and `delve` see the symbols. For PE the result
-    /// has a populated COFF symbol table referenced from the
-    /// IMAGE_FILE_HEADER so `dumpbin /symbols` and WinDbg pick it up.
-    /// Pass `elf` for ELF inputs and `pe` for PE inputs.
-    #[arg(long, value_name = "elf|pe")]
-    symbols_as: Option<String>,
-
-    /// With `--symbols-as`, write the result to this path. Defaults to
-    /// `<input>.symbols` next to the input.
-    #[arg(long, short = 'o', value_name = "PATH")]
-    output: Option<PathBuf>,
-
-    /// With `--symbols-as`, overwrite the input file in place. Mutually
-    /// exclusive with `--output`. Refuses to run without an explicit
-    /// `--yes` confirmation since this rewrites the original file.
-    #[arg(long)]
-    in_place: bool,
-
-    /// Confirm a destructive operation (currently only `--in-place`).
-    #[arg(long)]
-    yes: bool,
-
-    /// List every `runtime.newproc` and `runtime.deferproc` call site
-    /// in `.text`, resolving the target function the goroutine or
-    /// deferred call will run when possible. Surfaces the control flow
-    /// hidden behind `go func() { ... }` and `defer` in Go programs.
-    /// amd64 and arm64 only today.
-    #[arg(long)]
-    goroutines: bool,
-
-    /// With `--goroutines`, restrict output to a subset by resolution
-    /// state. `all` prints every call site (default). `resolved` keeps
-    /// only sites where the funcval entry PC decoded. `unresolved` keeps
-    /// only sites where the LEA/ADRP pattern was missing or the funcval
-    /// pointer landed outside any mapped section. The unresolved set is
-    /// the one worth eyeballing in IDA, since something stopped the
-    /// heuristic from naming the goroutine body.
-    #[arg(long, requires = "goroutines", value_enum, default_value_t = GoroutinesShow::All)]
-    goroutines_show: GoroutinesShow,
-
-    /// Compare this binary's recovered functions against another binary
-    /// passed as the positional argument. Reports identical / renamed /
-    /// added / removed counts. Pair with `--port-symbols ida|ghidra|binja`
-    /// to emit a script that renames functions in the new binary
-    /// according to whatever names they had in the old one.
-    #[arg(long, value_name = "OLD_BINARY")]
-    diff: Option<PathBuf>,
-
-    /// Match the recovered types, itabs, and functions against a curated
-    /// set of patterns and report what the binary appears to do: HTTP
-    /// server, AWS S3, child-process spawn, raw socket, Sliver implant,
-    /// etc. First-pass triage answer to "what is this binary?".
-    #[arg(long)]
-    capabilities: bool,
-
-    /// Recover printable string literals from the binary's read-only
-    /// data regions (.rodata / .noptrdata on ELF; __rodata / __noptrdata
-    /// on Mach-O; .rdata on PE). Pair with --filter to search by
-    /// substring (e.g. "usage" surfaces the CLI banner on a stripped Go
-    /// tool, "https://" surfaces module homepages, env-var names like
-    /// "_NO_" surface configuration toggles). Garble does not rewrite
-    /// string literals in its default mode, so this is the surface that
-    /// identifies obfuscated binaries when symbols are hashed.
-    #[arg(long)]
+    /// Recover printable string literals from read-only data.
+    #[arg(long, help_heading = "Analysis modes")]
     strings: bool,
 
-    /// With --strings, the minimum printable-run length. Below 8 the
-    /// output is dominated by struct field name fragments and other
-    /// non-literal noise.
-    #[arg(long, value_name = "N", default_value_t = 8)]
-    strings_min: usize,
+    /// Match recovered surface against a curated pattern set ("what is this binary?").
+    #[arg(long, help_heading = "Analysis modes")]
+    capabilities: bool,
 
-    /// With --strings, cap the number of runs emitted at this count.
-    /// Useful for sampling on large binaries; defaults to unlimited.
-    #[arg(long, value_name = "N")]
-    strings_max: Option<usize>,
+    /// Stable structural hash for clustering recompiles.
+    #[arg(long, help_heading = "Analysis modes")]
+    fingerprint: bool,
 
-    /// Emit an RE-tool script that surfaces the recovered itab dispatch
-    /// table when invoked at a virtual call site, then exit. Only Ghidra
-    /// is supported today: run the resulting script in the Script Manager,
-    /// then place the cursor on a `CALL [reg + slot*8]` instruction and
-    /// invoke "Unstrip: Resolve dispatch at cursor" from Tools to see every
-    /// recovered (interface, concrete) pair whose method table contains
-    /// that slot.
-    #[arg(long, value_name = "ghidra")]
-    dispatch_resolver: Option<String>,
+    /// List runtime.newproc / runtime.deferproc call sites.
+    #[arg(long, help_heading = "Analysis modes")]
+    goroutines: bool,
 
-    /// With `--diff`, emit a port-symbols script for the chosen RE tool
-    /// instead of the text/json report. The script applies the names
-    /// from the OLD binary at their new addresses in the binary you're
-    /// running unstrip on.
-    #[arg(long, value_name = "ida|ghidra|binja")]
-    port_symbols: Option<String>,
-
-    /// Build a static call graph by scanning `.text` for direct CALL/BL
-    /// targets resolved against the recovered function set. Direct
-    /// calls only; virtual dispatch through itabs lives in `--itabs`.
-    /// Combine with `--from`, `--to`, `--depth`, or `--callgraph dot`.
-    #[arg(long)]
+    /// Static call graph from direct CALL/BL scans.
+    #[arg(long, help_heading = "Analysis modes")]
     xrefs: bool,
 
-    /// With `--xrefs`, list only callers and callees reachable from
-    /// this function name. Combine with `--depth` to expand transitively.
-    #[arg(long, value_name = "FUNCNAME")]
-    from: Option<String>,
-
-    /// With `--xrefs`, list only functions that call this one. Combine
-    /// with `--depth`.
-    #[arg(long, value_name = "FUNCNAME")]
-    to: Option<String>,
-
-    /// With `--xrefs --from`/`--to`, transitive depth. Default 1.
-    #[arg(long, default_value_t = 1)]
-    depth: usize,
-
-    /// With `--xrefs --from`/`--to`, cap the BFS at this many discovered
-    /// nodes. A deep traversal on a large binary will otherwise blow
-    /// memory. Output includes a `truncated` flag (JSON) or a warning
-    /// line (text) when the cap is hit. Default 5000.
-    #[arg(long, default_value_t = 5000, value_name = "N")]
-    max_nodes: usize,
-
-    /// With `--xrefs`, emit Graphviz dot format suitable for
-    /// `dot -Tsvg -o callgraph.svg`. Otherwise text (caller -> callee).
-    #[arg(long)]
-    callgraph: bool,
-
-    /// Filter recovered output by substring. With --types, matches type
-    /// name. With --itabs, matches interface name, concrete name, or
-    /// any interface-method name (method-column matching is what the
-    /// signal usually lives in on garble-default binaries). Default
-    /// (functions list) matches function name.
-    #[arg(long)]
-    filter: Option<String>,
-
-    /// Inspect raw bytes at a data address with optional symbolic
-    /// interpretation. `--as bytes` (default) prints a hex+ASCII dump.
-    /// `--as qwords` decodes 8-byte little-endian values. `--as ptrs`
-    /// does the same but resolves each value against the recovered
-    /// function table, itab table, and section map. `--as ifaces`
-    /// interprets 16-byte Go interface headers and resolves the itab
-    /// to a concrete type. `--as slice-header` parses 24-byte slice
-    /// headers (ptr + len + cap). `--as string` parses Go string
-    /// headers (ptr + len) and previews the pointed-to bytes when
-    /// they look printable. `--len` defaults to 64 for bytes/qwords,
-    /// 1 element for the structured modes.
-    #[arg(long, value_name = "ADDR")]
-    data_at: Option<String>,
-
-    /// With --data-at, the number of bytes to inspect. Defaults: 64
-    /// for bytes/qwords/ptrs; 16 for ifaces and string; 24 for
-    /// slice-header. The actual read is clamped to the containing
-    /// section's file-backed range. Mutually exclusive with
-    /// --data-count.
-    #[arg(long, value_name = "N", conflicts_with = "data_count")]
-    data_len: Option<usize>,
-
-    /// With --data-at, the number of records to inspect (instead of
-    /// bytes). The record size depends on --data-as: 16 for ifaces
-    /// and string, 24 for slice-header, 8 for qwords/ptrs, 16 for
-    /// bytes. Reading 7 ifaces is `--data-count 7`. Mutually
-    /// exclusive with --data-len.
-    #[arg(long, value_name = "N", conflicts_with = "data_len")]
-    data_count: Option<usize>,
-
-    /// With --data-at, the interpretation. See --data-at for the
-    /// per-mode shape.
-    #[arg(long, value_enum, default_value_t = DataAs::Bytes, value_name = "bytes|qwords|ptrs|ifaces|slice-header|string")]
-    data_as: DataAs,
-
-    /// Suppress the (reachable)/(unreachable) annotation on --itabs.
-    /// By default --itabs runs a one-shot scan over .text and the
-    /// data sections and tags each itab as `(reachable)` when its
-    /// address is referenced from either side, `(unreachable)`
-    /// otherwise. Pass this when you only want the raw itab table
-    /// (large binaries where the scan is not free, or scripted
-    /// consumers that prefer the JSON shape without the marker).
-    #[arg(long)]
-    no_itab_reachability: bool,
-
-    /// List every call site that targets the given symbol. Accepts a
-    /// function name (resolved through pclntab) or a hex address
-    /// (`0x...`). Output groups call sites under their containing
-    /// function. amd64 only today.
-    #[arg(long, value_name = "SYMBOL")]
+    /// Every call site targeting the given symbol (name or 0xADDR). amd64 only.
+    #[arg(long, value_name = "SYMBOL", help_heading = "Analysis modes")]
     xref: Option<String>,
 
-    /// List every `.text` instruction that READS the given data
-    /// address: LEA, MOV-load, CMP-against-memory, CALL/JMP through
-    /// a memory pointer. Each hit reports the containing function
-    /// (from pclntab) plus the instruction PC and kind. Pair with
-    /// --xref-writers to also see stores. amd64 only today.
-    #[arg(long, value_name = "ADDR")]
+    /// Every .text instruction READING the given data address. amd64 only.
+    #[arg(long, value_name = "ADDR", help_heading = "Analysis modes")]
     xref_readers: Option<String>,
 
-    /// List every `.text` instruction that WRITES the given data
-    /// address (MOV-store). amd64 only today.
-    #[arg(long, value_name = "ADDR")]
+    /// Every .text instruction WRITING the given data address. amd64 only.
+    #[arg(long, value_name = "ADDR", help_heading = "Analysis modes")]
     xref_writers: Option<String>,
 
-    /// Hide or show Go's autogenerated pointer-receiver method thunks.
-    /// `both` (default) shows everything. `value` hides every
-    /// `pkg.(*Type).Method` entry so the listing collapses to value
-    /// methods and free functions. `pointer` does the inverse. Applies
-    /// to the default function listing, --itabs (concrete-type column),
-    /// and --xrefs (caller/callee names).
-    #[arg(long, value_enum, default_value_t = MethodShow::Both, value_name = "value|pointer|both")]
-    show: MethodShow,
+    /// Inspect bytes at a data address with optional symbolic interpretation.
+    #[arg(long, value_name = "ADDR", help_heading = "Analysis modes")]
+    data_at: Option<String>,
 
-    /// Run the garble obfuscation name-shape heuristic and print a verdict
-    /// to stderr. Independent of --info / --buildinfo so scripts can gate
-    /// on exit code (exits 0 with `is_garbled=true|false` printed; the
-    /// heuristic itself does not fail the run).
-    #[arg(long)]
+    /// PC -> function, file, line, inline stack.
+    #[arg(long, value_name = "PC", help_heading = "Analysis modes")]
+    addr: Option<String>,
+
+    /// Batch PC lookup; one PC per line. Use `-` for stdin.
+    #[arg(long, value_name = "PATH", help_heading = "Analysis modes")]
+    addr_file: Option<String>,
+
+    /// Compare against an older build; report added/removed/renamed.
+    #[arg(long, value_name = "OLD_BINARY", help_heading = "Analysis modes")]
+    diff: Option<PathBuf>,
+
+    /// Garble heuristic verdict to stderr; exit-code contract for CI.
+    #[arg(long, help_heading = "Analysis modes")]
     detect_garble: bool,
 
-    /// Suppress the auto garble warning that fires on --info / --buildinfo
-    /// when the heuristic returns confidence >= 0.9. Useful for CI that
-    /// parses stdout and treats stderr as fatal.
-    #[arg(long)]
+    // ----- Mode modifiers -----
+    /// With --types: include primitive leaves (GoReSym-parity catalog).
+    #[arg(long, help_heading = "Mode modifiers")]
+    types_full: bool,
+
+    /// With --fingerprint: hash only the stdlib-interface vector (garble-stable).
+    #[arg(long, help_heading = "Mode modifiers")]
+    behavioral: bool,
+
+    /// With --addr: subtract this offset (use for runtime PCs from ASLR processes).
+    #[arg(long, value_name = "DELTA", help_heading = "Mode modifiers")]
+    rebase: Option<String>,
+
+    /// With --data-at: interpretation.
+    #[arg(long, value_enum, default_value_t = DataAs::Bytes,
+          value_name = "bytes|qwords|ptrs|ifaces|slice-header|string",
+          help_heading = "Mode modifiers")]
+    data_as: DataAs,
+
+    /// With --data-at: bytes to read. Mutually exclusive with --data-count.
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with = "data_count",
+        help_heading = "Mode modifiers"
+    )]
+    data_len: Option<usize>,
+
+    /// With --data-at: records to read. Mutually exclusive with --data-len.
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with = "data_len",
+        help_heading = "Mode modifiers"
+    )]
+    data_count: Option<usize>,
+
+    /// With --strings: minimum printable-run length.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 8,
+        help_heading = "Mode modifiers"
+    )]
+    strings_min: usize,
+
+    /// With --strings: cap emitted runs. Default unlimited.
+    #[arg(long, value_name = "N", help_heading = "Mode modifiers")]
+    strings_max: Option<usize>,
+
+    /// With --xrefs: filter to callers/callees reachable from this function.
+    #[arg(long, value_name = "FUNCNAME", help_heading = "Mode modifiers")]
+    from: Option<String>,
+
+    /// With --xrefs: filter to functions that call this one.
+    #[arg(long, value_name = "FUNCNAME", help_heading = "Mode modifiers")]
+    to: Option<String>,
+
+    /// With --xrefs --from/--to: transitive depth.
+    #[arg(long, default_value_t = 1, help_heading = "Mode modifiers")]
+    depth: usize,
+
+    /// With --xrefs --from/--to: BFS node cap. Output flags truncation when hit.
+    #[arg(
+        long,
+        default_value_t = 5000,
+        value_name = "N",
+        help_heading = "Mode modifiers"
+    )]
+    max_nodes: usize,
+
+    /// With --xrefs: emit Graphviz dot format.
+    #[arg(long, help_heading = "Mode modifiers")]
+    callgraph: bool,
+
+    /// With --goroutines: restrict by resolution state.
+    #[arg(long, requires = "goroutines", value_enum, default_value_t = GoroutinesShow::All,
+          help_heading = "Mode modifiers")]
+    goroutines_show: GoroutinesShow,
+
+    /// With --itabs: skip the (reachable)/(unreachable) annotation.
+    #[arg(long, help_heading = "Mode modifiers")]
+    no_itab_reachability: bool,
+
+    // ----- Output -----
+    /// Output format.
+    #[arg(short, long, value_enum, default_value_t = OutFormat::Text, help_heading = "Output")]
+    format: OutFormat,
+
+    /// Substring filter; applies to types, itabs, functions.
+    #[arg(long, help_heading = "Output")]
+    filter: Option<String>,
+
+    /// Hide Go-emitted pointer-receiver thunks (both|value|pointer).
+    #[arg(long, value_enum, default_value_t = MethodShow::Both, value_name = "value|pointer|both",
+          help_heading = "Output")]
+    show: MethodShow,
+
+    /// Suppress the auto garble warning on --info / --buildinfo.
+    #[arg(long, help_heading = "Output")]
     no_garble_warning: bool,
+
+    // ----- Rewrite the binary -----
+    /// Write a new binary with a populated symbol table (elf|pe).
+    #[arg(long, value_name = "elf|pe", help_heading = "Rewrite the binary")]
+    symbols_as: Option<String>,
+
+    /// With --symbols-as: output path. Default: <input>.symbols.
+    #[arg(
+        long,
+        short = 'o',
+        value_name = "PATH",
+        help_heading = "Rewrite the binary"
+    )]
+    output: Option<PathBuf>,
+
+    /// With --symbols-as: overwrite the input. Requires --yes.
+    #[arg(long, help_heading = "Rewrite the binary")]
+    in_place: bool,
+
+    /// Confirm a destructive operation.
+    #[arg(long, help_heading = "Rewrite the binary")]
+    yes: bool,
+
+    // ----- RE-tool integration -----
+    /// Drop a wrapper plugin into the RE tool's plugin directory.
+    #[arg(
+        long,
+        value_name = "ida|ghidra|binja",
+        help_heading = "RE-tool integration"
+    )]
+    install_plugin: Option<String>,
+
+    /// Emit a Ghidra script that resolves itab dispatch at a call site.
+    #[arg(long, value_name = "ghidra", help_heading = "RE-tool integration")]
+    dispatch_resolver: Option<String>,
+
+    /// With --diff: emit a script that renames functions to the OLD names.
+    #[arg(
+        long,
+        value_name = "ida|ghidra|binja",
+        help_heading = "RE-tool integration"
+    )]
+    port_symbols: Option<String>,
 }
 
 #[derive(Copy, Clone, ValueEnum, PartialEq, Eq, Debug)]
@@ -432,7 +347,48 @@ impl OutFormat {
     }
 }
 
+const SHORT_HELP: &str = "\
+unstrip 1.0.0
+Recover symbols from stripped Go binaries.
+
+Usage
+  unstrip <BINARY> [OPTIONS]
+
+Examples
+  unstrip <bin> --info                 what is this binary?
+  unstrip <bin> --types                type catalog
+  unstrip <bin> --itabs                interface dispatch table
+  unstrip <bin> --format ghidra > apply.py
+  unstrip <bin> --addr 0x4a3c40        PC -> function:file:line
+  unstrip <bin> --data-at 0x520180 --data-as ifaces --data-count 4
+  unstrip <bin> --symbols-as elf -o named.bin
+  unstrip <new> --diff <old> --port-symbols ghidra > port.py
+
+Analysis modes  --info --buildinfo --types --itabs --strings --capabilities
+                --fingerprint --goroutines --xrefs --xref --xref-readers
+                --xref-writers --data-at --addr --addr-file --diff
+                --detect-garble
+Rewrite         --symbols-as <elf|pe>  [-o PATH | --in-place --yes]
+Integration     --install-plugin <ida|ghidra|binja>
+                --dispatch-resolver ghidra
+                --port-symbols <ida|ghidra|binja>
+
+See `unstrip --help` for the full flag reference, modifiers, and notes.
+Reference: https://github.com/riven-labs/unstrip/blob/main/docs/USAGE.md
+";
+
 fn main() -> ExitCode {
+    // Hand-written `-h` cheat sheet; long `--help` stays clap-generated and
+    // grouped via help_heading. Pattern: short form is one screen of examples,
+    // long form is the full reference. Matches the git/cargo split.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let has_short = argv.iter().any(|a| a == "-h");
+    let has_long = argv.iter().any(|a| a == "--help");
+    if has_short && !has_long {
+        print!("{SHORT_HELP}");
+        return ExitCode::SUCCESS;
+    }
+
     let args = Args::parse();
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
