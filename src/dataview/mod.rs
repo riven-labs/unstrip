@@ -175,11 +175,32 @@ pub fn symbolize(
 }
 
 fn bounded_read(bin: &GoBinary, addr: u64, len: usize) -> Result<(usize, usize)> {
+    // Hard floor on plausible runtime addresses. Anything below the
+    // first OS page is a sentinel value an operator almost never
+    // means to inspect (often the result of a bash variable expansion
+    // that collapsed to 0 or a numeric typo); refusing here turns
+    // "happily decodes section-name bytes as iface" into a clear
+    // error before the symbolizer renders confident nonsense.
+    if addr < 0x1000 {
+        return Err(Error::Xrefs(format!(
+            "address 0x{addr:x} is below the first plausible runtime page; \
+             refusing to read (this is almost always a typo or a shell-\
+             variable that collapsed to 0)"
+        )));
+    }
+    // Find a section that actually carries this address at load time.
+    // Filter out sections that were never mapped into program memory
+    // (addr == 0 is the convention containers use for shstrtab and
+    // other file-only sections), otherwise contains_addr would let a
+    // zero-based file-only section claim arbitrary addresses.
     let s = bin
         .sections
         .iter()
+        .filter(|s| s.addr != 0)
         .find(|s| s.contains_addr(addr))
-        .ok_or_else(|| Error::Xrefs(format!("address 0x{addr:x} is not in any mapped section")))?;
+        .ok_or_else(|| {
+            Error::Xrefs(format!("address 0x{addr:x} is not in any loadable section"))
+        })?;
     let file_off = s.file_offset_of(addr).ok_or_else(|| {
         Error::Xrefs(format!(
             "address 0x{addr:x} lies past the file-backed portion of {}",

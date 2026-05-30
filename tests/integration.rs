@@ -1054,6 +1054,62 @@ fn dataxref_referenced_addresses_covers_live_itabs() {
 }
 
 #[test]
+fn dataview_refuses_unmapped_or_sentinel_addresses() {
+    // The wizard's second-solve regression: --data-at 0 was happily
+    // decoding the ELF shstrtab (which has addr=0) as if it were a
+    // loaded section, returning section-name bytes interpreted as
+    // an iface header. This test pins the contract that any address
+    // below the first plausible runtime page is refused outright,
+    // and any address that does not fall inside a section with a
+    // real load address gets a clear unmapped error.
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("pcln");
+    let funcs = pcln.functions().expect("funcs");
+    let md = unstrip::ModuleData::locate(&bin).expect("md");
+    let itabs_v = itabs::recover_all(&bin, &md).expect("itabs");
+
+    for sentinel in [0u64, 0x100, 0x800, 0xfff] {
+        let err = unstrip::dataview::inspect(
+            &bin,
+            &pcln,
+            &itabs_v,
+            &funcs,
+            sentinel,
+            16,
+            unstrip::dataview::As::Ifaces,
+        )
+        .expect_err("sentinel address must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("below the first plausible runtime page"),
+            "sentinel 0x{sentinel:x} error must mention the page floor; got {msg}"
+        );
+    }
+
+    // Plausible-looking but unmapped address: above the page floor,
+    // outside every loadable section. Must error with the unmapped
+    // message, not silently decode whatever happens to be at offset
+    // 0 in the binary file.
+    let err = unstrip::dataview::inspect(
+        &bin,
+        &pcln,
+        &itabs_v,
+        &funcs,
+        0xdead_beef_dead_beef,
+        16,
+        unstrip::dataview::As::Bytes,
+    )
+    .expect_err("unmapped address must refuse");
+    assert!(
+        err.to_string().contains("not in any loadable section"),
+        "unmapped address error must say so; got {err}"
+    );
+}
+
+#[test]
 fn dataxref_scan_runs_and_attributes_hits_when_present() {
     // Which specific data addresses get RIP-relative-LEA'd depends on
     // codegen choices and varies per build. Picking the pclntab base
