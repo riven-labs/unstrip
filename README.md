@@ -257,6 +257,24 @@ $ unstrip ./helm --xrefs --callgraph > graph.dot && dot -Tsvg graph.dot -o graph
 
 250,000+ caller-callee edges enumerated on a 65 MiB helm binary in under 300 ms. Direct calls only; virtual dispatch through itabs lives in `--itabs`.
 
+### Targeted xref by symbol
+
+`--xref <SYMBOL>` answers "who calls this," scoped to one target. Faster than building the whole graph when you only have one question, and grouped by caller so the output reads the way a human reads xrefs in IDA:
+
+```
+$ unstrip ./helm --xref runtime.mallocgc | head
+runtime.makechan @ 0x000000000040a260:
+  0x000000000040a2ee  direct
+  0x000000000040a340  direct
+  0x000000000040a380  direct
+runtime.convT @ 0x000000000040fb00:
+  0x000000000040fb29  direct
+```
+
+Accepts a function name (resolved through pclntab) or a hex address (`0x...`). When the target is an interface-method implementation, indirect dispatch sites of the form `CALL [rip+itab+slot]` are reported alongside direct calls with the resolved itab and method name carried inline. The compiler usually loads the slot pointer into a register first; those register-indirect sites do not show up here because resolving them requires basic-block tracking we deliberately don't ship. The strict-encoding hits that do appear carry zero false positives.
+
+amd64 only today.
+
 ### Goroutines and deferred calls
 
 `--goroutines` lists every `runtime.newproc` and `runtime.deferproc` call site in `.text` and resolves the target function the goroutine or deferred call will run when possible. Surfaces the control flow hidden behind `go func() { ... }` and `defer` in Go programs that other tools don't:
