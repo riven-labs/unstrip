@@ -1124,7 +1124,7 @@ fn callsites_finds_direct_callers_of_a_known_runtime_function() {
     let pcln = Pclntab::parse(&bin).expect("pcln");
 
     let target = unstrip::callsites::Target::Function("runtime.mallocgc".into());
-    let hits = unstrip::callsites::find(&bin, &pcln, &target).expect("callsites scan");
+    let hits = unstrip::callsites::find(&bin, &pcln, &[], &target).expect("callsites scan");
 
     assert!(
         !hits.is_empty(),
@@ -1163,12 +1163,14 @@ fn callsites_address_target_resolves_to_same_set_as_name_target() {
     let by_name = unstrip::callsites::find(
         &bin,
         &pcln,
+        &[],
         &unstrip::callsites::Target::Function("runtime.mallocgc".into()),
     )
     .expect("by-name");
     let by_addr = unstrip::callsites::find(
         &bin,
         &pcln,
+        &[],
         &unstrip::callsites::Target::Address(mallocgc.address),
     )
     .expect("by-addr");
@@ -1195,6 +1197,7 @@ fn callsites_unknown_function_name_errors_clearly() {
     let err = unstrip::callsites::find(
         &bin,
         &pcln,
+        &[],
         &unstrip::callsites::Target::Function("not.a.real.function".into()),
     )
     .expect_err("unknown function name must error");

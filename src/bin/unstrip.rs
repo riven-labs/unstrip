@@ -820,7 +820,14 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             unstrip::callsites::Target::Function(symbol.clone())
         };
-        let hits = unstrip::callsites::find(&bin, &pcln, &target)?;
+        // Itabs feed Scanner 2 (indirect-itab dispatch sites). If
+        // moduledata recovery fails we pass an empty slice; Scanner
+        // 1's direct-call results still ship.
+        let itabs_v = match ModuleData::locate(&bin) {
+            Ok(md) => itabs::recover_all(&bin, &md).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        let hits = unstrip::callsites::find(&bin, &pcln, &itabs_v, &target)?;
         match args.format {
             OutFormat::Json => {
                 serde_json::to_writer_pretty(&mut out, &hits)?;
