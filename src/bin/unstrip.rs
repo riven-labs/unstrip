@@ -253,9 +253,18 @@ struct Args {
     /// With --data-at, the number of bytes to inspect. Defaults: 64
     /// for bytes/qwords/ptrs; 16 for ifaces and string; 24 for
     /// slice-header. The actual read is clamped to the containing
-    /// section's file-backed range.
-    #[arg(long, value_name = "N")]
+    /// section's file-backed range. Mutually exclusive with
+    /// --data-count.
+    #[arg(long, value_name = "N", conflicts_with = "data_count")]
     data_len: Option<usize>,
+
+    /// With --data-at, the number of records to inspect (instead of
+    /// bytes). The record size depends on --data-as: 16 for ifaces
+    /// and string, 24 for slice-header, 8 for qwords/ptrs, 16 for
+    /// bytes. Reading 7 ifaces is `--data-count 7`. Mutually
+    /// exclusive with --data-len.
+    #[arg(long, value_name = "N", conflicts_with = "data_len")]
+    data_count: Option<usize>,
 
     /// With --data-at, the interpretation. See --data-at for the
     /// per-mode shape.
@@ -340,6 +349,18 @@ impl DataAs {
     fn default_len(self) -> usize {
         match self {
             DataAs::Bytes | DataAs::Qwords | DataAs::Ptrs => 64,
+            DataAs::Ifaces | DataAs::String => 16,
+            DataAs::SliceHeader => 24,
+        }
+    }
+
+    /// Byte size of one record under this presentation. Drives the
+    /// `--data-count N` conversion to a byte length so an operator
+    /// can ask for "7 ifaces" without computing 16 * 7 themselves.
+    fn record_size(self) -> usize {
+        match self {
+            DataAs::Bytes => 16,
+            DataAs::Qwords | DataAs::Ptrs => 8,
             DataAs::Ifaces | DataAs::String => 16,
             DataAs::SliceHeader => 24,
         }
@@ -747,7 +768,16 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(addr_str) = &args.data_at {
         let addr = parse_pc(addr_str)?;
-        let len = args.data_len.unwrap_or_else(|| args.data_as.default_len());
+        // Resolve length from --data-count (records) or --data-len
+        // (bytes); the clap conflict declaration guarantees at most
+        // one is set. Records-mode multiplies by the per-mode record
+        // size so 7 ifaces = 7 * 16 = 112 bytes without the operator
+        // doing the math.
+        let len = match (args.data_count, args.data_len) {
+            (Some(n), _) => n.saturating_mul(args.data_as.record_size()),
+            (None, Some(n)) => n,
+            (None, None) => args.data_as.default_len(),
+        };
         let mode = args.data_as.to_module();
         // Lazily pull itabs + functions for symbolization. Failures
         // here degrade gracefully: ptrs/ifaces still render the raw
