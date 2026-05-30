@@ -196,3 +196,120 @@ fn make_hit(pc: u64, target: u64, kind: Kind, pcln: &Pclntab<'_>) -> DataXref {
 fn read_i32(b: &[u8]) -> i32 {
     i32::from_le_bytes(b[..4].try_into().unwrap())
 }
+
+/// One-shot sweep collecting every address `.text` instructions
+/// reference RIP-relative AND every 8-byte little-endian value
+/// inside the read/write data sections (`.data`, `.noptrdata`,
+/// `.rodata`) that falls inside a known mapped section. Returns the
+/// set of addresses; the caller decides what to match against (itab
+/// table, function table, etc.).
+///
+/// Both passes matter for liveness checks: Go's linker writes itab
+/// pointers into `.data`-resident iface tables, so an itab that is
+/// only reachable through one of those tables is still live even
+/// though no `.text` instruction LEAs its address directly. Without
+/// the data-side scan, every itab used by the (itab,data) iface
+/// layout would falsely show as unused.
+pub fn referenced_addresses(bin: &GoBinary) -> Result<std::collections::HashSet<u64>> {
+    let mut out = std::collections::HashSet::new();
+    if !bin.little_endian || !matches!(bin.arch, Arch::X86_64) {
+        return Ok(out);
+    }
+    let text = bin
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Text && s.name.ends_with(".text"))
+        .or_else(|| {
+            bin.sections
+                .iter()
+                .filter(|s| s.kind == SectionKind::Text)
+                .max_by_key(|s| s.file_size)
+        });
+    if let Some(text) = text {
+        scan_text_amd64(
+            &bin.bytes[text.file_offset..text.file_offset + text.file_size],
+            text.addr,
+            &mut out,
+        );
+    }
+
+    // Map of plausible address bounds for cheap range filtering of
+    // qword candidates from data sections.
+    let mut bounds: Vec<(u64, u64)> = bin
+        .sections
+        .iter()
+        .filter(|s| !s.name.is_empty() && s.file_size > 0)
+        .map(|s| {
+            (
+                s.addr,
+                s.addr.saturating_add(s.vmsize.max(s.file_size as u64)),
+            )
+        })
+        .collect();
+    bounds.sort();
+
+    for s in &bin.sections {
+        if !matches!(
+            s.kind,
+            SectionKind::Data | SectionKind::NoPtrData | SectionKind::ReadOnlyData
+        ) {
+            continue;
+        }
+        let end = s
+            .file_offset
+            .saturating_add(s.file_size)
+            .min(bin.bytes.len());
+        let slice = &bin.bytes[s.file_offset..end];
+        let mut i = 0;
+        while i + 8 <= slice.len() {
+            let v = u64::from_le_bytes(slice[i..i + 8].try_into().unwrap());
+            if looks_like_address(v, &bounds) {
+                out.insert(v);
+            }
+            i += 8;
+        }
+    }
+    Ok(out)
+}
+
+fn scan_text_amd64(text_bytes: &[u8], text_start: u64, out: &mut std::collections::HashSet<u64>) {
+    let mut i = 0usize;
+    while i + 7 <= text_bytes.len() {
+        let b = text_bytes[i];
+        if b == 0xff && i + 6 <= text_bytes.len() {
+            let modrm = text_bytes[i + 1];
+            if modrm & 0xC7 == 0x05 {
+                let reg = (modrm >> 3) & 0x7;
+                if reg == 2 || reg == 4 {
+                    let disp = read_i32(&text_bytes[i + 2..i + 6]);
+                    let next_pc = text_start + (i as u64) + 6;
+                    out.insert(next_pc.wrapping_add(disp as i64 as u64));
+                }
+                i += 6;
+                continue;
+            }
+        }
+        if b == 0x48 && i + 7 <= text_bytes.len() {
+            let op = text_bytes[i + 1];
+            let modrm = text_bytes[i + 2];
+            if modrm & 0xC7 == 0x05 && matches!(op, 0x8D | 0x8B | 0x89 | 0x39 | 0x3B) {
+                let disp = read_i32(&text_bytes[i + 3..i + 7]);
+                let next_pc = text_start + (i as u64) + 7;
+                out.insert(next_pc.wrapping_add(disp as i64 as u64));
+                i += 7;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Cheap range check: a u64 looks like an address when it falls into
+/// any known mapped section's span. Filters out lengths/caps/zeros
+/// that would otherwise inflate the address set with garbage.
+fn looks_like_address(v: u64, bounds: &[(u64, u64)]) -> bool {
+    if v < 0x1000 {
+        return false;
+    }
+    bounds.iter().any(|&(lo, hi)| v >= lo && v < hi)
+}

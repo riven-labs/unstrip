@@ -1015,6 +1015,35 @@ fn dataview_inspect_bytes_mode_returns_aligned_hex_rows() {
 }
 
 #[test]
+fn dataxref_referenced_addresses_covers_live_itabs() {
+    // The liveness annotation on --itabs depends on referenced_addresses
+    // returning a set that contains every itab reachable from .text OR
+    // from a data-section pointer-table. Real Go binaries dead-strip
+    // unreachable itabs at link time, so the set the linker leaves in
+    // runtime.itablinks IS the live set; every recovered itab address
+    // must therefore appear in the reachability set.
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let md = unstrip::ModuleData::locate(&bin).expect("md");
+    let itabs_v = itabs::recover_all(&bin, &md).expect("itabs");
+    let reachable = unstrip::dataxref::referenced_addresses(&bin).expect("sweep");
+    assert!(!itabs_v.is_empty());
+    let missing: Vec<u64> = itabs_v
+        .iter()
+        .map(|it| it.addr)
+        .filter(|a| !reachable.contains(a))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "every recovered itab must be reachable per the sweep; {} missing: {:?}",
+        missing.len(),
+        &missing[..missing.len().min(5)],
+    );
+}
+
+#[test]
 fn dataxref_scan_runs_and_attributes_hits_when_present() {
     // Which specific data addresses get RIP-relative-LEA'd depends on
     // codegen choices and varies per build. Picking the pclntab base

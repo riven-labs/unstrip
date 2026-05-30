@@ -262,6 +262,16 @@ struct Args {
     #[arg(long, value_enum, default_value_t = DataAs::Bytes, value_name = "bytes|qwords|ptrs|ifaces|slice-header|string")]
     data_as: DataAs,
 
+    /// Suppress the (live)/(unused) liveness annotation on --itabs.
+    /// By default --itabs runs a one-shot .text scan and tags each
+    /// itab as `(live)` when its address is LEA'd or MOV'd from any
+    /// .text site, `(unused)` otherwise. Pass this when you only
+    /// want the raw itab table (large binaries where the scan is
+    /// not free, or scripted consumers that prefer the JSON shape
+    /// without the marker).
+    #[arg(long)]
+    no_itab_liveness: bool,
+
     /// List every `.text` instruction that READS the given data
     /// address: LEA, MOV-load, CMP-against-memory, CALL/JMP through
     /// a memory pointer. Each hit reports the containing function
@@ -1143,12 +1153,22 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         all.retain(|it| args.show.keeps_concrete(&it.concrete_name));
+        // Liveness pass: one .text sweep collecting every RIP-
+        // relative address, then mark each itab whose recorded
+        // address is in the set. Defaults on; opt out for very large
+        // binaries or scripted consumers that prefer the unannotated
+        // shape.
+        let live_set = if args.no_itab_liveness {
+            None
+        } else {
+            Some(unstrip::dataxref::referenced_addresses(&bin).unwrap_or_default())
+        };
         match args.format {
             OutFormat::Json => {
                 serde_json::to_writer_pretty(&mut out, &all)?;
                 writeln!(out)?;
             }
-            OutFormat::Text => write_itabs(&mut out, &all)?,
+            OutFormat::Text => write_itabs(&mut out, &all, live_set.as_ref())?,
             f => return Err(format!("--itabs does not support --format {:?}", f).into()),
         }
         out.flush()?;
@@ -1370,7 +1390,11 @@ fn write_goroutines<W: Write>(
     Ok(())
 }
 
-fn write_itabs<W: Write>(w: &mut W, all: &[unstrip::Itab]) -> io::Result<()> {
+fn write_itabs<W: Write>(
+    w: &mut W,
+    all: &[unstrip::Itab],
+    live: Option<&std::collections::HashSet<u64>>,
+) -> io::Result<()> {
     let iw = all
         .iter()
         .map(|i| i.interface_name.len())
@@ -1384,14 +1408,24 @@ fn write_itabs<W: Write>(w: &mut W, all: &[unstrip::Itab]) -> io::Result<()> {
         .unwrap_or(20)
         .min(60);
     for it in all {
-        let marker = if it.incomplete { "  [INCOMPLETE]" } else { "" };
+        let mut markers = String::new();
+        if it.incomplete {
+            markers.push_str("  [INCOMPLETE]");
+        }
+        if let Some(live) = live {
+            if live.contains(&it.addr) {
+                markers.push_str("  (live)");
+            } else {
+                markers.push_str("  (unused)");
+            }
+        }
         writeln!(
             w,
             "0x{:016x}  {:<iw$}  =>  {:<cw$}{}",
             it.addr,
             it.interface_name,
             it.concrete_name,
-            marker,
+            markers,
             iw = iw,
             cw = cw,
         )?;
