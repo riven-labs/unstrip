@@ -28,9 +28,10 @@ testdata/*.bin
 testdata/*.exe
 testdata/*.macho
 
-# Inline-tree coverage probe working-tree artifacts. The decoder, harness,
-# and REPORT.md are tracked under src/inline/, internal/inlinecov/, and
-# internal/inlinecov/REPORT.md. Everything below regenerates per run.
+# Inline-tree coverage probe working-tree artifacts. The decoder, the
+# measurement tool, and REPORT.md are tracked under src/inline/,
+# internal/inlinecov/, and internal/inlinecov/REPORT.md. Everything
+# below regenerates per run.
 /probe/inline-coverage/toolchains/
 /probe/inline-coverage/sources/
 /probe/inline-coverage/corpus/
@@ -40,3 +41,11 @@ testdata/*.macho
 /probe/inline-coverage/*.sh
 /probe/inline-coverage/*.tsv
 /probe/inline-coverage/DAY1.md
+
+# Monorepo-internal scaffolding. These directories live at the parent
+# Public/ working tree (Public/scripts/, Public/docs/, Public/.claude/)
+# and must never be vendored into a public sub-repo. The deny rules below
+# block accidental copies that land under unstrip/.
+/scripts/
+/docs/
+/.claude/
