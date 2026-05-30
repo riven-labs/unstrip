@@ -917,6 +917,104 @@ fn xrefs_node_depth_tracks_bfs_distance_from_root() {
 }
 
 #[test]
+fn dataview_symbolize_resolves_itab_and_function_addresses() {
+    // Run the symbolizer against known address classes on a real
+    // binary: pick an itab from --itabs and a function from pclntab,
+    // and assert each resolves to the right kind. This is the
+    // contract --data-at --as ptrs|ifaces depends on; if it breaks
+    // here, --data-at silently degrades to raw hex on a real binary.
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("pcln");
+    let funcs = pcln.functions().expect("funcs");
+    let md = unstrip::ModuleData::locate(&bin).expect("md");
+    let itabs_v = itabs::recover_all(&bin, &md).expect("itabs");
+
+    assert!(!itabs_v.is_empty(), "fixture must have itabs");
+    let it = &itabs_v[0];
+    match unstrip::dataview::symbolize(&bin, &pcln, &itabs_v, &funcs, it.addr) {
+        unstrip::dataview::Symbol::Itab {
+            interface,
+            concrete,
+        } => {
+            assert_eq!(interface, it.interface_name);
+            assert_eq!(concrete, it.concrete_name);
+        }
+        other => panic!("expected Symbol::Itab at itab address, got {:?}", other),
+    }
+
+    let main_main = funcs
+        .iter()
+        .find(|f| f.name == "main.main")
+        .expect("main.main");
+    match unstrip::dataview::symbolize(&bin, &pcln, &itabs_v, &funcs, main_main.address) {
+        unstrip::dataview::Symbol::Function {
+            name,
+            entry,
+            offset,
+        } => {
+            assert_eq!(name, "main.main");
+            assert_eq!(entry, main_main.address);
+            assert_eq!(offset, 0);
+        }
+        other => panic!("expected Symbol::Function at entry PC, got {:?}", other),
+    }
+
+    // Mid-function PC: same function name, non-zero offset.
+    let mid = main_main.address + 5;
+    match unstrip::dataview::symbolize(&bin, &pcln, &itabs_v, &funcs, mid) {
+        unstrip::dataview::Symbol::Function {
+            name,
+            entry,
+            offset,
+        } => {
+            assert_eq!(name, "main.main");
+            assert_eq!(entry, main_main.address);
+            assert_eq!(offset, 5);
+        }
+        other => panic!("expected mid-function Symbol::Function, got {:?}", other),
+    }
+
+    // A small integer is not a pointer; must surface as Scalar.
+    match unstrip::dataview::symbolize(&bin, &pcln, &itabs_v, &funcs, 42) {
+        unstrip::dataview::Symbol::Scalar { value } => assert_eq!(value, 42),
+        other => panic!("expected Scalar for small int, got {:?}", other),
+    }
+}
+
+#[test]
+fn dataview_inspect_bytes_mode_returns_aligned_hex_rows() {
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("pcln");
+    let funcs = pcln.functions().expect("funcs");
+    let md = unstrip::ModuleData::locate(&bin).expect("md");
+    let itabs_v = itabs::recover_all(&bin, &md).expect("itabs");
+
+    // Pick any in-bounds data address; the pclntab base is reliable.
+    let rows = unstrip::dataview::inspect(
+        &bin,
+        &pcln,
+        &itabs_v,
+        &funcs,
+        md.pc_header_addr,
+        64,
+        unstrip::dataview::As::Bytes,
+    )
+    .expect("inspect");
+    assert_eq!(rows.len(), 4, "64 bytes / 16-per-row = 4 rows");
+    for (i, r) in rows.iter().enumerate() {
+        assert_eq!(r.addr, md.pc_header_addr + (i as u64) * 16);
+        assert_eq!(r.bytes.len(), 16);
+        assert!(r.rendering.contains('|'), "ASCII gutter must be present");
+    }
+}
+
+#[test]
 fn dataxref_scan_runs_and_attributes_hits_when_present() {
     // Which specific data addresses get RIP-relative-LEA'd depends on
     // codegen choices and varies per build. Picking the pclntab base

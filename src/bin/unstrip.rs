@@ -236,6 +236,32 @@ struct Args {
     #[arg(long)]
     filter: Option<String>,
 
+    /// Inspect raw bytes at a data address with optional symbolic
+    /// interpretation. `--as bytes` (default) prints a hex+ASCII dump.
+    /// `--as qwords` decodes 8-byte little-endian values. `--as ptrs`
+    /// does the same but resolves each value against the recovered
+    /// function table, itab table, and section map. `--as ifaces`
+    /// interprets 16-byte Go interface headers and resolves the itab
+    /// to a concrete type. `--as slice-header` parses 24-byte slice
+    /// headers (ptr + len + cap). `--as string` parses Go string
+    /// headers (ptr + len) and previews the pointed-to bytes when
+    /// they look printable. `--len` defaults to 64 for bytes/qwords,
+    /// 1 element for the structured modes.
+    #[arg(long, value_name = "ADDR")]
+    data_at: Option<String>,
+
+    /// With --data-at, the number of bytes to inspect. Defaults: 64
+    /// for bytes/qwords/ptrs; 16 for ifaces and string; 24 for
+    /// slice-header. The actual read is clamped to the containing
+    /// section's file-backed range.
+    #[arg(long, value_name = "N")]
+    data_len: Option<usize>,
+
+    /// With --data-at, the interpretation. See --data-at for the
+    /// per-mode shape.
+    #[arg(long, value_enum, default_value_t = DataAs::Bytes, value_name = "bytes|qwords|ptrs|ifaces|slice-header|string")]
+    data_as: DataAs,
+
     /// List every `.text` instruction that READS the given data
     /// address: LEA, MOV-load, CMP-against-memory, CALL/JMP through
     /// a memory pointer. Each hit reports the containing function
@@ -277,6 +303,37 @@ enum GoroutinesShow {
     All,
     Resolved,
     Unresolved,
+}
+
+#[derive(Copy, Clone, ValueEnum, PartialEq, Eq, Debug)]
+enum DataAs {
+    Bytes,
+    Qwords,
+    Ptrs,
+    Ifaces,
+    SliceHeader,
+    String,
+}
+
+impl DataAs {
+    fn to_module(self) -> unstrip::dataview::As {
+        match self {
+            DataAs::Bytes => unstrip::dataview::As::Bytes,
+            DataAs::Qwords => unstrip::dataview::As::Qwords,
+            DataAs::Ptrs => unstrip::dataview::As::Ptrs,
+            DataAs::Ifaces => unstrip::dataview::As::Ifaces,
+            DataAs::SliceHeader => unstrip::dataview::As::SliceHeader,
+            DataAs::String => unstrip::dataview::As::String,
+        }
+    }
+
+    fn default_len(self) -> usize {
+        match self {
+            DataAs::Bytes | DataAs::Qwords | DataAs::Ptrs => 64,
+            DataAs::Ifaces | DataAs::String => 16,
+            DataAs::SliceHeader => 24,
+        }
+    }
 }
 
 #[derive(Copy, Clone, ValueEnum, PartialEq, Eq, Debug)]
@@ -673,6 +730,35 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 f => return Err(format!("--fingerprint does not support --format {:?}", f).into()),
             }
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
+    if let Some(addr_str) = &args.data_at {
+        let addr = parse_pc(addr_str)?;
+        let len = args.data_len.unwrap_or_else(|| args.data_as.default_len());
+        let mode = args.data_as.to_module();
+        // Lazily pull itabs + functions for symbolization. Failures
+        // here degrade gracefully: ptrs/ifaces still render the raw
+        // hex via the Unmapped/Scalar fallback. We do not propagate.
+        let functions = pcln.functions().unwrap_or_default();
+        let itabs_v = match ModuleData::locate(&bin) {
+            Ok(md) => itabs::recover_all(&bin, &md).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        let rows = unstrip::dataview::inspect(&bin, &pcln, &itabs_v, &functions, addr, len, mode)?;
+        match args.format {
+            OutFormat::Json => {
+                serde_json::to_writer_pretty(&mut out, &rows)?;
+                writeln!(out)?;
+            }
+            OutFormat::Text => {
+                for r in &rows {
+                    writeln!(out, "0x{:016x}  {}", r.addr, r.rendering)?;
+                }
+            }
+            f => return Err(format!("--data-at does not support --format {f:?}").into()),
         }
         out.flush()?;
         return Ok(());

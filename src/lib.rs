@@ -1,5 +1,6 @@
 pub mod buildinfo;
 pub mod capabilities;
+pub mod dataview;
 pub mod dataxref;
 pub mod diff;
 pub mod dispatch;
