@@ -835,7 +835,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
             OutFormat::Text => {
                 if hits.is_empty() {
-                    writeln!(out, "# 0 call sites for {symbol}")?;
+                    writeln!(out, "No call sites found for {symbol}")?;
                 } else {
                     // Group by caller so the listing reads the way a
                     // human reverse engineer reads xrefs: one header

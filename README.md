@@ -271,7 +271,7 @@ runtime.convT @ 0x000000000040fb00:
   0x000000000040fb29  direct
 ```
 
-Accepts a function name (resolved through pclntab) or a hex address (`0x...`). When the target is an interface-method implementation, indirect dispatch sites of the form `CALL [rip+itab+slot]` are reported alongside direct calls with the resolved itab and method name carried inline. The compiler usually loads the slot pointer into a register first; those register-indirect sites do not show up here because resolving them requires basic-block tracking we deliberately don't ship. The strict-encoding hits that do appear carry zero false positives.
+Accepts a function name (resolved through pclntab) or a hex address (`0x...`). When the target is an interface-method implementation, indirect dispatch sites of the form `CALL [rip+itab+slot]` are reported alongside direct calls with the resolved itab and method name carried inline. The compiler usually loads the slot pointer into a register first; those register-indirect sites do not show up here because resolving them requires basic-block tracking we deliberately don't ship. In practice the indirect-itab scanner finds matches on hand-written assembly and unusual codegen; expect zero hits from stock Go compiler output. The strict-encoding hits that do appear carry zero false positives.
 
 amd64 only today.
 
