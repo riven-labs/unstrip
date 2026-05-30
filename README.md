@@ -27,6 +27,8 @@ unstrip ./bin --info                # container, Go version, garble heuristic
 unstrip ./bin --format ghidra > apply.py    # Python script for Ghidra Script Manager
 ```
 
+`unstrip -h` prints a one-screen cheat sheet. `unstrip --help` lists every flag grouped by section. The full reference with one paragraph per flag lives in [docs/USAGE.md](./docs/USAGE.md).
+
 ## Why unstrip
 
 - Inlined call stacks, not just leaf functions: `--addr` returns the full inline tree from funcdata.
