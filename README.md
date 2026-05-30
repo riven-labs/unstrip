@@ -433,10 +433,6 @@ Known gaps in v1.0:
 - v2.0: Rust binary symbol recovery (DWARF + Rust-specific name demangling)
 - v2.1: Swift binary symbol recovery
 
-## Performance
-
-On a stripped 65 MiB helm binary (75,630 functions, 29,743 types, 3,735 itabs), every feature runs in under 100 ms. See [`BENCHMARKS.md`](./BENCHMARKS.md) for the full corpus and per-feature timings.
-
 ## Contributing
 
 PRs welcome. Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening one. Good first issues are tagged [`good first issue`](https://github.com/riven-labs/unstrip/labels/good%20first%20issue). For vulnerability reports see [SECURITY.md](./SECURITY.md).
