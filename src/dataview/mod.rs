@@ -63,8 +63,18 @@ pub enum Symbol {
         offset: u64,
     },
     /// `itab(iface=concrete)` when the address matches a recovered
-    /// itab record's base.
-    Itab { interface: String, concrete: String },
+    /// itab record's base. `methods` carries the recovered (method
+    /// name, concrete fn address) pairs so callers that already know
+    /// they are looking at an iface dispatch slot (e.g. `--data-as
+    /// ifaces`) can print the dispatched body address inline without
+    /// a second --itabs lookup. Empty when the itab was recovered
+    /// without resolvable methods.
+    Itab {
+        interface: String,
+        concrete: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        methods: Vec<ItabMethodEntry>,
+    },
     /// `<section>+0xN` when no closer symbol matches but the address
     /// lies within a known section.
     SectionOffset { section: String, offset: u64 },
@@ -73,6 +83,14 @@ pub enum Symbol {
     /// Bit pattern that does not look like an address at all (zero,
     /// small ints, etc.). Surface verbatim as a u64 with no claims.
     Scalar { value: u64 },
+}
+
+/// One method entry carried inline on [`Symbol::Itab`] so iface
+/// dispatch slots can resolve to a callable body in one query.
+#[derive(Debug, Clone, Serialize)]
+pub struct ItabMethodEntry {
+    pub name: String,
+    pub concrete_fn: u64,
 }
 
 impl Symbol {
@@ -87,7 +105,28 @@ impl Symbol {
             Symbol::Itab {
                 interface,
                 concrete,
-            } => format!("itab({interface} = {concrete})"),
+                methods,
+            } => {
+                let mut s = format!("itab({interface} = {concrete})");
+                // Append every method's dispatched body address inline
+                // so the operator does not have to bounce out to
+                // --itabs just to learn where dispatch will land. For
+                // the common single-method case (most stdlib ifaces
+                // and chain-stage style ifaces), this collapses two
+                // commands into one. Hidden when no methods resolved
+                // so the simple case stays readable.
+                if !methods.is_empty() {
+                    s.push_str("  [");
+                    for (i, m) in methods.iter().enumerate() {
+                        if i > 0 {
+                            s.push_str(", ");
+                        }
+                        s.push_str(&format!(".{}() -> 0x{:x}", m.name, m.concrete_fn));
+                    }
+                    s.push(']');
+                }
+                s
+            }
             Symbol::SectionOffset { section, offset } => format!("{section}+0x{offset:x}"),
             Symbol::Unmapped => "(unmapped)".to_string(),
             Symbol::Scalar { value } => format!("0x{value:x}"),
@@ -325,6 +364,14 @@ impl<'a> SymCtx<'a> {
             return Symbol::Itab {
                 interface: it.interface_name.clone(),
                 concrete: it.concrete_name.clone(),
+                methods: it
+                    .methods
+                    .iter()
+                    .map(|m| ItabMethodEntry {
+                        name: m.interface_method.clone(),
+                        concrete_fn: m.concrete_fn,
+                    })
+                    .collect(),
             };
         }
         if let Some(f) = self.function_by_addr.get(&value) {

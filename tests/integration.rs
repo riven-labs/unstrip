@@ -938,9 +938,19 @@ fn dataview_symbolize_resolves_itab_and_function_addresses() {
         unstrip::dataview::Symbol::Itab {
             interface,
             concrete,
+            methods,
         } => {
             assert_eq!(interface, it.interface_name);
             assert_eq!(concrete, it.concrete_name);
+            // Methods are surfaced inline so iface-mode renderings
+            // can dispatch in one query. When the recovered itab
+            // carries methods, the symbol must too; when it does not,
+            // both stay empty.
+            assert_eq!(methods.len(), it.methods.len());
+            for (m_sym, m_src) in methods.iter().zip(it.methods.iter()) {
+                assert_eq!(m_sym.name, m_src.interface_method);
+                assert_eq!(m_sym.concrete_fn, m_src.concrete_fn);
+            }
         }
         other => panic!("expected Symbol::Itab at itab address, got {:?}", other),
     }
