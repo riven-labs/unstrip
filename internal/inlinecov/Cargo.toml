@@ -3,7 +3,7 @@ name = "inlinecov"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Inline-tree coverage measurement harness. Internal tool, not shipped."
+description = "Inline-tree coverage measurement tool. Internal use only, not shipped."
 
 [[bin]]
 name = "inlinecov"

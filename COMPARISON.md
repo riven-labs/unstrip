@@ -1,15 +1,15 @@
 # unstrip compared to GoReSym, gore, and redress
 
-Numeric benchmarks are deferred until we publish a reproducible harness; this file covers categorical differences only. Every claim below is verifiable against the cited tool's repository.
+Numeric benchmarks are deferred until we publish a reproducible test setup. This file covers categorical differences only. Every claim below is verifiable against the cited tool's repository.
 
 If you re-run a categorical claim against the current upstream and find it stale, open an issue. Upstream tools move; the responsibility for keeping this honest is ours.
 
 ## What each tool is, briefly
 
-- **unstrip** — Rust CLI. Reads pclntab, moduledata, typelinks, itablinks. Targets stripped Go binaries on ELF, Mach-O, and PE.
-- **[GoReSym](https://github.com/mandiant/GoReSym)** — Go CLI by Mandiant. The longest-running tool in this space; recovers function table, type metadata, build info from stripped Go binaries.
-- **[gore](https://github.com/goretk/gore)** — Go library, not a CLI. Provides the analysis primitives that other tools (notably redress) consume.
-- **[redress](https://github.com/goretk/redress)** — Go CLI. Built on top of `gore`. Targets the same problem space as GoReSym and unstrip.
+- **unstrip**. Rust CLI. Reads pclntab, moduledata, typelinks, itablinks. Targets stripped Go binaries on ELF, Mach-O, and PE.
+- **[GoReSym](https://github.com/mandiant/GoReSym)**. Go CLI by Mandiant. The longest-running tool in this space; recovers function table, type metadata, build info from stripped Go binaries.
+- **[gore](https://github.com/goretk/gore)**. Go library, not a CLI. Provides the analysis primitives that other tools (notably redress) consume.
+- **[redress](https://github.com/goretk/redress)**. Go CLI. Built on top of `gore`. Targets the same problem space as GoReSym and unstrip.
 
 ## What each tool does that the others don't
 
@@ -75,4 +75,4 @@ Each claim above can be checked in 30 seconds by visiting the cited repository's
 - redress: https://github.com/goretk/redress (check the README for the radare2 integration)
 - unstrip: see the [README](./README.md) for every claim, and `--help` for the full flag surface
 
-Numeric comparisons (recovery counts, wall-clock times, peak memory) will land when we publish the harness alongside the data.
+Numeric comparisons (recovery counts, wall-clock times, peak memory) will land when we publish the benchmark runner alongside the data.

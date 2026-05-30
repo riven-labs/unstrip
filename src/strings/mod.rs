@@ -14,7 +14,7 @@
 //! sections, configurable minimum length, optional substring filter.
 //! Not in v1.0: regex filter (substring is consistent with every other
 //! unstrip subcommand's `--filter`), classification taxonomy
-//! (urls vs paths vs usage strings — out of scope per the v1.0 scope
+//! (urls vs paths vs usage strings; out of scope per the v1.0 scope
 //! call), entropy scoring, cross-ref to xrefs. These belong in v1.2 if
 //! field demand materializes.
 //!

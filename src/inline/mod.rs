@@ -37,7 +37,7 @@
 //! described by moduledata). The per-function entry point is funcdata
 //! index 3 (`FUNCDATA_InlTree`), stored as a u32 offset relative to
 //! `gofunc`. A value of `u32::MAX` means "no inline tree for this
-//! function" — the decoder returns `Ok(vec![])` in that case.
+//! function". The decoder returns `Ok(vec![])` in that case.
 //!
 //! Safety: every decoded `parent_pc` is asserted to lie strictly inside
 //! the host function's PC range. This catches the most common
@@ -78,7 +78,7 @@ const MAX_INLINE_ENTRIES: usize = 65_536;
 /// because it has fewer than 4 funcdata entries, or because slot 3 is
 /// the sentinel `u32::MAX`). Returns an error if the gofunc base is
 /// missing (call [`Pclntab::with_gofunc`] first), if the encoded
-/// structure straddles unmapped memory, or — most importantly — if any
+/// structure straddles unmapped memory, or (most importantly) if any
 /// decoded entry's `parent_pc` falls outside the host function's PC
 /// range. The last check is the safety assertion the wizard flagged.
 pub fn decode_inline_tree(
@@ -130,7 +130,7 @@ pub fn decode_inline_tree(
         u32::try_from(func.size).unwrap_or(u32::MAX),
     );
     if max_idx < 0 {
-        // No inline indices ever recorded for this function — empty tree.
+        // No inline indices ever recorded for this function: empty tree.
         return Ok(vec![]);
     }
     let n_entries = (max_idx as usize).saturating_add(1).min(MAX_INLINE_ENTRIES);
@@ -163,7 +163,7 @@ pub fn decode_inline_tree(
     // We read entries until the next 16-byte slice fails to map, at which
     // point we stop. Production v1.1 will tighten this using the
     // pcdata-derived high-watermark; for the probe this conservative walk
-    // is what we want — it surfaces stray padding bytes rather than
+    // is what we want; it surfaces stray padding bytes rather than
     // silently truncating real entries.
     let mut out = Vec::with_capacity(n_entries);
     for i in 0..n_entries {
@@ -211,8 +211,8 @@ pub fn decode_inline_tree(
 }
 
 /// Resolve a leaf entry's `name_off` to a function name. Returns `None`
-/// if the offset is zero, out of range, or resolves to an empty string —
-/// the three "unresolved" buckets the probe measurement harness reports.
+/// if the offset is zero, out of range, or resolves to an empty string.
+/// Those are the three "unresolved" buckets the probe measurement tool reports.
 pub fn resolve_leaf_name(pcln: &Pclntab, leaf: &InlinedCall) -> Option<String> {
     if leaf.name_off == 0 {
         return None;
@@ -337,7 +337,7 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
 // Cycles: inline trees themselves are acyclic by Go compiler invariant
 // (the compiler will not inline a function into itself). Across
 // functions, an A->B inlined edge and a B->A inlined edge can both
-// exist when both directions inlined a peer call site — the graph
+// exist when both directions inlined a peer call site; the graph
 // allows that. No cycle-breaking is performed; consumers walking the
 // graph are responsible for their own visit tracking if they need it.
 
@@ -435,7 +435,7 @@ impl CallGraph {
 ///
 /// For every physical function recovered from `pcln`, decodes its
 /// `FUNCDATA_InlTree` and emits one `Edge` per inlined call record
-/// (those with `parent_pc != -1` — the `-1` root entry represents
+/// (those with `parent_pc != -1`; the `-1` root entry represents
 /// the physical function itself and produces no edge). Inlined
 /// callees with a resolvable name dedupe across the binary (one
 /// `Node` per distinct name); anonymous-inline records dedupe within
@@ -467,7 +467,7 @@ pub fn inline_callgraph(bin: &GoBinary, pcln: &Pclntab) -> Result<CallGraph> {
 
     // Emit a Physical node for every real function. Some of these
     // will have no inline tree at all (the ~50% of Go functions
-    // that inline nothing) — they remain in the graph as isolated
+    // that inline nothing); they remain in the graph as isolated
     // nodes so consumers can iterate every function uniformly.
     for f in &funcs {
         graph.nodes.push(Node {

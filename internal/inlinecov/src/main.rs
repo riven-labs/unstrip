@@ -1,4 +1,4 @@
-//! Day-2 measurement harness for the inline-tree decoder.
+//! Day-2 measurement tool for the inline-tree decoder.
 //!
 //! For one binary (a "cell" in the probe corpus), decodes every function's
 //! FUNCDATA_InlTree array, classifies every leaf into one of three
@@ -116,7 +116,7 @@ fn run(args: &Args) -> Result<(), String> {
     for f in &funcs {
         total_funcs += 1;
         // A decode failure (bounds-check tripped, gofunc unresolved, etc.) is
-        // still data — we record it as zero leaves and skip aggregation. The
+        // still data: we record it as zero leaves and skip aggregation. The
         // alternative (panic / abort the whole cell) would lose useful per-fn
         // coverage data when a single corrupt entry exists.
         let entries: Vec<InlinedCall> = decode_inline_tree(&bin, &pcln, f).unwrap_or_default();

@@ -4,7 +4,7 @@
 //! is a real Go binary built from `testdata/hello.go`. Every real Go
 //! binary has at least one function with a non-empty inline tree
 //! (runtime.* is aggressively inlined), so we assert that property
-//! directly and additionally verify the `parent_pc < func.size`
+//! directly and also verify the `parent_pc < func.size`
 //! safety invariant for every decoded entry across the whole binary.
 
 use std::path::PathBuf;
@@ -215,7 +215,7 @@ fn inline_callgraph_dedupes_inlined_edges_and_named_callees() {
     // Inlined-only callees (NodeKind::AnonymousInline with a non-empty
     // name) must dedupe by name: when many physical functions inline
     // the same callee, the inlined edges all point at one node, not N.
-    // Physical nodes with duplicate names are NOT duplicates — the Go
+    // Physical nodes with duplicate names are NOT duplicates: the Go
     // linker legitimately emits multiple physical functions sharing a
     // name in a stripped binary (e.g. `runtime.debugCallWrap` is
     // instantiated per stack-arg-size), and collapsing them would lose

@@ -50,7 +50,7 @@ Buckets:
 
 ## 5. Worst-cell analysis
 
-Worst on `%funcs-with-inltree`: `1.24/none` syncthing at 45.06%. The largest, least-stripped binary scores lowest — this is not damage, it is the ground truth of how often Go inlines. Roughly half of all functions have no inlined callees, so their inline-tree array is structurally empty.
+Worst on `%funcs-with-inltree`: `1.24/none` syncthing at 45.06%. The largest, least-stripped binary scores lowest. This is not damage, it is the ground truth of how often Go inlines. Roughly half of all functions have no inlined callees, so their inline-tree array is structurally empty.
 
 Worst on `%leaves-resolved`: `1.24/tiny` shfmt at 32.65%, with 6,332 of 9,401 leaves in bucket A. The tree structure (parent PC, start line, funcID) is fully intact; only the `name_off` field was zeroed by `-tiny` plus `-ldflags=-s -w`. Reclassified as anonymous-inline (structural recovery, name=null), this cell recovers 100% of topology.
 
@@ -73,4 +73,4 @@ Ship `inline_callgraph(binary) -> CallGraph` as the v1.1 headline. Anonymous-inl
 
 ## 9. Reproducibility
 
-Tag `probe/inline-coverage-day2-77c69dc` pins the pre-merge probe-branch state. The harness is at `internal/inlinecov/`; rebuild the corpus from `garble/` upstream + Go 1.22.12 + Go 1.24.5 + system Go 1.26 to reproduce the numbers. Working-tree-only inputs (toolchains, corpus binaries, results CSVs) are deliberately untracked; the harness regenerates them per run.
+Tag `probe/inline-coverage-day2-77c69dc` pins the pre-merge probe-branch state. The measurement tool lives at `internal/inlinecov/`; rebuild the corpus from `garble/` upstream + Go 1.22.12 + Go 1.24.5 + system Go 1.26 to reproduce the numbers. Working-tree-only inputs (toolchains, corpus binaries, results CSVs) are deliberately untracked; the tool regenerates them per run.
