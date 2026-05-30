@@ -49,3 +49,9 @@ testdata/*.macho
 /scripts/
 /docs/
 /.claude/
+
+# Allow-list for files we deliberately want under unstrip/docs/. Add new
+# entries here when a new public reference doc gets authored. Anything in
+# docs/ NOT listed below stays denied.
+!/docs/
+!/docs/USAGE.md
