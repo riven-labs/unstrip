@@ -917,6 +917,50 @@ fn xrefs_node_depth_tracks_bfs_distance_from_root() {
 }
 
 #[test]
+fn dataxref_scan_runs_and_attributes_hits_when_present() {
+    // Which specific data addresses get RIP-relative-LEA'd depends on
+    // codegen choices and varies per build. Picking the pclntab base
+    // is unreliable (the runtime reaches it through an indirect chain,
+    // not a direct RIP-relative load). itab addresses, by contrast,
+    // are LEA'd into interface-construction sites by definition. Scan
+    // the first handful of recovered itabs and assert at least one
+    // produces a non-empty hit set; every hit must attribute to a
+    // containing function name when one resolves.
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("pcln");
+    let md = unstrip::ModuleData::locate(&bin).expect("md");
+    let itabs_v = itabs::recover_all(&bin, &md).expect("itabs");
+    assert!(!itabs_v.is_empty(), "fixture must have itabs");
+
+    let mut any_hits = false;
+    for it in itabs_v.iter().take(20) {
+        let hits = unstrip::dataxref::find_refs(
+            &bin,
+            &pcln,
+            it.addr,
+            unstrip::dataxref::Direction::Readers,
+        )
+        .expect("scan");
+        for h in &hits {
+            assert_eq!(h.target_addr, it.addr);
+            if let Some(name) = &h.function_name {
+                assert!(!name.is_empty(), "function name must be non-empty");
+            }
+        }
+        if !hits.is_empty() {
+            any_hits = true;
+        }
+    }
+    assert!(
+        any_hits,
+        "expected at least one .text reader across the first 20 itab addresses"
+    );
+}
+
+#[test]
 fn goroutines_finds_runtime_newproc_sites() {
     // Every real Go binary calls runtime.newproc at least a handful of
     // times for the GC's background workers (runtime.gcBgMarkWorker,
