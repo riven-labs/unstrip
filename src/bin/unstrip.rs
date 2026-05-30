@@ -262,15 +262,15 @@ struct Args {
     #[arg(long, value_enum, default_value_t = DataAs::Bytes, value_name = "bytes|qwords|ptrs|ifaces|slice-header|string")]
     data_as: DataAs,
 
-    /// Suppress the (live)/(unused) liveness annotation on --itabs.
-    /// By default --itabs runs a one-shot .text scan and tags each
-    /// itab as `(live)` when its address is LEA'd or MOV'd from any
-    /// .text site, `(unused)` otherwise. Pass this when you only
-    /// want the raw itab table (large binaries where the scan is
-    /// not free, or scripted consumers that prefer the JSON shape
-    /// without the marker).
+    /// Suppress the (reachable)/(unreachable) annotation on --itabs.
+    /// By default --itabs runs a one-shot scan over .text and the
+    /// data sections and tags each itab as `(reachable)` when its
+    /// address is referenced from either side, `(unreachable)`
+    /// otherwise. Pass this when you only want the raw itab table
+    /// (large binaries where the scan is not free, or scripted
+    /// consumers that prefer the JSON shape without the marker).
     #[arg(long)]
-    no_itab_liveness: bool,
+    no_itab_reachability: bool,
 
     /// List every `.text` instruction that READS the given data
     /// address: LEA, MOV-load, CMP-against-memory, CALL/JMP through
@@ -1153,12 +1153,16 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         all.retain(|it| args.show.keeps_concrete(&it.concrete_name));
-        // Liveness pass: one .text sweep collecting every RIP-
-        // relative address, then mark each itab whose recorded
-        // address is in the set. Defaults on; opt out for very large
-        // binaries or scripted consumers that prefer the unannotated
-        // shape.
-        let live_set = if args.no_itab_liveness {
+        // Reachability pass: one sweep over .text and the data
+        // sections collecting every address worth treating as a
+        // target, then mark each itab whose recorded address is in
+        // the set. Defaults on; opt out for very large binaries or
+        // scripted consumers that prefer the unannotated shape. The
+        // annotation is `(reachable)` / `(unreachable)`, not
+        // "live"/"unused": on well-formed Go binaries the linker
+        // already dead-strips unreachable itabs, so the marker is a
+        // reachability confirmation, not a dead-code finder.
+        let reachable_set = if args.no_itab_reachability {
             None
         } else {
             Some(unstrip::dataxref::referenced_addresses(&bin).unwrap_or_default())
@@ -1168,7 +1172,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::to_writer_pretty(&mut out, &all)?;
                 writeln!(out)?;
             }
-            OutFormat::Text => write_itabs(&mut out, &all, live_set.as_ref())?,
+            OutFormat::Text => write_itabs(&mut out, &all, reachable_set.as_ref())?,
             f => return Err(format!("--itabs does not support --format {:?}", f).into()),
         }
         out.flush()?;
@@ -1393,7 +1397,7 @@ fn write_goroutines<W: Write>(
 fn write_itabs<W: Write>(
     w: &mut W,
     all: &[unstrip::Itab],
-    live: Option<&std::collections::HashSet<u64>>,
+    reachable: Option<&std::collections::HashSet<u64>>,
 ) -> io::Result<()> {
     let iw = all
         .iter()
@@ -1412,11 +1416,11 @@ fn write_itabs<W: Write>(
         if it.incomplete {
             markers.push_str("  [INCOMPLETE]");
         }
-        if let Some(live) = live {
-            if live.contains(&it.addr) {
-                markers.push_str("  (live)");
+        if let Some(reachable) = reachable {
+            if reachable.contains(&it.addr) {
+                markers.push_str("  (reachable)");
             } else {
-                markers.push_str("  (unused)");
+                markers.push_str("  (unreachable)");
             }
         }
         writeln!(
