@@ -30,27 +30,26 @@ unstrip ./bin --format ghidra > apply.py    # Python script for Ghidra Script Ma
 ## Why unstrip
 
 - Inlined call stacks, not just leaf functions: `--addr` returns the full inline tree from funcdata.
-- Real Ghidra, IDA, and Binary Ninja Python exporters with C struct decls and correct field offsets, not just JSON.
-- Single 942 KiB static binary; sub-100ms feature times on a 65 MiB helm binary.
+- Built-in Ghidra, IDA, and Binary Ninja Python exporters via `--format`, with C struct decls and correct field offsets.
+- `--data-at <addr>` interprets bytes at a data address through the recovered itab table and function table: iface headers resolve to concrete type + dispatched method body, slice headers expand to ptr/len/cap with the data pointer symbolized, string headers print a quoted preview.
+- 1.4 MiB static Rust binary, no runtime deps.
 - Go 1.18 through 1.25, ELF + Mach-O + PE, amd64 + arm64, PIE + non-PIE, one tool.
 
 ## Compared to
 
-A reproducible head-to-head against GoReSym (master, post-v1.7.1) on a 10-binary corpus including caddy, gh, helm, mkcert, and a Sliver client lives in [COMPARISON.md](./COMPARISON.md). Headline: identical function recovery, unstrip 25-200x faster on type recovery, GoReSym recovers 5-10x more type entries (a real gap on our side, on the v1.1 list), unique features each way.
+Categorical comparison against GoReSym, gore, and redress lives in [COMPARISON.md](./COMPARISON.md). Headline: similar core function recovery; the tools differ on what they include in the type catalog, on which RE-tool integrations they ship, and on how they handle obfuscated binaries.
+
+A short verified-only table follows. The longer differences and the "when to reach for which" guidance are in COMPARISON.md.
 
 | Capability                              | unstrip          | GoReSym    | redress  | gore     |
 |-----------------------------------------|------------------|------------|----------|----------|
-| Function names + file + line            | yes              | yes        | yes      | yes      |
-| Go 1.18 through 1.25                    | yes              | yes        | partial  | partial  |
-| Go 1.2 through 1.17                     | no (use GoReSym) | yes        | yes      | yes      |
-| Full struct layout with field offsets   | yes              | partial    | no       | partial  |
-| Interface to concrete itab pairs        | yes              | no         | no       | no       |
-| Inlined call stacks on `--addr`         | yes              | leaf only  | no       | no       |
-| Ghidra / IDA / Binja Python exporters   | yes (built-in)   | IDA only   | no       | no       |
-| Garble detection + partial recovery     | yes              | yes        | no       | no       |
-| Behavioral fingerprint (stdlib ifaces)  | yes              | no         | no       | no       |
-| Single static binary, no runtime deps   | yes (942 KiB)    | yes        | yes      | yes      |
-| Batch PC lookup (`--addr-file`)         | yes              | no         | no       | no       |
+| CLI vs library                          | CLI              | CLI        | CLI      | library  |
+| Go 1.18 through 1.25                    | yes              | yes        | yes      | yes      |
+| Pre-Go-1.18                             | no               | Go 1.2+    | Go 1.5+  | Go 1.5+  |
+| Ghidra + IDA + Binja exporters          | yes              | yes        | no       | no       |
+| Inlined call stacks on PC lookup        | yes              | unverified | no       | no       |
+| `--data-at` symbolic data inspection    | yes              | no         | no       | no       |
+| Static binary, no runtime deps          | yes (Rust)       | yes (Go)   | yes (Go) | n/a      |
 
 ## Use
 
@@ -88,10 +87,13 @@ When the binary's been obfuscated, `--info` says so instead of pretending the sy
 $ unstrip suspicious.bin --info
 go version:    (not detected)
 ...
-garble suspicion: 80%
-  - pclntab magic is not the standard 0xfffffff1, garble rewrites it to defeat parsers
-  - runtime.buildVersion is (missing), garble overwrites it
+garble heuristic: likely garbled
+  - pclntab magic is not the standard 0xfffffff1 (garble rewrites it)
+  - runtime.buildVersion is missing or non-standard (garble overwrites it)
+  - 554/4310 user-package function names look hashed
 ```
+
+For a structured verdict and exit-code semantics (0 garbled, 1 clean, 2 indeterminate), use `--detect-garble`.
 
 ### Module dependency tree
 
@@ -379,7 +381,7 @@ for e in &graph.edges {
 
 Witnessed format-stable across **Go 1.22 through 1.24** by the coverage probe (see `internal/inlinecov/REPORT.md`). Go 1.22 is the supported floor; Go 1.20 and 1.21 share the layout but are not witnessed by this codebase. Later toolchains (Go 1.26+) are best-effort pending witness. Garble's `entryoff` XOR rewrite provably does not touch the inline-tree FUNCDATA section, so the decoder runs unchanged on garble-obfuscated binaries (callee names come back obfuscated, not stripped).
 
-Direct (non-inlined) call edges land in v1.2 from pcdata reconstruction. `EdgeKind::Direct` is reserved now so adding it does not break callers; today only `EdgeKind::Inlined` is emitted.
+For direct (non-inlined) call edges and full-graph traversal, use `--xrefs` (CLI) or `unstrip::xrefs` (library). `EdgeKind::Direct` is reserved on the inlined call graph for a future fold of those edges; today only `EdgeKind::Inlined` is emitted by `inline_callgraph`.
 
 ## How it works
 
@@ -411,7 +413,7 @@ What works:
 - PC-to-symbol reverse lookup with inlined call stacks
 - IDA, Ghidra, Binary Ninja, JSON, and human-readable output
 
-Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Go 1.22, with function addresses verified byte-for-byte against `nm` on the unstripped equivalent. Windows PE amd64, Go 1.25, recovery verified by content. Mach-O code paths exercised but no macOS-built fixture yet, please file an issue if it breaks. garble v0.13, heuristic detection works and structural recovery survives.
+Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, on Go versions in the supported range. Mach-O code paths exercised but no macOS-built fixture in the integration suite yet; please file an issue if it breaks. Garble heuristic detection works and structural recovery survives the default mode (string literals, inline trees, and the funcdata array all stay walkable).
 
 What's out of scope, and where to look instead:
 
@@ -426,12 +428,17 @@ Known gaps in v1.0:
 
 ## Roadmap
 
-- v1.1: Go 1.13 through 1.17 pclntab support (closes the "use GoReSym for old binaries" gap)
-- v1.1: multi-module binary support (walk `moduledata.next` for Go plugins and `-buildmode=plugin`)
-- v1.2: function signature recovery (in/out parameter types beyond count and variadic flag)
-- v1.2: 32-bit Go target support (i386, arm)
-- v2.0: Rust binary symbol recovery (DWARF + Rust-specific name demangling)
-- v2.1: Swift binary symbol recovery
+Future work, no version commitments. Prioritized by demand and difficulty, not by a release plan.
+
+- **Pre-Go-1.18 pclntab support.** Closes the "use GoReSym for old binaries" gap for Go 1.13 through 1.17 layouts.
+- **Multi-module binary support.** Walk `moduledata.next` for Go plugins and `-buildmode=plugin` builds. Today only `runtime.firstmoduledata` is parsed.
+- **Function signature recovery.** Surface in/out parameter types, not just the count and variadic flag.
+- **32-bit Go target support.** i386 and arm (32-bit) pclntab layouts.
+- **Mach-O `--symbols-as`.** ELF and PE are supported today; the Mach-O writer ships when there's a tested fixture.
+- **arm64 support for `--xref` indirect-itab dispatch.** amd64 ships today.
+- **Rust binary symbol recovery** (DWARF + Rust-specific name demangling) is on the table as a separate tool, not as an unstrip mode.
+
+Tracked in [GitHub issues](https://github.com/riven-labs/unstrip/issues).
 
 ## Contributing
 
