@@ -1,4 +1,5 @@
 pub mod buildinfo;
+pub mod callsites;
 pub mod capabilities;
 pub mod dataview;
 pub mod dataxref;

@@ -281,6 +281,13 @@ struct Args {
     #[arg(long)]
     no_itab_reachability: bool,
 
+    /// List every call site that targets the given symbol. Accepts a
+    /// function name (resolved through pclntab) or a hex address
+    /// (`0x...`). Output groups call sites under their containing
+    /// function. amd64 only today.
+    #[arg(long, value_name = "SYMBOL")]
+    xref: Option<String>,
+
     /// List every `.text` instruction that READS the given data
     /// address: LEA, MOV-load, CMP-against-memory, CALL/JMP through
     /// a memory pointer. Each hit reports the containing function
@@ -799,6 +806,71 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             f => return Err(format!("--data-at does not support --format {f:?}").into()),
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
+    if let Some(symbol) = &args.xref {
+        // Accept either a hex address (`0x...`) or a function name.
+        // The parser tries address first because it's an unambiguous
+        // prefix; anything else falls through to the pclntab lookup.
+        let target = if symbol.starts_with("0x") || symbol.starts_with("0X") {
+            unstrip::callsites::Target::Address(parse_pc(symbol)?)
+        } else {
+            unstrip::callsites::Target::Function(symbol.clone())
+        };
+        let hits = unstrip::callsites::find(&bin, &pcln, &target)?;
+        match args.format {
+            OutFormat::Json => {
+                serde_json::to_writer_pretty(&mut out, &hits)?;
+                writeln!(out)?;
+            }
+            OutFormat::Text => {
+                if hits.is_empty() {
+                    writeln!(out, "# 0 call sites for {symbol}")?;
+                } else {
+                    // Group by caller so the listing reads the way a
+                    // human reverse engineer reads xrefs: one header
+                    // per containing function, call sites underneath.
+                    let mut by_caller: std::collections::BTreeMap<
+                        (Option<u64>, Option<String>),
+                        Vec<&unstrip::callsites::CallSite>,
+                    > = std::collections::BTreeMap::new();
+                    for h in &hits {
+                        by_caller
+                            .entry((h.caller_addr, h.caller_name.clone()))
+                            .or_default()
+                            .push(h);
+                    }
+                    for ((caller_addr, caller_name), sites) in &by_caller {
+                        let header = match (caller_addr, caller_name) {
+                            (Some(addr), Some(name)) => {
+                                format!("{name} @ 0x{addr:016x}:")
+                            }
+                            _ => "(no containing function):".to_string(),
+                        };
+                        writeln!(out, "{header}")?;
+                        for s in sites {
+                            let kind = match &s.kind {
+                                unstrip::callsites::CallKind::Direct => "direct".to_string(),
+                                unstrip::callsites::CallKind::IndirectItab {
+                                    method_name,
+                                    method_index,
+                                    ..
+                                } => match method_name {
+                                    Some(n) => {
+                                        format!("indirect-itab .{n}() [slot {method_index}]")
+                                    }
+                                    None => format!("indirect-itab [slot {method_index}]"),
+                                },
+                            };
+                            writeln!(out, "  0x{:016x}  {kind}", s.call_site)?;
+                        }
+                    }
+                }
+            }
+            f => return Err(format!("--xref does not support --format {f:?}").into()),
         }
         out.flush()?;
         return Ok(());

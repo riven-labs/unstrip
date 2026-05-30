@@ -1110,6 +1110,102 @@ fn dataview_refuses_unmapped_or_sentinel_addresses() {
 }
 
 #[test]
+fn callsites_finds_direct_callers_of_a_known_runtime_function() {
+    // runtime.mallocgc is the heaviest-used allocator entry point in
+    // every Go binary; if Scanner 1 can't find direct callers of it,
+    // the scanner is broken. The test asserts the structural shape:
+    // at least one hit, every hit attributes to a containing
+    // function, every hit kind is Direct (Scanner 2 hasn't shipped
+    // yet so the indirect-itab variant should never appear here).
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("pcln");
+
+    let target = unstrip::callsites::Target::Function("runtime.mallocgc".into());
+    let hits = unstrip::callsites::find(&bin, &pcln, &target).expect("callsites scan");
+
+    assert!(
+        !hits.is_empty(),
+        "runtime.mallocgc must be called from somewhere; got 0 sites"
+    );
+    for h in &hits {
+        assert!(matches!(h.kind, unstrip::callsites::CallKind::Direct));
+        // Most call sites land inside a recovered function; the
+        // assertion is structural (the field exists and is populated
+        // when the lookup succeeds), not "every site is attributed"
+        // because asm stubs and padding can match without a function.
+        if h.caller_name.is_some() {
+            assert!(h.caller_addr.is_some(), "name and addr go together");
+        }
+    }
+}
+
+#[test]
+fn callsites_address_target_resolves_to_same_set_as_name_target() {
+    // The two Target variants Scanner 1 supports must produce
+    // identical results when they refer to the same function. This
+    // pins the equivalence so a future change to either resolver
+    // can't silently diverge.
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("pcln");
+
+    let funcs = pcln.functions().expect("functions");
+    let mallocgc = funcs
+        .iter()
+        .find(|f| f.name == "runtime.mallocgc")
+        .expect("mallocgc in pclntab");
+
+    let by_name = unstrip::callsites::find(
+        &bin,
+        &pcln,
+        &unstrip::callsites::Target::Function("runtime.mallocgc".into()),
+    )
+    .expect("by-name");
+    let by_addr = unstrip::callsites::find(
+        &bin,
+        &pcln,
+        &unstrip::callsites::Target::Address(mallocgc.address),
+    )
+    .expect("by-addr");
+
+    let names_set: std::collections::BTreeSet<u64> = by_name.iter().map(|h| h.call_site).collect();
+    let addrs_set: std::collections::BTreeSet<u64> = by_addr.iter().map(|h| h.call_site).collect();
+    assert_eq!(
+        names_set, addrs_set,
+        "name and address targets must produce identical call-site sets"
+    );
+}
+
+#[test]
+fn callsites_unknown_function_name_errors_clearly() {
+    // A name not in pclntab should fail with a useful message, not
+    // silently return zero hits (which would let a typo look like a
+    // legitimate "this function has no callers" result).
+    let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("pcln");
+
+    let err = unstrip::callsites::find(
+        &bin,
+        &pcln,
+        &unstrip::callsites::Target::Function("not.a.real.function".into()),
+    )
+    .expect_err("unknown function name must error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not.a.real.function") && msg.contains("pclntab"),
+        "error must name the missing symbol and the lookup source; got {msg}"
+    );
+}
+
+#[test]
 fn dataxref_scan_runs_and_attributes_hits_when_present() {
     // Which specific data addresses get RIP-relative-LEA'd depends on
     // codegen choices and varies per build. Picking the pclntab base
