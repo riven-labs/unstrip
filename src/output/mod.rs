@@ -131,6 +131,62 @@ pub fn write_info<W: Write>(
             }
         }
     }
+
+    write_section_map(w, bin)?;
+
+    Ok(())
+}
+
+/// Print a one-row-per-section table covering the Go-relevant memory
+/// regions: address range, file size, ptr/noptr classification (does
+/// the GC scan it for pointers), and ro/rw classification. Sections
+/// the classifier could not place fall under `(other)` and are
+/// surfaced last so unusual layouts (UPX, manually-crafted ELFs) are
+/// visible without polluting the common case.
+fn write_section_map<W: Write>(w: &mut W, bin: &GoBinary) -> io::Result<()> {
+    if bin.sections.is_empty() {
+        return Ok(());
+    }
+    writeln!(w)?;
+    writeln!(w, "sections:")?;
+    for s in &bin.sections {
+        // Suppress the ELF NULL section header (and any other zero-
+        // length nameless entries the container loader surfaces) so
+        // the table only shows real memory regions.
+        if s.file_size == 0 && s.addr == 0 && s.name.is_empty() {
+            continue;
+        }
+        let kind = match s.kind {
+            crate::gobin::SectionKind::Text => "text",
+            crate::gobin::SectionKind::ReadOnlyData => "rodata",
+            crate::gobin::SectionKind::Data => "data",
+            crate::gobin::SectionKind::NoPtrData => "noptrdata",
+            crate::gobin::SectionKind::Bss => "bss",
+            crate::gobin::SectionKind::Pclntab => "pclntab",
+            crate::gobin::SectionKind::Other => "other",
+        };
+        let ptr_tag = match s.ptr_bearing() {
+            Some(true) => "ptr",
+            Some(false) => "noptr",
+            None => "-",
+        };
+        let rw_tag = match s.writable() {
+            Some(true) => "rw",
+            Some(false) => "ro",
+            None => "-",
+        };
+        writeln!(
+            w,
+            "  0x{:016x}..0x{:016x} {:>8} bytes  {:<10} ({}, {})  {}",
+            s.addr,
+            s.addr.saturating_add(s.file_size as u64),
+            s.file_size,
+            kind,
+            ptr_tag,
+            rw_tag,
+            s.name,
+        )?;
+    }
     Ok(())
 }
 

@@ -84,6 +84,48 @@ impl Section {
         }
         Some(self.file_offset + delta)
     }
+
+    /// Coarse memory classification a Go RE consumer cares about, in
+    /// the order they'd ask: does the GC walk this region for pointers,
+    /// and is the region writable at runtime. Derived from the section
+    /// name first so the distinction Go's own naming carries
+    /// (`.bss` ptr vs `.noptrbss` noptr, `.data` ptr vs `.noptrdata`
+    /// noptr) survives the lossier SectionKind enum collapse. Returns
+    /// `None` for kinds where the distinction is meaningless (`.text`,
+    /// `.pclntab`, unknown sections).
+    pub fn ptr_bearing(&self) -> Option<bool> {
+        // Name-driven first: Go's `.noptrdata` / `.noptrbss` /
+        // `.gosymtab` / `.gopclntab` carry the intent in the name and
+        // the runtime treats them accordingly.
+        let n = self.name.as_str();
+        if n.contains("noptr") {
+            return Some(false);
+        }
+        match self.kind {
+            SectionKind::Data | SectionKind::Bss => {
+                // `.bss` / `.data` are ptr-bearing in Go's GC model.
+                // The noptr-prefixed variants above already short-
+                // circuited; what remains is the genuinely scanned
+                // variant.
+                Some(true)
+            }
+            SectionKind::ReadOnlyData | SectionKind::NoPtrData | SectionKind::Pclntab => {
+                Some(false)
+            }
+            SectionKind::Text | SectionKind::Other => None,
+        }
+    }
+
+    /// True when the section is read-only at runtime (rodata, pclntab,
+    /// text). False when it is writable (data, bss, noptrdata,
+    /// noptrbss). None for unclassified.
+    pub fn writable(&self) -> Option<bool> {
+        match self.kind {
+            SectionKind::ReadOnlyData | SectionKind::Pclntab | SectionKind::Text => Some(false),
+            SectionKind::Data | SectionKind::Bss | SectionKind::NoPtrData => Some(true),
+            SectionKind::Other => None,
+        }
+    }
 }
 
 pub struct GoBinary {
@@ -500,4 +542,70 @@ fn finish(bytes: Vec<u8>, d: Described) -> Result<GoBinary> {
         pclntab_addr: d.pclntab_addr,
         text_addr: d.text_addr,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sec(name: &str, kind: SectionKind) -> Section {
+        Section {
+            name: name.to_string(),
+            kind,
+            file_offset: 0,
+            file_size: 1,
+            addr: 0x1000,
+            vmsize: 1,
+        }
+    }
+
+    #[test]
+    fn ptr_bearing_classifies_go_sections_by_name_first() {
+        // Name-driven: a section literally called .noptrdata or
+        // .noptrbss is noptr regardless of how the kind classifier
+        // collapsed it.
+        assert_eq!(
+            sec(".noptrdata", SectionKind::NoPtrData).ptr_bearing(),
+            Some(false)
+        );
+        assert_eq!(
+            sec(".noptrbss", SectionKind::Bss).ptr_bearing(),
+            Some(false)
+        );
+        // The unsplit .data / .bss are ptr-bearing per Go GC model.
+        assert_eq!(sec(".data", SectionKind::Data).ptr_bearing(), Some(true));
+        assert_eq!(sec(".bss", SectionKind::Bss).ptr_bearing(), Some(true));
+        // rodata / pclntab carry no live pointers the GC walks.
+        assert_eq!(
+            sec(".rodata", SectionKind::ReadOnlyData).ptr_bearing(),
+            Some(false)
+        );
+        assert_eq!(
+            sec(".gopclntab", SectionKind::Pclntab).ptr_bearing(),
+            Some(false)
+        );
+        // Text and Other have no meaningful ptr classification.
+        assert_eq!(sec(".text", SectionKind::Text).ptr_bearing(), None);
+        assert_eq!(sec(".shstrtab", SectionKind::Other).ptr_bearing(), None);
+    }
+
+    #[test]
+    fn writable_matches_runtime_protection_bits() {
+        assert_eq!(
+            sec(".rodata", SectionKind::ReadOnlyData).writable(),
+            Some(false)
+        );
+        assert_eq!(sec(".text", SectionKind::Text).writable(), Some(false));
+        assert_eq!(
+            sec(".gopclntab", SectionKind::Pclntab).writable(),
+            Some(false)
+        );
+        assert_eq!(sec(".data", SectionKind::Data).writable(), Some(true));
+        assert_eq!(sec(".bss", SectionKind::Bss).writable(), Some(true));
+        assert_eq!(
+            sec(".noptrdata", SectionKind::NoPtrData).writable(),
+            Some(true)
+        );
+        assert_eq!(sec(".shstrtab", SectionKind::Other).writable(), None);
+    }
 }
