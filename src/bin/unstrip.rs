@@ -1244,7 +1244,25 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(needle) = &args.filter {
         functions.retain(|f| f.name.contains(needle));
     }
-    functions.retain(|f| args.show.keeps(&f.name));
+
+    // Itab-thunk set: every concrete-fn address an itab dispatches
+    // through. Used for two related things below: (a) when --show
+    // value would hide a pointer-receiver thunk row, keep it alive
+    // if an itab actually dispatches there, and (b) annotate every
+    // kept thunk with `(itab thunk)` so the operator sees the live
+    // dispatch surface at a glance. The set is computed lazily so
+    // binaries without recoverable moduledata still print the
+    // function listing without error.
+    let itab_thunks: std::collections::HashSet<u64> = match ModuleData::locate(&bin) {
+        Ok(md) => itabs::recover_all(&bin, &md)
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|it| it.methods.iter().map(|m| m.concrete_fn))
+            .collect(),
+        Err(_) => std::collections::HashSet::new(),
+    };
+
+    functions.retain(|f| args.show.keeps(&f.name) || itab_thunks.contains(&f.address));
 
     match args.format {
         OutFormat::Ida | OutFormat::Ghidra | OutFormat::Binja => {
@@ -1264,7 +1282,14 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             export::write_script(&mut out, target, &functions, &types_for_export)?;
         }
         plain => {
-            write_functions(&mut out, &bin, &pcln, &functions, plain.as_plain().unwrap())?;
+            write_functions(
+                &mut out,
+                &bin,
+                &pcln,
+                &functions,
+                plain.as_plain().unwrap(),
+                Some(&itab_thunks),
+            )?;
         }
     }
     out.flush()?;

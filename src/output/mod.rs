@@ -28,9 +28,10 @@ pub fn write_functions<W: Write>(
     pcln: &Pclntab<'_>,
     functions: &[Function],
     format: Format,
+    itab_thunks: Option<&std::collections::HashSet<u64>>,
 ) -> io::Result<()> {
     match format {
-        Format::Text => write_text(w, functions),
+        Format::Text => write_text(w, functions, itab_thunks),
         Format::Json => {
             let report = Report {
                 container: bin.container.as_str(),
@@ -47,7 +48,11 @@ pub fn write_functions<W: Write>(
     }
 }
 
-fn write_text<W: Write>(w: &mut W, functions: &[Function]) -> io::Result<()> {
+fn write_text<W: Write>(
+    w: &mut W,
+    functions: &[Function],
+    itab_thunks: Option<&std::collections::HashSet<u64>>,
+) -> io::Result<()> {
     let name_width = functions
         .iter()
         .map(|f| f.name.len())
@@ -57,11 +62,22 @@ fn write_text<W: Write>(w: &mut W, functions: &[Function]) -> io::Result<()> {
 
     for f in functions {
         let file = f.file.as_deref().unwrap_or("");
+        let mut name_col = f.name.clone();
+        // Mark pointer-receiver thunks that are wired up as itab
+        // dispatch targets. The operator who passed --show value
+        // would normally hide every `pkg.(*Type).Method` row; we keep
+        // the dispatched ones and tag them so the operator can spot
+        // the live dispatch surface at a glance.
+        if let Some(thunks) = itab_thunks {
+            if thunks.contains(&f.address) {
+                name_col.push_str("  (itab thunk)");
+            }
+        }
         writeln!(
             w,
             "0x{addr:016x}  {name:<name_width$}  {file}",
             addr = f.address,
-            name = f.name,
+            name = name_col,
             name_width = name_width,
             file = file,
         )?;
