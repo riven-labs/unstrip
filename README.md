@@ -192,7 +192,7 @@ unstrip --install-plugin ida      # ~/.idapro/plugins/, registers as Edit -> Plu
 unstrip --install-plugin ghidra   # ~/ghidra_scripts/, run from Script Manager
 ```
 
-A Binary Ninja installer also exists (`--install-plugin binja`) and works the same way; see the source if you're on Binja.
+A Binary Ninja installer (`--install-plugin binja`) drops the wrapper into the Binary Ninja plugins directory and registers a menu item under Plugins -> Load Go symbols (unstrip).
 
 ### Bake symbols into a runnable binary
 
@@ -355,7 +355,7 @@ stdlib interface implementations:
 
 (`--fingerprint --behavioral` exists for hashing that counter into a SHA-256; coarser than `--fingerprint` and not garble-stable, included for completeness.)
 
-### Inlined call graph (library API, v1.1)
+### Inlined call graph (library API)
 
 For tools that want to consume unstrip's recovery from Rust, the `unstrip::inline` module exposes the inlined call graph the compiler recorded in `FUNCDATA_InlTree`. One `Node` per physical function; one `Edge` per inlined call site the compiler kept after optimization:
 
@@ -381,7 +381,7 @@ for e in &graph.edges {
 
 `NodeKind::Physical` nodes are real pclntab functions with their entry PC as `addr`. `NodeKind::AnonymousInline` nodes carry their parent's PC plus the inline-tree start line, and their `addr` is a synthetic high-bit-tagged ID (`Node::is_anonymous_addr`) so they cannot collide with a real text VA. Anonymous-inline records appear when the compiler kept the inlined call's topology but the binary was built with `-tiny`, `-ldflags=-s -w`, or garble's name obfuscation, all of which zero the callee's `name_off`. The topology is intact in all these cases; only the name is gone.
 
-Witnessed format-stable across **Go 1.22 through 1.24** by the coverage probe (see `internal/inlinecov/REPORT.md`). Go 1.22 is the supported floor; Go 1.20 and 1.21 share the layout but are not witnessed by this codebase. Later toolchains (Go 1.26+) are best-effort pending witness. Garble's `entryoff` XOR rewrite provably does not touch the inline-tree FUNCDATA section, so the decoder runs unchanged on garble-obfuscated binaries (callee names come back obfuscated, not stripped).
+The `runtime.inlinedCall` record is byte-identical across Go 1.20 through 1.26 (the layout has not drifted since `startLine` was added in Go 1.20). The decoder runs unchanged across that range. Garble's `entryoff` XOR rewrite does not touch the inline-tree FUNCDATA section, so the decoder also runs unchanged on garble-obfuscated binaries; callee names come back obfuscated, not stripped.
 
 For direct (non-inlined) call edges and full-graph traversal, use `--xrefs` (CLI) or `unstrip::xrefs` (library). `EdgeKind::Direct` is reserved on the inlined call graph for a future fold of those edges; today only `EdgeKind::Inlined` is emitted by `inline_callgraph`.
 
@@ -415,7 +415,7 @@ What works:
 - PC-to-symbol reverse lookup with inlined call stacks
 - IDA, Ghidra, Binary Ninja, JSON, and human-readable output
 
-Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, on Go versions in the supported range. Mach-O code paths exercised but no macOS-built fixture in the integration suite yet; please file an issue if it breaks. Garble heuristic detection works and structural recovery survives the default mode (string literals, inline trees, and the funcdata array all stay walkable).
+Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, on Go versions in the supported range. Mach-O code paths are exercised by unit tests; the integration suite has no macOS-built fixture yet. Open an issue if it breaks. Garble heuristic detection works and structural recovery survives the default mode (string literals, inline trees, and the funcdata array all stay walkable).
 
 What's out of scope, and where to look instead:
 
