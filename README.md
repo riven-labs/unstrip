@@ -436,7 +436,7 @@ Pre-Go-1.18 pclntab parsing. The Go 1.13 through 1.17 layouts are different enou
 
 Multi-module binaries. `runtime.firstmoduledata` is parsed; the `next` pointer is not walked. Go plugins (`-buildmode=plugin`) and shared libraries built across multiple modules will surface only the first module. Most binaries are single-module so this has not bitten yet.
 
-Function signature recovery. Argument and return types, not just the count and the variadic bit. The encoding lives in `funcdata[FUNCDATA_ArgInfo]` and is per-function. Mechanical work; we have not done it.
+Method and interface-method signature recovery. The binary carries full parameter and return types for every method on a named type (in the `_type.uncommon().methods` table) and for every interface-method implementation (in the itab method tables). Recovering them means walking tables we already parse and resolving each method's `mtyp` funcType to a Go-syntax signature. Free functions are a different problem: they do not appear in those tables, and the compiler emits no signature record for them unless they are stored reflectively. For free functions in stripped binaries, the signature is unrecoverable without DWARF.
 
 i386 and 32-bit arm. The pclntab layout drifts on 32-bit targets. No demand yet; the day a 32-bit IoT Go binary becomes a real corpus problem, this jumps to the top.
 
