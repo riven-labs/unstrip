@@ -195,6 +195,12 @@ struct Args {
     #[arg(long, help_heading = "Output")]
     no_garble_warning: bool,
 
+    /// Skip method-signature recovery. Default lists every method with its
+    /// Go-syntax signature appended (parameters and return types recovered
+    /// from the type tables); this flag drops back to bare function names.
+    #[arg(long, help_heading = "Output")]
+    no_signatures: bool,
+
     // ----- Rewrite the binary -----
     /// Write a new binary with a populated symbol table (elf|pe).
     #[arg(long, value_name = "elf|pe", help_heading = "Rewrite the binary")]
@@ -650,28 +656,50 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // Try to enrich with the inline tree if moduledata is locatable.
-        let pcln_with_inline = match ModuleData::locate(&bin) {
-            Ok(md) => pcln.with_gofunc(md.gofunc),
-            Err(_) => pcln,
+        let md_opt = ModuleData::locate(&bin).ok();
+        let pcln_with_inline = match &md_opt {
+            Some(md) => pcln.with_gofunc(md.gofunc),
+            None => pcln,
         };
         let frames = pcln_with_inline.lookup_inline(&bin, pc);
+
+        // Resolve the physical frame's signature when signatures are on
+        // and moduledata is recoverable. The signature attaches to the
+        // bottom-most (physical) frame; inlined frames above carry only
+        // file:line.
+        let signatures = if args.no_signatures {
+            None
+        } else {
+            md_opt.as_ref().map(|md| compute_signatures(&bin, md))
+        };
+        let physical_sig = signatures
+            .as_ref()
+            .and_then(|s| s.get(&pc).cloned())
+            .unwrap_or_default();
+
         if frames.is_empty() {
             writeln!(out, "0x{pc:016x}  (no function covers this PC)")?;
         } else if frames.len() == 1 {
             let f = &frames[0];
             let file = f.file.as_deref().unwrap_or("?");
             let line = f.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
-            writeln!(out, "0x{pc:016x}  {}  {file}:{line}", f.name)?;
+            writeln!(out, "0x{pc:016x}  {}{physical_sig}  {file}:{line}", f.name)?;
         } else {
             for (i, f) in frames.iter().enumerate() {
                 let file = f.file.as_deref().unwrap_or("?");
                 let line = f.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
-                let prefix = if i + 1 == frames.len() {
+                let is_physical = i + 1 == frames.len();
+                let prefix = if is_physical {
                     "(physical)"
                 } else {
                     "(inlined) "
                 };
-                writeln!(out, "{prefix} {}  {file}:{line}", f.name)?;
+                let sig = if is_physical {
+                    physical_sig.as_str()
+                } else {
+                    ""
+                };
+                writeln!(out, "{prefix} {}{sig}  {file}:{line}", f.name)?;
             }
         }
         out.flush()?;
@@ -1064,6 +1092,23 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("--xrefs does not support --format {:?}", args.format).into());
         }
 
+        // Signatures: best-effort, default-on. We only need them for the
+        // text path; JSON output omits the signature on xref nodes today.
+        let xref_signatures = if args.no_signatures {
+            std::collections::HashMap::new()
+        } else {
+            ModuleData::locate(&bin)
+                .ok()
+                .map(|md| compute_signatures(&bin, &md))
+                .unwrap_or_default()
+        };
+        let sig_for_node = |n: &unstrip::xrefs::XrefNode| -> String {
+            n.addr
+                .and_then(|a| xref_signatures.get(&a))
+                .cloned()
+                .unwrap_or_default()
+        };
+
         match (&args.from, &args.to) {
             (Some(from), None) => {
                 let result = unstrip::xrefs::callees_from(&edges, from, args.depth, args.max_nodes);
@@ -1082,7 +1127,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     sorted.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
                     writeln!(out, "{}", from)?;
                     for node in sorted {
-                        writeln!(out, "{}{}", "  ".repeat(node.depth), node.name)?;
+                        let sig = sig_for_node(node);
+                        writeln!(out, "{}{}{sig}", "  ".repeat(node.depth), node.name)?;
                     }
                     if result.truncated {
                         // Truncation footer goes to STDOUT (same stream
@@ -1111,7 +1157,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     sorted.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
                     writeln!(out, "{}", to)?;
                     for node in sorted {
-                        writeln!(out, "{}{}", "  ".repeat(node.depth), node.name)?;
+                        let sig = sig_for_node(node);
+                        writeln!(out, "{}{}{sig}", "  ".repeat(node.depth), node.name)?;
                     }
                     if result.truncated {
                         writeln!(
@@ -1310,41 +1357,58 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         functions.retain(|f| f.name.contains(needle));
     }
 
+    // Compute moduledata once and reuse for itab-thunk discovery, type
+    // recovery, and signature recovery. If any step fails (no
+    // moduledata, pre-1.18 layout, etc.) we still print the function
+    // listing without the enrichment.
+    let md_opt = ModuleData::locate(&bin).ok();
+    let recovered_types = md_opt
+        .as_ref()
+        .and_then(|md| types::recover_all(&bin, md).ok())
+        .unwrap_or_default();
+    let recovered_itabs = md_opt
+        .as_ref()
+        .and_then(|md| itabs::recover_all(&bin, md).ok())
+        .unwrap_or_default();
+
     // Itab-thunk set: every concrete-fn address an itab dispatches
     // through. Used for two related things below: (a) when --show
     // value would hide a pointer-receiver thunk row, keep it alive
     // if an itab actually dispatches there, and (b) annotate every
     // kept thunk with `(itab thunk)` so the operator sees the live
-    // dispatch surface at a glance. The set is computed lazily so
-    // binaries without recoverable moduledata still print the
-    // function listing without error.
-    let itab_thunks: std::collections::HashSet<u64> = match ModuleData::locate(&bin) {
-        Ok(md) => itabs::recover_all(&bin, &md)
-            .unwrap_or_default()
-            .iter()
-            .flat_map(|it| it.methods.iter().map(|m| m.concrete_fn))
-            .collect(),
-        Err(_) => std::collections::HashSet::new(),
+    // dispatch surface at a glance.
+    let itab_thunks: std::collections::HashSet<u64> = recovered_itabs
+        .iter()
+        .flat_map(|it| it.methods.iter().map(|m| m.concrete_fn))
+        .collect();
+
+    // Method-signature recovery. Default-on; --no-signatures opts out
+    // (useful for diff-friendly listings or when the operator wants the
+    // smallest text-column width). The signature map is keyed by
+    // function entry PC; the writer looks up each function and appends
+    // its rendered Go-syntax signature when found.
+    let signatures: Option<std::collections::HashMap<u64, String>> = match &md_opt {
+        Some(md) if !args.no_signatures => Some(compute_signatures(&bin, md)),
+        _ => None,
     };
 
     functions.retain(|f| args.show.keeps(&f.name) || itab_thunks.contains(&f.address));
 
     match args.format {
         OutFormat::Ida | OutFormat::Ghidra | OutFormat::Binja => {
-            // For RE-tool exports, pull types too so the emitted script can
-            // re-create struct layouts in the disassembler. If type recovery
-            // fails (no moduledata, pre-1.18, etc.) we still emit functions.
-            let types_for_export = ModuleData::locate(&bin)
-                .ok()
-                .and_then(|md| types::recover_all(&bin, &md).ok())
-                .unwrap_or_default();
             let target = match args.format {
                 OutFormat::Ida => export::Target::Ida,
                 OutFormat::Ghidra => export::Target::Ghidra,
                 OutFormat::Binja => export::Target::BinaryNinja,
                 _ => unreachable!(),
             };
-            export::write_script(&mut out, target, &functions, &types_for_export)?;
+            export::write_script(
+                &mut out,
+                target,
+                &functions,
+                &recovered_types,
+                signatures.as_ref(),
+            )?;
         }
         plain => {
             write_functions(
@@ -1354,6 +1418,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 &functions,
                 plain.as_plain().unwrap(),
                 Some(&itab_thunks),
+                signatures.as_ref(),
             )?;
         }
     }
@@ -1383,6 +1448,22 @@ fn maybe_warn_garbled(
             a.confidence
         );
     }
+}
+
+/// Build a PC -> Go-syntax-signature map for the whole binary. Best-effort:
+/// returns an empty map when type or itab recovery fails. Callers should
+/// pre-check `args.no_signatures` and skip this call entirely when the
+/// operator opted out.
+fn compute_signatures(bin: &GoBinary, md: &ModuleData) -> std::collections::HashMap<u64, String> {
+    let recovered_types = types::recover_all(bin, md).unwrap_or_default();
+    let recovered_itabs = itabs::recover_all(bin, md).unwrap_or_default();
+    let from_types = unstrip::funcsig::recover_methods_from_types(bin, md, &recovered_types);
+    let from_itabs =
+        unstrip::funcsig::recover_methods_from_itabs(&recovered_types, &recovered_itabs);
+    let merged = unstrip::funcsig::merge_methods(from_types, from_itabs);
+    let mut cache = unstrip::funcsig::TypeCache::new(bin, md);
+    cache.seed_from(&recovered_types);
+    unstrip::funcsig::signatures_by_pc(&merged, &mut cache)
 }
 
 fn parse_pc(s: &str) -> Result<u64, Box<dyn std::error::Error>> {

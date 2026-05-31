@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 use serde::Serialize;
@@ -19,7 +20,22 @@ struct Report<'a> {
     pclntab_size: usize,
     text_start: u64,
     function_count: usize,
-    functions: &'a [Function],
+    functions: Vec<FunctionView<'a>>,
+}
+
+/// JSON-only view of a function with the optional recovered signature
+/// attached. Built from `Function` plus an optional signature lookup so
+/// the on-disk Function struct stays unchanged.
+#[derive(Debug, Serialize)]
+struct FunctionView<'a> {
+    address: u64,
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<&'a str>,
 }
 
 pub fn write_functions<W: Write>(
@@ -29,10 +45,23 @@ pub fn write_functions<W: Write>(
     functions: &[Function],
     format: Format,
     itab_thunks: Option<&std::collections::HashSet<u64>>,
+    signatures: Option<&HashMap<u64, String>>,
 ) -> io::Result<()> {
     match format {
-        Format::Text => write_text(w, functions, itab_thunks),
+        Format::Text => write_text(w, functions, itab_thunks, signatures),
         Format::Json => {
+            let views: Vec<FunctionView<'_>> = functions
+                .iter()
+                .map(|f| FunctionView {
+                    address: f.address,
+                    name: &f.name,
+                    file: f.file.as_deref(),
+                    start_line: f.start_line,
+                    signature: signatures
+                        .and_then(|s| s.get(&f.address))
+                        .map(String::as_str),
+                })
+                .collect();
             let report = Report {
                 container: bin.container.as_str(),
                 arch: bin.arch.as_str(),
@@ -40,7 +69,7 @@ pub fn write_functions<W: Write>(
                 pclntab_size: bin.pclntab_size,
                 text_start: pcln.text_start(),
                 function_count: functions.len(),
-                functions,
+                functions: views,
             };
             serde_json::to_writer_pretty(&mut *w, &report).map_err(io::Error::other)?;
             w.write_all(b"\n")
@@ -52,6 +81,7 @@ fn write_text<W: Write>(
     w: &mut W,
     functions: &[Function],
     itab_thunks: Option<&std::collections::HashSet<u64>>,
+    signatures: Option<&HashMap<u64, String>>,
 ) -> io::Result<()> {
     let name_width = functions
         .iter()
@@ -63,6 +93,11 @@ fn write_text<W: Write>(
     for f in functions {
         let file = f.file.as_deref().unwrap_or("");
         let mut name_col = f.name.clone();
+        if let Some(sigs) = signatures {
+            if let Some(sig) = sigs.get(&f.address) {
+                name_col.push_str(sig);
+            }
+        }
         // Mark pointer-receiver thunks that are wired up as itab
         // dispatch targets. The operator who passed --show value
         // would normally hide every `pkg.(*Type).Method` row; we keep

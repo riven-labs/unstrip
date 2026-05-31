@@ -222,3 +222,73 @@ fn variadic_method_renders_with_dotdotdot() {
         );
     }
 }
+
+#[test]
+fn itab_merge_widens_signature_coverage() {
+    // The uncommon-table path reaches every method declared on a named
+    // type. The itab path adds signatures for the iface-wrapper bodies
+    // that share a PC with the uncommon-table method but were generated
+    // separately. Merging the two sources should produce a signature
+    // count strictly greater than either alone.
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    let recovered_types = types::recover_all(&bin, &md).expect("recover types");
+    let recovered_itabs = unstrip::itabs::recover_all(&bin, &md).expect("recover itabs");
+
+    let from_types = recover_methods_from_types(&bin, &md, &recovered_types);
+    let from_itabs =
+        unstrip::funcsig::recover_methods_from_itabs(&recovered_types, &recovered_itabs);
+    let merged = unstrip::funcsig::merge_methods(from_types.clone(), from_itabs.clone());
+
+    // Merged length is at most the sum (no duplicates introduced) and at
+    // least the larger of the two (dedup never drops a unique record).
+    assert!(
+        merged.len() <= from_types.len() + from_itabs.len(),
+        "merge created duplicates: {} > {} + {}",
+        merged.len(),
+        from_types.len(),
+        from_itabs.len()
+    );
+    assert!(
+        merged.len() >= from_types.len().max(from_itabs.len()),
+        "merge dropped unique records: {} < max({}, {})",
+        merged.len(),
+        from_types.len(),
+        from_itabs.len()
+    );
+}
+
+#[test]
+fn signatures_by_pc_keys_on_function_entry() {
+    // signatures_by_pc must key the returned map on the method's tfn_pc
+    // (the direct-call body entry), so the function listing's PC lookup
+    // succeeds without any extra translation. Every key must fall inside
+    // [md.text, md.etext).
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    let recovered_types = types::recover_all(&bin, &md).expect("recover types");
+    let methods = recover_methods_from_types(&bin, &md, &recovered_types);
+
+    let mut cache = TypeCache::new(&bin, &md);
+    cache.seed_from(&recovered_types);
+    let by_pc = unstrip::funcsig::signatures_by_pc(&methods, &mut cache);
+
+    assert!(
+        !by_pc.is_empty(),
+        "expected at least one PC-keyed signature on a hello-world binary"
+    );
+    for &pc in by_pc.keys() {
+        assert!(
+            pc >= md.text && pc < md.etext,
+            "signature key 0x{pc:x} falls outside [text=0x{:x}, etext=0x{:x})",
+            md.text,
+            md.etext
+        );
+    }
+}

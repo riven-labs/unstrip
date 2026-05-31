@@ -615,7 +615,7 @@ fn exporter_python_parses_for_all_targets() {
         unstrip::export::Target::BinaryNinja,
     ] {
         let mut buf = Vec::new();
-        unstrip::export::write_script(&mut buf, target, &funcs, &types_v).expect("emit");
+        unstrip::export::write_script(&mut buf, target, &funcs, &types_v, None).expect("emit");
         let script = String::from_utf8(buf).expect("utf-8 output");
 
         // Pass 1: every line that calls _func or _struct must have balanced

@@ -2,21 +2,21 @@
 //!
 //! The recoverable signal in a stripped binary comes from method tables,
 //! not from a per-function signature record. The runtime stores method
-//! tables in two places:
+//! tables in two places, and this module walks both:
 //!
 //!   1. `_type.uncommon().methods` for every defined type that has methods.
 //!      Each entry carries the method's name, its mtyp (a TypeOff pointing
 //!      at a funcType), and the entry PCs (ifn for interface dispatch, tfn
-//!      for direct calls).
+//!      for direct calls). See `recover_methods_from_types`.
 //!
 //!   2. Itab method tables. Same shape, attached per (interface, concrete)
-//!      pair instead of per defined type.
+//!      pair instead of per defined type. See `recover_methods_from_itabs`.
 //!
-//! Day 1 ships path (1): walk every type with `TFlagUncommon` set, decode
-//! the UncommonType extension, walk the methods slice, return the raw
-//! `(name, mtyp_off, ifn_off, tfn_off)` per method. Resolving mtyp to a
-//! Go-syntax signature is Day 2. Cross-referencing tfn to the function
-//! table is Day 4. The current entry just produces the raw method table.
+//! The two sources overlap. Use `merge_methods` to combine them and
+//! deduplicate by `(receiver, name, tfn_pc)`. Use `render_method_signature`
+//! to turn each method's mtyp into a Go-syntax signature like
+//! `"(_0 []uint8) (int, error)"`, and `signatures_by_pc` to build a
+//! `HashMap<PC, signature>` that callers can look up by function entry PC.
 //!
 //! Free top-level functions do not appear in either table. The compiler
 //! emits no per-function signature record for them. For stripped binaries,
@@ -101,6 +101,88 @@ pub fn recover_methods_from_types(
                 // surface the error: per-type recovery is best-effort and
                 // one bad type should not abort the whole pass.
             }
+        }
+    }
+    out
+}
+
+/// Walk every itab and surface its per-slot dispatch as RecoveredMethod
+/// records. The interface side supplies the method signature (funcType
+/// address from `InterfaceMethod.typ`); the itab side supplies the
+/// concrete entry PC (`ItabMethod.concrete_fn`). Together they form a
+/// recovered method whose receiver is the concrete type and whose mtyp
+/// points at the interface-declared funcType.
+///
+/// This complements `recover_methods_from_types`: the uncommon path
+/// reaches methods that have a `_type.uncommon()` entry; the itab path
+/// reaches the wrapper methods that implement interfaces, which are
+/// often a different set.
+pub fn recover_methods_from_itabs(
+    types: &[Type],
+    itabs: &[crate::itabs::Itab],
+) -> Vec<RecoveredMethod> {
+    // Index interface types by name so we can look up each itab's
+    // interface declaration in O(1).
+    let iface_by_name: HashMap<&str, &Type> = types
+        .iter()
+        .filter(|t| matches!(t.kind, KindName::Interface))
+        .map(|t| (t.name.as_str(), t))
+        .collect();
+
+    let mut out = Vec::new();
+    for itab in itabs {
+        let Some(iface_t) = iface_by_name.get(itab.interface_name.as_str()) else {
+            // Interface type not in the recovered set. Some itabs reference
+            // interfaces whose declarations live outside the typelinks walk;
+            // skip them rather than fabricate signatures.
+            continue;
+        };
+        let iface_methods = match &iface_t.kind_data {
+            KindData::Interface { methods } => methods,
+            _ => continue,
+        };
+
+        // Slot-by-slot merge. The runtime invariant: itab.methods is
+        // declared in the same order as the interface's Methods slice
+        // (sorted by hash by Go's linker). If the two lengths differ,
+        // the itab is incomplete; merge what we have and drop the rest.
+        for (slot_idx, slot) in itab.methods.iter().enumerate() {
+            if slot.concrete_fn == 0 {
+                continue;
+            }
+            let Some(iface_method) = iface_methods.get(slot_idx) else {
+                continue;
+            };
+            out.push(RecoveredMethod {
+                receiver: itab.concrete_name.clone(),
+                name: slot.interface_method.clone(),
+                mtyp_addr: iface_method.typ,
+                ifn_pc: 0,
+                tfn_pc: slot.concrete_fn,
+            });
+        }
+    }
+    out
+}
+
+/// Merge two RecoveredMethod sources into a single deduplicated list.
+/// A method is identified by its (receiver, name, tfn_pc) triple: two
+/// recoveries that agree on those three fields are the same method
+/// reached by different paths. The first occurrence wins. Records with
+/// tfn_pc == 0 are kept (no PC means no way to dedupe; they survive on
+/// their own merits and may still carry a valid mtyp).
+pub fn merge_methods(a: Vec<RecoveredMethod>, b: Vec<RecoveredMethod>) -> Vec<RecoveredMethod> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<(String, String, u64)> = HashSet::new();
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    for m in a.into_iter().chain(b) {
+        if m.tfn_pc == 0 {
+            out.push(m);
+            continue;
+        }
+        let key = (m.receiver.clone(), m.name.clone(), m.tfn_pc);
+        if seen.insert(key) {
+            out.push(m);
         }
     }
     out
@@ -265,6 +347,36 @@ fn kind_extension_size(kind: KindName, _size: u64) -> Option<usize> {
         // Unknown / Invalid: refuse rather than guess.
         KindName::Invalid | KindName::Unknown(_) => None,
     }
+}
+
+/// Build a PC -> signature map for every method whose signature renders.
+/// The map is keyed by `tfn_pc` (the direct-call method body entry); the
+/// value is the rendered signature string (e.g. `"(_0 []uint8) (int, error)"`).
+///
+/// Methods with `tfn_pc == 0` (iface-only wrappers with no direct-call
+/// body) are not included since there is no PC to attach the signature to.
+/// Methods whose mtyp does not render are also skipped.
+///
+/// Caller pattern: pass the full method set (uncommon + itab, deduped via
+/// `merge_methods`) plus a TypeCache. The returned map is the lookup that
+/// every output path uses to attach `(...) returns` to a function name.
+pub fn signatures_by_pc(
+    methods: &[RecoveredMethod],
+    cache: &mut TypeCache<'_>,
+) -> HashMap<u64, String> {
+    let mut out = HashMap::with_capacity(methods.len());
+    for m in methods {
+        if m.tfn_pc == 0 {
+            continue;
+        }
+        if let Some(sig) = render_method_signature(m, cache) {
+            // First writer wins. Multiple methods can share a tfn_pc when
+            // the compiler emits one body for several iface wrappers; the
+            // first rendered signature is the canonical one.
+            out.entry(m.tfn_pc).or_insert(sig);
+        }
+    }
+    out
 }
 
 /// Type-by-address cache. Parsing the same `_type` record N times for N

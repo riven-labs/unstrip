@@ -9,6 +9,15 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Added
 
+- Method-signature recovery. The default function listing, `--addr`,
+  and `--xrefs` now append a Go-syntax signature like
+  `(_0 []uint8) (int, error)` to every method whose mtyp resolves to a
+  funcType record. Two paths feed the recovery: every type's
+  `_type.uncommon().methods` table, and every itab's method table.
+  Disable with `--no-signatures`. Argument names are not in the binary;
+  positional placeholders (`_0`, `_1`, ...) keep the shape correct.
+  Free functions outside the method tables stay as bare names. JSON
+  output gains an optional `signature` field per function.
 - `--xref <SYMBOL>` finds every call site that targets the given function
   name or hex address, grouped by containing caller. Scanner 1 resolves
   direct `CALL rel32` sites; Scanner 2 adds direct `CALL [rip+itab+slot]`
