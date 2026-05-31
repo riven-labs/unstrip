@@ -430,17 +430,21 @@ Known gaps in v1.0:
 
 ## Roadmap
 
-Future work, no version commitments. Prioritized by demand and difficulty, not by a release plan.
+Things that are not in v1.0 and should be. Listed roughly in the order someone is likely to file an issue asking for them.
 
-- **Pre-Go-1.18 pclntab support.** Closes the "use GoReSym for old binaries" gap for Go 1.13 through 1.17 layouts.
-- **Multi-module binary support.** Walk `moduledata.next` for Go plugins and `-buildmode=plugin` builds. Today only `runtime.firstmoduledata` is parsed.
-- **Function signature recovery.** Surface in/out parameter types, not just the count and variadic flag.
-- **32-bit Go target support.** i386 and arm (32-bit) pclntab layouts.
-- **Mach-O `--symbols-as`.** ELF and PE are supported today; the Mach-O writer ships when there's a tested fixture.
-- **arm64 support for `--xref` indirect-itab dispatch.** amd64 ships today.
-- **Rust binary symbol recovery** (DWARF + Rust-specific name demangling) is on the table as a separate tool, not as an unstrip mode.
+Pre-Go-1.18 pclntab parsing. The Go 1.13 through 1.17 layouts are different enough that the current parser does not even try. GoReSym handles these; we do not. Until we do, that is the honest answer when somebody hands you a 2019-era sample.
 
-Tracked in [GitHub issues](https://github.com/riven-labs/unstrip/issues).
+Multi-module binaries. `runtime.firstmoduledata` is parsed; the `next` pointer is not walked. Go plugins (`-buildmode=plugin`) and shared libraries built across multiple modules will only show the first module. Most binaries in the wild are single-module so this has not bitten anyone yet, but it will.
+
+Function signature recovery. Argument and return types, not just the count and the variadic bit. The encoding lives in `funcdata[FUNCDATA_ArgInfo]` and is per-function, so the work is mechanical but tedious.
+
+i386 and 32-bit arm. The pclntab layout drifts on 32-bit targets. Nobody has asked yet; the day a 32-bit IoT Go binary lands in someone's queue, this jumps to the top.
+
+`--symbols-as` for Mach-O. ELF and PE write today. The Mach-O equivalent (`LC_SYMTAB` patching) needs a tested fixture before it ships. Filed it under "ships when somebody hands me a stripped Mach-O Go binary I can use as a regression test".
+
+arm64 for `--xref` indirect-itab dispatch. The amd64 decoder catches `CALL [reg + slot*8]`. arm64 needs the equivalent `LDR` + `BLR` pattern walker.
+
+Rust binary symbol recovery. Not an unstrip mode. If we build it, it ships as a separate tool. DWARF parsing is its own problem and conflating them would be a mistake.
 
 ## Contributing
 
