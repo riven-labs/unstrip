@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use unstrip::funcsig::recover_methods_from_types;
+use unstrip::funcsig::{recover_methods_from_types, render_method_signature, TypeCache};
 use unstrip::gobin::GoBinary;
 use unstrip::moduledata::ModuleData;
 use unstrip::types;
@@ -112,4 +112,113 @@ fn recovered_methods_have_non_empty_names() {
         named * 100 >= total * 95,
         "only {named} of {total} methods have a name; names blob walk is off"
     );
+}
+
+// ---- Day 2: signature rendering ----
+
+/// Helper for Day-2 tests: recover methods + render every one we can.
+/// Returns a list of (receiver, name, signature) for methods whose
+/// signature rendered successfully.
+fn render_all(path: PathBuf) -> Vec<(String, String, String)> {
+    let bin = GoBinary::open(&path).expect("open binary");
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    let recovered_types = types::recover_all(&bin, &md).expect("recover types");
+    let methods = recover_methods_from_types(&bin, &md, &recovered_types);
+
+    let mut cache = TypeCache::new(&bin, &md);
+    cache.seed_from(&recovered_types);
+
+    let mut out = Vec::new();
+    for m in &methods {
+        if let Some(sig) = render_method_signature(m, &mut cache) {
+            out.push((m.receiver.clone(), m.name.clone(), sig));
+        }
+    }
+    out
+}
+
+#[test]
+fn renders_well_known_stdlib_method_signatures() {
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
+    let rendered = render_all(path);
+
+    // Stdlib methods with stable, well-known signatures. Each tuple is
+    // (receiver, method_name, expected_signature). The receiver match is
+    // exact; the signature match is exact. If Go's stdlib changes the
+    // signature of any of these, the test should fail loudly.
+    let expected: &[(&str, &str, &str)] = &[
+        ("*errors.errorString", "Error", "() string"),
+        ("reflect.Kind", "String", "() string"),
+        ("*os.File", "Write", "(_0 []uint8) (int, error)"),
+        ("*os.File", "Read", "(_0 []uint8) (int, error)"),
+        ("*atomic.Int64", "Swap", "(_0 int64) int64"),
+        ("syscall.Errno", "Is", "(_0 error) bool"),
+    ];
+
+    for (recv, name, want) in expected {
+        let got = rendered
+            .iter()
+            .find(|(r, n, _)| r == recv && n == name)
+            .map(|(_, _, s)| s.as_str());
+        assert_eq!(
+            got,
+            Some(*want),
+            "{recv}.{name}: expected {want:?}, got {got:?}"
+        );
+    }
+}
+
+#[test]
+fn signature_rendering_covers_at_least_one_third_of_methods() {
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    let recovered_types = types::recover_all(&bin, &md).expect("recover types");
+    let methods = recover_methods_from_types(&bin, &md, &recovered_types);
+
+    let mut cache = TypeCache::new(&bin, &md);
+    cache.seed_from(&recovered_types);
+
+    let rendered = methods
+        .iter()
+        .filter(|m| render_method_signature(m, &mut cache).is_some())
+        .count();
+    let total = methods.len();
+    // Day-2 baseline: we render signatures for methods whose mtyp lands on a
+    // funcType record. Day-3 (itab method tables) and Day-4 (cross-reference
+    // dedup) will push this number higher. A 33% floor today guards against
+    // a regression that drops the figure into the single digits.
+    assert!(
+        rendered * 3 >= total,
+        "only {rendered} of {total} methods got a rendered signature \
+         ({:.1}%); Day-2 floor is 33%",
+        100.0 * rendered as f64 / total as f64
+    );
+}
+
+#[test]
+fn variadic_method_renders_with_dotdotdot() {
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
+    let rendered = render_all(path);
+
+    // fmt.pp.Sprintf and friends are variadic. Search for any rendered
+    // method whose signature contains `...` so we know the variadic path
+    // produces the right shape. If hello-world doesn't pull in any
+    // variadic methods on a named type, this test silently passes (we
+    // only assert when we have a candidate).
+    let any_variadic = rendered.iter().find(|(_, _, sig)| sig.contains("..."));
+    if let Some((recv, name, sig)) = any_variadic {
+        // Variadic must appear ONLY as the last parameter, and it must be
+        // formatted as `...T` (no brackets).
+        assert!(
+            !sig.contains("...[]"),
+            "{recv}.{name}: variadic should be ...T not ...[]T: {sig}"
+        );
+    }
 }

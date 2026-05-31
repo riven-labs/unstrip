@@ -374,7 +374,7 @@ fn child_addrs(kd: &KindData) -> Vec<u64> {
     }
 }
 
-fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Type> {
+pub(crate) fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Type> {
     let buf = bin
         .read_at_addr(addr, TYPE_HEADER_SIZE_64)
         .ok_or_else(|| Error::TypeRecovery(format!("type header at 0x{addr:x} unmapped")))?;
@@ -389,7 +389,13 @@ fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Type> {
     let kind = KindName::from_byte(kind_byte);
 
     let name_addr = md.types.wrapping_add(str_off as i64 as u64);
-    let name = read_name(bin, name_addr).unwrap_or_else(|_| format!("type@0x{addr:x}"));
+    let mut name = read_name(bin, name_addr).unwrap_or_else(|_| format!("type@0x{addr:x}"));
+    // TFlagExtraStar: the stored name has a leading `*` that Go uses for
+    // binary-size sharing between `Foo` and `*Foo`. Strip it here so the
+    // type's displayed name matches the source-language name.
+    if tflag & TFLAG_EXTRA_STAR != 0 && name.starts_with('*') {
+        name.remove(0);
+    }
 
     let kind_data = decode_kind(bin, md, addr, kind, tflag).unwrap_or(KindData::None);
 
@@ -515,6 +521,12 @@ fn decode_kind(
 /// grpc interceptors, anything passing functions as values) never make it
 /// into the recovered type graph.
 pub(crate) const TFLAG_UNCOMMON: u8 = 1;
+/// TFlagExtraStar (= 1 << 1): the name string in the names blob has a
+/// leading `*` that the runtime adds for binary-size reasons (the string
+/// `*Foo` is reused between the `Foo` and `*Foo` types). When this flag is
+/// set on a Type, the leading `*` is NOT part of the type's actual name
+/// and must be stripped when displaying.
+pub(crate) const TFLAG_EXTRA_STAR: u8 = 1 << 1;
 const UNCOMMON_TYPE_SIZE: usize = 16;
 
 fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
@@ -551,9 +563,16 @@ fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
         });
     }
 
-    // The parameter pointer array starts at extra_addr + 4 (past in/out counts),
-    // optionally offset by UncommonType (16 bytes) if TFlagUncommon is set.
-    let params_offset = 4usize
+    // The parameter pointer array starts after the FuncType (which embeds the
+    // 48-byte Type header plus 4 bytes of in/out counts, padded to 8-byte
+    // alignment = 8 bytes of extension), optionally offset by UncommonType
+    // (16 bytes) if TFlagUncommon is set. The Go runtime computes this with
+    // `unsafe.Sizeof(*t)` which includes the alignment padding; we have to
+    // bake the same 8 bytes in by hand here. Getting this wrong by 4 bytes
+    // produces in_types/out_types pointers that look "almost right" (the low
+    // bytes are sane) but actually contain half of one pointer plus part of
+    // the next, which silently corrupts every consumer downstream.
+    let params_offset = 8usize
         + if tflag & TFLAG_UNCOMMON != 0 {
             UNCOMMON_TYPE_SIZE
         } else {

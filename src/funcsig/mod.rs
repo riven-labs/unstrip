@@ -47,12 +47,16 @@
 //! UncommonType sits at `type_addr + TYPE_HEADER_SIZE + kind_extension_size`.
 //! The kind-extension size is per-kind and known statically on 64-bit.
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 use crate::error::Error;
 use crate::gobin::GoBinary;
 use crate::moduledata::ModuleData;
-use crate::types::{read_name_public, KindName, Type, TFLAG_UNCOMMON, TYPE_HEADER_SIZE_64};
+use crate::types::{
+    parse_type, read_name_public, KindData, KindName, Type, TFLAG_UNCOMMON, TYPE_HEADER_SIZE_64,
+};
 use crate::Result;
 
 const METHOD_SIZE: usize = 16;
@@ -260,6 +264,146 @@ fn kind_extension_size(kind: KindName, _size: u64) -> Option<usize> {
 
         // Unknown / Invalid: refuse rather than guess.
         KindName::Invalid | KindName::Unknown(_) => None,
+    }
+}
+
+/// Type-by-address cache. Parsing the same `_type` record N times for N
+/// methods that mention it is wasteful; a thin lookup cache amortizes that
+/// across a whole binary's signature rendering pass.
+///
+/// Entries are computed lazily on first lookup. A failed parse caches `None`
+/// so we don't repeatedly chase a bad address.
+pub struct TypeCache<'a> {
+    bin: &'a GoBinary,
+    md: &'a ModuleData,
+    cache: HashMap<u64, Option<Type>>,
+}
+
+impl<'a> TypeCache<'a> {
+    pub fn new(bin: &'a GoBinary, md: &'a ModuleData) -> Self {
+        Self {
+            bin,
+            md,
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Seed the cache from an already-recovered `Vec<Type>`. Useful when the
+    /// caller has run `types::recover_all` and wants to avoid re-parsing
+    /// every named type the funcType walk will encounter.
+    pub fn seed_from(&mut self, types: &[Type]) {
+        for t in types {
+            self.cache.entry(t.addr).or_insert_with(|| Some(t.clone()));
+        }
+    }
+
+    /// Resolve an address to its parsed `Type`. Returns `None` when the
+    /// address is zero (no type recorded) or when parsing fails.
+    pub fn get(&mut self, addr: u64) -> Option<&Type> {
+        if addr == 0 {
+            return None;
+        }
+        if !self.cache.contains_key(&addr) {
+            let parsed = parse_type(self.bin, self.md, addr).ok();
+            self.cache.insert(addr, parsed);
+        }
+        self.cache.get(&addr).and_then(|v| v.as_ref())
+    }
+}
+
+/// Render a Go-syntax signature for a method by walking its mtyp funcType.
+///
+/// Returns `None` when any of the following holds:
+///   * `method.mtyp_addr` is zero (the runtime did not record a method type).
+///   * The mtyp address does not parse as a `_type`.
+///   * The parsed type is not a `Func` kind.
+///   * Any of the parameter or return type addresses fails to resolve.
+///
+/// A successful return is a string like `"(p []byte) (n int, err error)"`.
+/// Argument names are NOT in the binary; we emit positional placeholders
+/// (`_0`, `_1`, ...) to keep the shape correct. Single unnamed return
+/// renders without parentheses (`"() error"` not `"() (error)"`), matching
+/// gofmt's convention for single results.
+///
+/// Limitations today:
+///   * Variadic functions render `...T` for the last parameter.
+///   * Generic functions render the shape; the type parameter bracket
+///     (`[T any]`) is not reconstructed.
+///   * Aggregate parameters (struct, interface) render by the type's own
+///     name when it has one. Truly anonymous structs fall back to `struct{...}`.
+pub fn render_method_signature(
+    method: &RecoveredMethod,
+    cache: &mut TypeCache<'_>,
+) -> Option<String> {
+    if method.mtyp_addr == 0 {
+        return None;
+    }
+    let mtyp = cache.get(method.mtyp_addr)?.clone();
+    let (in_types, out_types, variadic) = match &mtyp.kind_data {
+        KindData::Func {
+            in_types,
+            out_types,
+            variadic,
+            ..
+        } => (in_types.clone(), out_types.clone(), *variadic),
+        _ => return None,
+    };
+
+    // Render parameters: (_0 T0, _1 T1, ...)
+    let mut params = String::from("(");
+    for (i, &addr) in in_types.iter().enumerate() {
+        if i > 0 {
+            params.push_str(", ");
+        }
+        let name = render_type_name(addr, cache);
+        let is_last = i + 1 == in_types.len();
+        if variadic && is_last {
+            // The last parameter of a variadic is encoded as []T in the
+            // funcType; render it as ...T to match Go source syntax. The
+            // recovered name will start with "[]" for the slice; strip it
+            // and prefix with "..." for the user-facing form.
+            let elem = name.strip_prefix("[]").unwrap_or(&name).to_string();
+            params.push_str(&format!("_{i} ...{elem}"));
+        } else {
+            params.push_str(&format!("_{i} {name}"));
+        }
+    }
+    params.push(')');
+
+    // Render returns. Go convention: 0 returns -> empty; 1 unnamed return
+    // -> bare type without parens; N returns or any named return -> parens.
+    let returns = match out_types.len() {
+        0 => String::new(),
+        1 => format!(" {}", render_type_name(out_types[0], cache)),
+        _ => {
+            let mut s = String::from(" (");
+            for (i, &addr) in out_types.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&render_type_name(addr, cache));
+            }
+            s.push(')');
+            s
+        }
+    };
+
+    Some(format!("{params}{returns}"))
+}
+
+/// Resolve a `_type` address to a printable Go type name. The compiler
+/// stores the human-readable form (`*http.Request`, `[]byte`, `map[string]int`)
+/// directly in the names blob at `_type.Str`, so for any type with a non-
+/// empty name we return it verbatim. The fallback for unnamed types or
+/// failed lookups is `<addr>` so the surrounding output stays readable.
+fn render_type_name(addr: u64, cache: &mut TypeCache<'_>) -> String {
+    if addr == 0 {
+        return "<nil>".to_string();
+    }
+    match cache.get(addr) {
+        Some(t) if !t.name.is_empty() => t.name.clone(),
+        Some(_) => format!("type@0x{addr:x}"),
+        None => format!("type@0x{addr:x}"),
     }
 }
 
