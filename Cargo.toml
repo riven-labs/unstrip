@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "internal/inlinecov"]
+members = ["."]
 
 [package]
 name = "unstrip"

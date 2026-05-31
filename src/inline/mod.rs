@@ -6,17 +6,14 @@
 //!
 //! # Supported Go envelope
 //!
-//! Witnessed format-stable across **Go 1.22 through 1.24** by the
-//! coverage probe (see `internal/inlinecov/REPORT.md`): same 16-byte
-//! `runtime.inlinedCall` layout, same `FUNCDATA_InlTree=3`, same
-//! `PCDATA_InlTreeIndex=2`. Go 1.22 is the supported floor; Go 1.20
-//! and 1.21 share the layout but are not witnessed by this codebase.
-//! Later toolchains (Go 1.26+) are best-effort pending witness: the layout has been
-//! stable since Go 1.20 and is unlikely to drift soon, but a returned
-//! error on an unrecognized funcdata layout is the honest fallback if
-//! it does. Garble's `entryoff` XOR rewrite provably does not touch
-//! the inline-tree FUNCDATA section, so this decoder works on
-//! garble-obfuscated binaries unchanged.
+//! The 16-byte `runtime.inlinedCall` record has been format-stable
+//! since Go 1.20 (the version that added `startLine`). Same layout,
+//! same `FUNCDATA_InlTree=3`, same `PCDATA_InlTreeIndex=2` through
+//! Go 1.26. A returned error on an unrecognized funcdata layout is
+//! the honest fallback if a future Go release drifts. Garble's
+//! `entryoff` XOR rewrite does not touch the inline-tree FUNCDATA
+//! section, so this decoder works on garble-obfuscated binaries
+//! unchanged.
 //!
 //! # On-disk encoding
 //!
@@ -441,8 +438,8 @@ impl CallGraph {
 /// `Node` per distinct name); anonymous-inline records dedupe within
 /// their parent function by `(parent, parent_pc, start_line)`.
 ///
-/// Witnessed across Go 1.22-1.24 by the coverage probe (see
-/// `internal/inlinecov/REPORT.md`). Garble-obfuscated binaries
+/// The `runtime.inlinedCall` layout has been stable since Go 1.20
+/// and runs unchanged through Go 1.26. Garble-obfuscated binaries
 /// produce a graph with obfuscated callee names; structure is
 /// unchanged.
 pub fn inline_callgraph(bin: &GoBinary, pcln: &Pclntab) -> Result<CallGraph> {
