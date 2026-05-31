@@ -181,7 +181,7 @@ pub struct StructField {
     pub embedded: bool,
 }
 
-const TYPE_HEADER_SIZE_64: usize = 48;
+pub(crate) const TYPE_HEADER_SIZE_64: usize = 48;
 
 /// Recover types using the `Mode::Focused` strategy: typelinks-driven walk
 /// plus child reference following. Skips primitive-leaf entries and other
@@ -514,7 +514,7 @@ fn decode_kind(
 /// types reachable only through callback fields (cobra command handlers,
 /// grpc interceptors, anything passing functions as values) never make it
 /// into the recovered type graph.
-const TFLAG_UNCOMMON: u8 = 1;
+pub(crate) const TFLAG_UNCOMMON: u8 = 1;
 const UNCOMMON_TYPE_SIZE: usize = 16;
 
 fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
