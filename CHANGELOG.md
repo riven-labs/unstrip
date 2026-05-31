@@ -9,6 +9,12 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Added
 
+- `--xref` runs on arm64 binaries (was amd64-only). Direct-CALL
+  recognition is fully covered (BL with sign-extended 26-bit
+  offset). Indirect-itab dispatch is recognized via the canonical
+  `LDR Xt, [Xn, #slot]; BLR Xt` pair where slot equals the recovered
+  itab slot offset; other arm64 dispatch shapes the compiler emits
+  are silently skipped pending a real disassembler integration.
 - `ModuleData::locate_all` walks `runtime.firstmoduledata.next` to
   return every chained module in a binary. On disk most binaries have a
   single moduledata so the returned vector usually has length 1; the

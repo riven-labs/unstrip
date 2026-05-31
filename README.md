@@ -289,7 +289,7 @@ runtime.convT @ 0x000000000040fb00:
 
 Accepts a function name (resolved through pclntab) or a hex address (`0x...`). When the target is an interface-method implementation, indirect dispatch sites of the form `CALL [rip+itab+slot]` are reported alongside direct calls with the resolved itab and method name carried inline. The compiler usually loads the slot pointer into a register first; those register-indirect sites do not show up here because resolving them requires basic-block tracking we deliberately don't ship. In practice the indirect-itab scanner finds matches on hand-written assembly and unusual codegen; expect zero hits from stock Go compiler output. The strict-encoding hits that do appear carry zero false positives.
 
-amd64 only today.
+amd64 and arm64. Direct-CALL coverage is solid on both; indirect-itab on arm64 catches the canonical `LDR Xt, [Xn, #slot]; BLR Xt` pair but misses other dispatch patterns the compiler emits, pending a real disassembler integration.
 
 ### Goroutines and deferred calls
 
@@ -451,8 +451,6 @@ Free-function signature recovery. Methods ship today (we walk `_type.uncommon().
 i386 and 32-bit arm. The pclntab layout drifts on 32-bit targets. No demand yet; the day a 32-bit IoT Go binary becomes a real corpus problem, this jumps to the top.
 
 `--symbols-as` for Mach-O. ELF and PE write today. The Mach-O equivalent (`LC_SYMTAB` patching) ships once we have a tested fixture; we do not currently have one we can publish.
-
-arm64 for `--xref` indirect-itab dispatch. The amd64 decoder catches `CALL [reg + slot*8]`. arm64 needs the equivalent `LDR` + `BLR` pattern walker.
 
 Rust binary symbol recovery. Not an unstrip mode. If we build it, it ships as a separate tool. DWARF parsing is its own problem and conflating the two would be a mistake.
 

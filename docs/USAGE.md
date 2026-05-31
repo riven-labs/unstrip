@@ -54,7 +54,7 @@ Builds a static call graph from direct `CALL` / `BL` scans in `.text`. Direct ca
 
 ### `--xref <SYMBOL>`
 
-Lists every call site targeting the given symbol. Accepts a function name (resolved through pclntab) or a hex address (`0x...`). Output groups call sites under their containing function. amd64 only.
+Lists every call site targeting the given symbol. Accepts a function name (resolved through pclntab) or a hex address (`0x...`). Output groups call sites under their containing function. amd64 and arm64. Direct-CALL coverage is solid on both; indirect-itab on arm64 catches the canonical `LDR Xt, [Xn, #slot]; BLR Xt` pair but misses other dispatch patterns Go's compiler emits.
 
 ### `--xref-readers <ADDR>` / `--xref-writers <ADDR>`
 

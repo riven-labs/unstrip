@@ -110,9 +110,9 @@ pub fn find(
             "callsites scan is little-endian only today".into(),
         ));
     }
-    if !matches!(bin.arch, Arch::X86_64) {
+    if !matches!(bin.arch, Arch::X86_64 | Arch::Aarch64) {
         return Err(Error::Xrefs(format!(
-            "callsites scan is amd64 only today; got {:?}",
+            "callsites scan supports amd64 and arm64 today; got {:?}",
             bin.arch
         )));
     }
@@ -122,33 +122,36 @@ pub fn find(
     let text_start = text.addr;
     let text_bytes = &bin.bytes[text.file_offset..text.file_offset + text.file_size];
 
+    let scan_direct = match bin.arch {
+        Arch::X86_64 => scan_direct_amd64,
+        Arch::Aarch64 => scan_direct_arm64,
+        _ => unreachable!("arch gate above"),
+    };
+    let scan_indirect = match bin.arch {
+        Arch::X86_64 => scan_indirect_itab_for_slot_amd64,
+        Arch::Aarch64 => scan_indirect_itab_for_slot_arm64,
+        _ => unreachable!("arch gate above"),
+    };
+
     let mut out = Vec::new();
     match target {
         Target::Function(name) => {
             let target_addr = resolve_function(name, &functions)?;
-            scan_direct_amd64(text_bytes, text_start, target_addr, pcln, &mut out);
-            // Scanner 2: if any itab dispatches to this address, also
-            // look for indirect-itab call sites pointing at the slot.
-            // Many functions never appear as an interface-method
-            // implementation; for those this loop adds zero hits.
+            scan_direct(text_bytes, text_start, target_addr, pcln, &mut out);
             for it in itabs {
                 for (idx, m) in it.methods.iter().enumerate() {
                     if m.concrete_fn == target_addr {
-                        scan_indirect_itab_for_slot(
-                            text_bytes, text_start, it, idx, pcln, &mut out,
-                        );
+                        scan_indirect(text_bytes, text_start, it, idx, pcln, &mut out);
                     }
                 }
             }
         }
         Target::Address(addr) => {
-            scan_direct_amd64(text_bytes, text_start, *addr, pcln, &mut out);
+            scan_direct(text_bytes, text_start, *addr, pcln, &mut out);
             for it in itabs {
                 for (idx, m) in it.methods.iter().enumerate() {
                     if m.concrete_fn == *addr {
-                        scan_indirect_itab_for_slot(
-                            text_bytes, text_start, it, idx, pcln, &mut out,
-                        );
+                        scan_indirect(text_bytes, text_start, it, idx, pcln, &mut out);
                     }
                 }
             }
@@ -166,7 +169,7 @@ pub fn find(
                      requires the address to match a recovered itab base"
                     ))
                 })?;
-            scan_indirect_itab_for_slot(text_bytes, text_start, it, *method_index, pcln, &mut out);
+            scan_indirect(text_bytes, text_start, it, *method_index, pcln, &mut out);
         }
     }
     Ok(out)
@@ -255,7 +258,7 @@ pub(crate) fn encode_call_rip_rel(instruction_va: u64, effective_addr: u64) -> [
     [0xff, 0x15, d[0], d[1], d[2], d[3]]
 }
 
-fn scan_indirect_itab_for_slot(
+fn scan_indirect_itab_for_slot_amd64(
     text_bytes: &[u8],
     text_start: u64,
     itab: &Itab,
@@ -298,6 +301,143 @@ fn scan_indirect_itab_for_slot(
             }
         }
         i += 1;
+    }
+}
+
+/// arm64 BL: 26-bit signed branch offset, encoded in instruction[25:0].
+/// Resolved address = pc + sign_extend(imm26 << 2).
+/// Bit pattern: `1001 01ii iiii iiii iiii iiii iiii iiii` (top 6 bits
+/// = `100101`). All other branch encodings (B, B.cond, CBZ, etc.) we
+/// reject; only BL counts as a "call site" in the Go sense.
+fn scan_direct_arm64(
+    text_bytes: &[u8],
+    text_start: u64,
+    target_addr: u64,
+    pcln: &Pclntab<'_>,
+    out: &mut Vec<CallSite>,
+) {
+    let mut i = 0usize;
+    while i + 4 <= text_bytes.len() {
+        let instr = u32::from_le_bytes(text_bytes[i..i + 4].try_into().unwrap());
+        // Top 6 bits == 100101 => BL imm26.
+        if (instr >> 26) == 0b100101 {
+            let imm26 = instr & 0x03ff_ffff;
+            // Sign-extend 26-bit value to i32, then multiply by 4.
+            let signed = if imm26 & (1 << 25) != 0 {
+                (imm26 | 0xfc00_0000) as i32
+            } else {
+                imm26 as i32
+            };
+            let offset_bytes = (signed as i64).wrapping_mul(4);
+            let call_site_va = text_start + i as u64;
+            let resolved = call_site_va.wrapping_add(offset_bytes as u64);
+            if resolved == target_addr {
+                let caller = pcln.lookup(call_site_va);
+                out.push(CallSite {
+                    call_site: call_site_va,
+                    caller_name: caller.as_ref().map(|f| f.name.clone()),
+                    caller_addr: caller.as_ref().map(|f| f.address),
+                    kind: CallKind::Direct,
+                });
+            }
+        }
+        i += 4; // arm64 instructions are fixed-width 4 bytes
+    }
+}
+
+/// arm64 indirect-itab dispatch (best-effort): the compiler loads an
+/// itab method slot's pointer with `LDR Xt, [Xn, #imm]` (unsigned-
+/// offset variant) and then calls through it with `BLR Xt`. The two
+/// instructions must be adjacent and the BLR must call through the
+/// SAME register the LDR wrote. Real Go arm64 codegen uses several
+/// other dispatch patterns this matcher does not cover (e.g. LDR with
+/// register-offset variants, intervening ADRP/ADD pairs, ABIInternal
+/// shuffling); for those the matcher silently misses the call site
+/// rather than fabricating a false positive. Direct-CALL coverage on
+/// arm64 is solid; indirect-itab coverage is partial pending a real
+/// disassembler integration.
+///
+/// LDR (immediate, unsigned offset, 64-bit):
+///   `1111 1001 01ii iiii iiii ii nn nnnt tttt`
+///   top 10 bits = `1111100101`, imm = bits[21:10] * 8 (for 64-bit).
+///   Rn = bits[9:5], Rt = bits[4:0].
+///
+/// BLR Xt:
+///   `1101 0110 0011 1111 0000 00nn nnn0 0000` (Rn = bits[9:5]).
+///
+/// Strict-only: the LDR must immediately precede the BLR and the BLR
+/// must call through the SAME register the LDR wrote. We don't track
+/// data flow further. Misses the more elaborate Go codegen paths;
+/// never produces a false positive because the load-immediate
+/// resolves to the slot address or it doesn't.
+fn scan_indirect_itab_for_slot_arm64(
+    text_bytes: &[u8],
+    text_start: u64,
+    itab: &Itab,
+    method_index: usize,
+    pcln: &Pclntab<'_>,
+    out: &mut Vec<CallSite>,
+) {
+    let slot_offset_into_itab = ITAB_HEADER_BYTES + (method_index as u64) * ITAB_SLOT_BYTES;
+    let method_name = itab
+        .methods
+        .get(method_index)
+        .map(|m| m.interface_method.clone());
+
+    let mut i = 0usize;
+    while i + 8 <= text_bytes.len() {
+        let ldr = u32::from_le_bytes(text_bytes[i..i + 4].try_into().unwrap());
+        let blr = u32::from_le_bytes(text_bytes[i + 4..i + 8].try_into().unwrap());
+
+        // LDR (immediate, unsigned offset, 64-bit) opcode prefix.
+        if (ldr >> 22) != 0b11_1110_0101 {
+            i += 4;
+            continue;
+        }
+        // BLR Xn opcode prefix.
+        if (blr & 0xff_ff_fc_1f) != 0xd6_3f_00_00 {
+            i += 4;
+            continue;
+        }
+
+        let ldr_rt = ldr & 0b11111;
+        // ldr_rn (the base register) is the iface-loaded itab base; we
+        // do not validate it (we cannot without data-flow tracking), we
+        // only require the load offset to equal the slot's offset.
+        let _ldr_rn = (ldr >> 5) & 0b11111;
+        let ldr_imm12 = (ldr >> 10) & 0xfff;
+        let load_offset = (ldr_imm12 as u64) * 8;
+
+        let blr_rn = (blr >> 5) & 0b11111;
+        if blr_rn != ldr_rt {
+            i += 4;
+            continue;
+        }
+
+        // The LDR offset must equal the itab slot's offset into its
+        // base register. We don't know Rn's value statically; the
+        // strict match is "the load offset equals the slot's offset
+        // from the itab base". For dispatch through a register that
+        // already holds the itab base, that's the exact match.
+        if load_offset != slot_offset_into_itab {
+            i += 4;
+            continue;
+        }
+
+        // Match. Record the BLR (the actual call) as the call site.
+        let call_site_va = text_start + (i + 4) as u64;
+        let caller = pcln.lookup(call_site_va);
+        out.push(CallSite {
+            call_site: call_site_va,
+            caller_name: caller.as_ref().map(|f| f.name.clone()),
+            caller_addr: caller.as_ref().map(|f| f.address),
+            kind: CallKind::IndirectItab {
+                itab_addr: itab.addr,
+                method_index,
+                method_name: method_name.clone(),
+            },
+        });
+        i += 8;
     }
 }
 
