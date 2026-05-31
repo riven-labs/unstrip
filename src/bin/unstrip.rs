@@ -1454,8 +1454,23 @@ fn maybe_warn_garbled(
 /// returns an empty map when type or itab recovery fails. Callers should
 /// pre-check `args.no_signatures` and skip this call entirely when the
 /// operator opted out.
+///
+/// Uses `Mode::Full` for type recovery rather than `Mode::Focused`. The
+/// focused walk follows typelinks and child references, which misses
+/// types whose `_type` record was emitted into the typeinfo region but
+/// not registered in `typelinks` (a real population in real binaries).
+/// The linear scan in `Full` mode finds those extras and unlocks their
+/// uncommon-table methods.
+///
+/// Note: there is a fundamental ceiling here. Go's linker omits the
+/// `_type` record entirely for a struct that no runtime path needs
+/// (never stored as `any`, never reflected on, never used as an
+/// interface value). Methods on such types appear in pclntab (so the
+/// function listing names them) but have no `_type.uncommon().methods`
+/// entry, so their signatures are unrecoverable from a stripped binary
+/// without DWARF.
 fn compute_signatures(bin: &GoBinary, md: &ModuleData) -> std::collections::HashMap<u64, String> {
-    let recovered_types = types::recover_all(bin, md).unwrap_or_default();
+    let recovered_types = types::recover_with_mode(bin, md, types::Mode::Full).unwrap_or_default();
     let recovered_itabs = itabs::recover_all(bin, md).unwrap_or_default();
     let from_types = unstrip::funcsig::recover_methods_from_types(bin, md, &recovered_types);
     let from_itabs =

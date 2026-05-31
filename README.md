@@ -59,19 +59,28 @@ A short verified-only table follows. The longer differences and the "when to rea
 unstrip ./samples/hello.stripped
 ```
 
-Function names, source files, line numbers, one function per line. Methods carry the recovered Go-syntax signature (parameter and return types):
+Function names, source files, line numbers, one function per line. Methods on types the binary carries a `_type` record for get their Go-syntax signature appended:
 
 ```
-$ unstrip ./samples/hello.stripped
-0x0000000000460a40  runtime.main                                                                  runtime/proc.go
+$ unstrip ./crypto-pipeline.stripped
+0x00000000004b3f20  main.(*HashingReader).Read                                                    main.go
+0x00000000004b4000  main.(*CountingWriter).Write(_0 []uint8) (int, error)  (itab thunk)           main.go
+0x00000000004b4280  main.(*AesGcm).Encrypt(_0 []uint8) ([]uint8, error)  (itab thunk)             main.go
+0x00000000004b4820  main.(*Pipeline).ProcessFrame                                                 main.go
+0x00000000004b4a40  main.(*Pipeline).StreamThrough                                                main.go
 0x0000000000465b40  errors.(*errorString).Error() string                                          errors/errors.go
 0x0000000000479e00  os.(*File).Write(_0 []uint8) (int, error)                                     os/file.go
-0x000000000045a200  net.(*conn).Read(_0 []uint8) (int, error)                                     net/net.go
-0x0000000000482560  main.main                                                                     main.go
+0x00000000004b4d40  main.main                                                                     main.go
 ...
 ```
 
-Parameter names are not in the binary; positional placeholders (`_0`, `_1`, ...) keep the shape correct. Free top-level functions (like `main.main`) show as bare names since the binary does not carry their signatures. Pass `--no-signatures` for the older shorter listing.
+Parameter names are not in the binary; positional placeholders (`_0`, `_1`, ...) keep the shape correct. Coverage scope and what to expect:
+
+- **Methods that implement an interface** (`CountingWriter.Write`, `AesGcm.Encrypt`, `errorString.Error`, `os.File.Write` above): signatures recover reliably. The `(itab thunk)` marker shows the iface dispatch path; the signature on that row comes from the interface's declared funcType.
+- **Methods on types reached only through internal calls** (`HashingReader.Read`, `Pipeline.ProcessFrame`, `Pipeline.StreamThrough` above): the Go linker may have elided the type's `_type` record because no runtime path needs it. The function name is recovered from `pclntab`; the signature is not in the binary. unstrip prints the bare name for those.
+- **Free top-level functions** (`main.main`, `main.NewAesGcm`, etc.): never had per-function signature records to begin with. Bare names.
+
+Pass `--no-signatures` for the older shorter listing.
 
 ### Container, version, garble check
 

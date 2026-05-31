@@ -122,16 +122,35 @@ pub fn recover_methods_from_itabs(
     itabs: &[crate::itabs::Itab],
 ) -> Vec<RecoveredMethod> {
     // Index interface types by name so we can look up each itab's
-    // interface declaration in O(1).
-    let iface_by_name: HashMap<&str, &Type> = types
+    // interface declaration in O(1). The runtime stores the InterfaceType
+    // extension on the bare interface type (`io.Reader`), but itablinks
+    // records the interface column as the pointer-to-interface type
+    // (`*io.Reader`). Map both spellings to the same record so an itab
+    // lookup hits whichever form the recovered_types set carries.
+    let mut iface_by_name: HashMap<String, &Type> = HashMap::new();
+    for t in types
         .iter()
         .filter(|t| matches!(t.kind, KindName::Interface))
-        .map(|t| (t.name.as_str(), t))
-        .collect();
+    {
+        iface_by_name.insert(t.name.clone(), t);
+        iface_by_name.insert(format!("*{}", t.name), t);
+    }
 
     let mut out = Vec::new();
     for itab in itabs {
-        let Some(iface_t) = iface_by_name.get(itab.interface_name.as_str()) else {
+        // Try the as-recorded name first, then strip a leading `*` and
+        // retry. The stripping handles the common `*main.Cipher` -> bare
+        // `main.Cipher` mapping when only the bare interface type is in
+        // the recovered set.
+        let iface_t = iface_by_name
+            .get(&itab.interface_name)
+            .copied()
+            .or_else(|| {
+                itab.interface_name
+                    .strip_prefix('*')
+                    .and_then(|bare| iface_by_name.get(bare).copied())
+            });
+        let Some(iface_t) = iface_t else {
             // Interface type not in the recovered set. Some itabs reference
             // interfaces whose declarations live outside the typelinks walk;
             // skip them rather than fabricate signatures.

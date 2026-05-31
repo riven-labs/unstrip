@@ -16,8 +16,13 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   `_type.uncommon().methods` table, and every itab's method table.
   Disable with `--no-signatures`. Argument names are not in the binary;
   positional placeholders (`_0`, `_1`, ...) keep the shape correct.
-  Free functions outside the method tables stay as bare names. JSON
-  output gains an optional `signature` field per function.
+  Coverage scope: methods on types the Go linker emitted a `_type`
+  record for (every interface-method implementation, plus any type
+  reached through reflection or stored as `any`) recover reliably.
+  Methods on types the linker elided because nothing at runtime
+  needed the type record stay bare. Free top-level functions are
+  always bare. JSON output gains an optional `signature` field per
+  function.
 - `--xref <SYMBOL>` finds every call site that targets the given function
   name or hex address, grouped by containing caller. Scanner 1 resolves
   direct `CALL rel32` sites; Scanner 2 adds direct `CALL [rip+itab+slot]`
