@@ -1483,3 +1483,25 @@ fn rejects_non_go_binary() {
     let result = GoBinary::open(&path);
     assert!(result.is_err(), "Cargo.toml should not parse as a binary");
 }
+
+#[test]
+fn locate_all_returns_single_module_on_normal_binary() {
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let single = ModuleData::locate(&bin).expect("locate first module");
+    let all = ModuleData::locate_all(&bin).expect("locate all modules");
+    // A normal Go binary has exactly one module on disk; chained modules
+    // happen only at runtime when a plugin or shared library is loaded.
+    assert_eq!(
+        all.len(),
+        1,
+        "expected exactly 1 moduledata in a single-module binary, got {}",
+        all.len()
+    );
+    assert_eq!(
+        all[0].file_offset, single.file_offset,
+        "locate_all()[0] should be the same record as locate()"
+    );
+}

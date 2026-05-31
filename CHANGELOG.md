@@ -9,6 +9,15 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Added
 
+- `ModuleData::locate_all` walks `runtime.firstmoduledata.next` to
+  return every chained module in a binary. On disk most binaries have a
+  single moduledata so the returned vector usually has length 1; the
+  chain shows up at runtime when a host loads a plugin or shared
+  library, and any future on-disk multi-module fixture will now walk
+  cleanly. The walker recognizes `next` structurally (each chained
+  moduledata starts with a pcHeader pointer whose target carries the
+  pclntab magic), so no version-specific tail-field offset table is
+  needed.
 - Method-signature recovery. The default function listing, `--addr`,
   and `--xrefs` now append a Go-syntax signature like
   `(_0 []uint8) (int, error)` to every method whose mtyp resolves to a

@@ -438,15 +438,13 @@ What's out of scope, and where to look instead:
 Known gaps in v1.0:
 
 - Type recovery surfaces struct package paths as `_pkg_path` (read-and-discarded). Function-type argument types (in/out parameter type pointers) aren't enumerated, you get the count + variadic flag but not the signature types.
-- Multi-module binaries (Go plugins, shared libs): only `runtime.firstmoduledata` is parsed; the `moduledata.next` chain is not walked. Most real binaries are single-module, so this matters for plugins specifically.
+- Free top-level function signatures: the binary records signatures for methods (on types reached at runtime) but not for free top-level functions; their signatures are absent without DWARF.
 
 ## Roadmap
 
 Work we have not landed in v1.0. Ordered roughly by how often we expect it to come up.
 
 Pre-Go-1.18 pclntab parsing. The Go 1.13 through 1.17 layouts are different enough that the current parser does not even try. GoReSym covers the older corpus; we do not yet. Until we do, that is the gap.
-
-Multi-module binaries. `runtime.firstmoduledata` is parsed; the `next` pointer is not walked. Go plugins (`-buildmode=plugin`) and shared libraries built across multiple modules will surface only the first module. Most binaries are single-module so this has not bitten yet.
 
 Free-function signature recovery. Methods ship today (we walk `_type.uncommon().methods` and the itab method tables). Free top-level functions do not appear in either table, so their signatures are absent from a stripped binary unless the compiler emitted a `funcType` for reflection or interface storage. Closing that gap means either reading DWARF when present or recognizing reflective uses and back-resolving.
 

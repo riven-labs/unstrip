@@ -153,6 +153,132 @@ impl ModuleData {
             "no moduledata candidate found in data sections".into(),
         ))
     }
+
+    /// Locate every moduledata in the binary by walking the
+    /// `runtime.firstmoduledata` chain. Each `moduledata` ends with a
+    /// `next *moduledata` pointer; the chain terminates when `next` is
+    /// zero. The order of fields between `itablinks` (where the
+    /// per-version parse stops) and `next` drifts across Go releases,
+    /// so we recognize `next` structurally rather than parsing the
+    /// intervening tail: scan the bytes after the parsed prefix for an
+    /// 8-byte value that points at another valid moduledata (i.e. its
+    /// first field is a pcHeader pointer whose target begins with the
+    /// pclntab magic). This handles Go 1.18 through 1.26 without a
+    /// version-specific tail-field table.
+    ///
+    /// Most Go binaries are single-module so the returned vector almost
+    /// always has length 1. Plugin binaries (`-buildmode=plugin`) and
+    /// shared libraries (`-buildmode=shared`) chain additional
+    /// moduledatas off the anchor; this is the path that surfaces them.
+    pub fn locate_all(bin: &GoBinary) -> Result<Vec<Self>> {
+        let mut out = Vec::new();
+        let first = Self::locate(bin)?;
+
+        // Scan window: 1024 bytes after the parsed prefix is generous
+        // for every Go release we target. The tail today is ~200 bytes;
+        // 1024 accommodates future additions.
+        const WINDOW: usize = 1024;
+
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(first.file_offset);
+        out.push(first);
+
+        let mut idx = 0;
+        while idx < out.len() {
+            let md = out[idx].clone();
+            idx += 1;
+            let scan_start = md.file_offset + 8; // skip past pcHeader pointer
+            let scan_end = (scan_start + WINDOW).min(bin.bytes.len());
+            if scan_start >= bin.bytes.len() {
+                continue;
+            }
+            let buf = &bin.bytes[scan_start..scan_end];
+            // Walk 8-byte-aligned candidates. The first one that resolves
+            // to a valid moduledata IS the next pointer; subsequent
+            // pointer-shaped values further into the tail can also point
+            // at moduledatas (modulehashes carry pointers too), so we
+            // accept only the first hit per scan.
+            for off in (0..buf.len()).step_by(8) {
+                if off + 8 > buf.len() {
+                    break;
+                }
+                let cand = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+                if cand == 0 {
+                    continue;
+                }
+                // Resolve cand to a file offset. If it lands in a mapped
+                // section, check whether the bytes there look like a
+                // moduledata (first field is a pcHeader pointer whose
+                // bytes start with the pclntab magic).
+                if let Some(file_off) = vaddr_to_file_offset(bin, cand) {
+                    if visited.contains(&file_off) {
+                        continue;
+                    }
+                    if !looks_like_moduledata(bin, file_off) {
+                        continue;
+                    }
+                    let layout = guess_layout(bin);
+                    let ps = bin.pointer_size();
+                    if let Ok(next_md) = try_parse(bin, file_off, ps, layout) {
+                        visited.insert(file_off);
+                        out.push(next_md);
+                        break; // only one next per scan
+                    }
+                }
+            }
+        }
+
+        Ok(out)
+    }
+}
+
+/// Translate a runtime VA to a file offset. Returns None when the VA
+/// does not fall inside any mapped section.
+fn vaddr_to_file_offset(bin: &GoBinary, vaddr: u64) -> Option<usize> {
+    for s in &bin.sections {
+        if vaddr >= s.addr && vaddr < s.addr + s.vmsize {
+            let off = (vaddr - s.addr) as usize + s.file_offset;
+            if off < bin.bytes.len() {
+                return Some(off);
+            }
+        }
+    }
+    None
+}
+
+/// Cheap structural check: a moduledata begins with a `pcHeader *pcHeader`
+/// field. The target of that pointer should be 4-byte-aligned and start
+/// with a pclntab magic (0xfffffff0 or 0xfffffff1).
+fn looks_like_moduledata(bin: &GoBinary, file_off: usize) -> bool {
+    if file_off + 8 > bin.bytes.len() {
+        return false;
+    }
+    let pc_header_addr = u64::from_le_bytes(bin.bytes[file_off..file_off + 8].try_into().unwrap());
+    if pc_header_addr == 0 {
+        return false;
+    }
+    let Some(pc_off) = vaddr_to_file_offset(bin, pc_header_addr) else {
+        return false;
+    };
+    if pc_off + 4 > bin.bytes.len() {
+        return false;
+    }
+    let magic = u32::from_le_bytes(bin.bytes[pc_off..pc_off + 4].try_into().unwrap());
+    magic == 0xfffffff0 || magic == 0xfffffff1
+}
+
+fn guess_layout(bin: &GoBinary) -> Layout {
+    match bin.pclntab_slice().get(0..4) {
+        Some(b) => {
+            let magic = u32::from_le_bytes(b.try_into().unwrap());
+            if magic == 0xfffffff0 {
+                Layout::V118
+            } else {
+                Layout::V120
+            }
+        }
+        None => Layout::V120,
+    }
 }
 
 fn scan_section(
