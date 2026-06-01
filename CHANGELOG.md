@@ -7,6 +7,10 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-01
+
+First public release.
+
 ### Added
 
 - `--xref` runs on arm64 binaries (was amd64-only). Direct-CALL

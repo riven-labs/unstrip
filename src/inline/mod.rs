@@ -77,7 +77,7 @@ const MAX_INLINE_ENTRIES: usize = 65_536;
 /// missing (call [`Pclntab::with_gofunc`] first), if the encoded
 /// structure straddles unmapped memory, or (most importantly) if any
 /// decoded entry's `parent_pc` falls outside the host function's PC
-/// range. The last check is the safety assertion the wizard flagged.
+/// range. The last check rejects corrupted or recycled funcdata.
 pub fn decode_inline_tree(
     bin: &GoBinary,
     pcln: &Pclntab,
@@ -117,8 +117,7 @@ pub fn decode_inline_tree(
     // pcvalue stream for its maximum index across the function's PC range.
     // The inline-tree subarray for this function holds (max_idx + 1) entries;
     // walking past that point reads adjacent functions' subarrays and the
-    // parent_pc bounds-check rejects it. This is the safe termination the
-    // wizard flagged.
+    // parent_pc bounds-check rejects it. That is the safe termination point.
     let pcdata_off = func_start + 44;
     let pcdata_inltree_off = read_u32(data, pcdata_off + PCDATA_INLTREE_INDEX * 4, le)? as usize;
     let max_idx = max_pcvalue(
@@ -180,7 +179,7 @@ pub fn decode_inline_tree(
             start_line,
         };
 
-        // SAFETY ASSERTION (wizard's call): parent_pc must point inside
+        // Safety: parent_pc must point inside
         // the host function. parent_pc == -1 is the runtime's marker for
         // "top-level inline" (no parent call site), so we allow it; any
         // other negative value or an offset past func.size is corruption

@@ -1055,7 +1055,7 @@ fn dataxref_referenced_addresses_covers_live_itabs() {
 
 #[test]
 fn dataview_refuses_unmapped_or_sentinel_addresses() {
-    // The wizard's second-solve regression: --data-at 0 was happily
+    // Regression: --data-at 0 was happily
     // decoding the ELF shstrtab (which has addr=0) as if it were a
     // loaded section, returning section-name bytes interpreted as
     // an iface header. This test pins the contract that any address
