@@ -1,17 +1,15 @@
 name: Release
 
-# Builds release artifacts for every vN.N.N tag, then attaches the tarballs,
-# zip, and SHA256SUMS to the matching GitHub release. The release object is
-# created in draft state if it does not exist yet, so the human still writes
-# the release notes by hand and flips draft to published when ready.
+# Manual release workflow. Fire it from the Actions tab against an existing
+# tag (e.g. v1.0.0). The job builds four targets in parallel, packages each
+# binary, computes SHA256SUMS, and creates a published GitHub release at the
+# given tag with every artifact attached.
 
 on:
-  push:
-    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to build (e.g. v1.0.0)'
+        description: 'Existing tag to build and release (e.g. v1.0.0)'
         required: true
 
 permissions:
@@ -33,9 +31,6 @@ jobs:
             archive: tar.gz
             linker: aarch64-linux-gnu-gcc
             apt: gcc-aarch64-linux-gnu
-          - os: macos-13
-            target: x86_64-apple-darwin
-            archive: tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
@@ -45,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -63,16 +58,11 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Resolve tag
-        id: tag
-        shell: bash
-        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
-
       - name: Package
         shell: bash
         run: |
           set -eu
-          tag="${{ steps.tag.outputs.tag }}"
+          tag="${{ github.event.inputs.tag }}"
           target="${{ matrix.target }}"
           name="unstrip-${tag}-${target}"
           mkdir -p dist
@@ -98,7 +88,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -113,17 +103,16 @@ jobs:
           shasum -a 256 *.tar.gz *.zip > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Create draft release if missing, then upload assets
+      - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ github.event.inputs.tag }}
         shell: bash
         run: |
           set -eu
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --draft \
               --title "unstrip $TAG" \
-              --notes "Draft release. Notes pending."
+              --notes "Release notes pending. The maintainer will edit this body shortly."
           fi
           gh release upload "$TAG" dist/* --clobber
