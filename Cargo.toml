@@ -6,13 +6,16 @@ name = "unstrip"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Recover symbols, types, interfaces, and buildinfo from stripped Go binaries."
+description = "Recover symbols, types, and method signatures from stripped Go binaries. Ghidra/IDA/Binary Ninja exporters included."
 authors = ["Riven Labs <mohamed@riven-labs.com>"]
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/riven-labs/unstrip"
+homepage = "https://github.com/riven-labs/unstrip"
+documentation = "https://docs.rs/unstrip"
 readme = "README.md"
-keywords = ["reverse-engineering", "go", "pclntab", "symbols", "binary-analysis"]
-categories = ["command-line-utilities", "development-tools::debugging"]
+keywords = ["reverse-engineering", "go", "binary-analysis", "ghidra", "malware-analysis"]
+categories = ["command-line-utilities", "development-tools::debugging", "parser-implementations"]
+exclude = ["testdata/", "mb-corpus/", ".github/workflows/release.yml"]
 
 [[bin]]
 name = "unstrip"

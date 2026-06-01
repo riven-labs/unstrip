@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/unstrip.svg)](https://crates.io/crates/unstrip)
 [![CI](https://github.com/riven-labs/unstrip/actions/workflows/ci.yml/badge.svg)](https://github.com/riven-labs/unstrip/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 [![Go versions](https://img.shields.io/badge/go-1.18--1.25-00ADD8.svg)](https://go.dev)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
@@ -491,7 +491,12 @@ If `unstrip` can't recover symbols from a binary in the supported matrix, that's
 
 ## License
 
-MIT. See [`LICENSE`](./LICENSE) for the full text. Contact: mohamed@riven-labs.com.
+Dual-licensed under MIT or Apache-2.0 at your option. Pick whichever fits your downstream needs:
+
+- [`LICENSE-MIT`](./LICENSE-MIT)
+- [`LICENSE-APACHE`](./LICENSE-APACHE)
+
+Contact: mohamed@riven-labs.com.
 
 ---
 
