@@ -15,7 +15,14 @@ documentation = "https://docs.rs/unstrip"
 readme = "README.md"
 keywords = ["reverse-engineering", "go", "binary-analysis", "ghidra", "malware-analysis"]
 categories = ["command-line-utilities", "development-tools::debugging", "parser-implementations"]
-exclude = ["testdata/", "mb-corpus/", ".github/workflows/release.yml"]
+exclude = [
+    "testdata/",
+    "mb-corpus/",
+    "benches/",
+    ".github/",
+    ".editorconfig",
+    ".gitignore",
+]
 
 [[bin]]
 name = "unstrip"
