@@ -51,24 +51,54 @@ fn write_ida<W: Write>(
     )?;
     writeln!(w, "import ida_funcs, ida_name, ida_bytes, ida_typeinf, idc")?;
     writeln!(w)?;
+    emit_stats_preamble(w)?;
     writeln!(w, "def _func(addr, name, comment):")?;
-    writeln!(w, "    ida_funcs.add_func(addr)")?;
+    writeln!(w, "    try:")?;
+    writeln!(w, "        ok = ida_funcs.add_func(addr)")?;
     writeln!(
         w,
-        "    ida_name.set_name(addr, name, ida_name.SN_FORCE | ida_name.SN_NOCHECK)"
+        "        ok = ida_name.set_name(addr, name, ida_name.SN_FORCE | ida_name.SN_NOCHECK) and ok"
     )?;
-    writeln!(w, "    if comment:")?;
-    writeln!(w, "        idc.set_func_cmt(addr, comment, 0)")?;
+    writeln!(w, "        if comment:")?;
+    writeln!(w, "            idc.set_func_cmt(addr, comment, 0)")?;
+    writeln!(w, "        if ok:")?;
+    writeln!(w, "            _stats['func_ok'] += 1")?;
+    writeln!(w, "        else:")?;
+    writeln!(w, "            _stats['func_fail'] += 1")?;
+    writeln!(
+        w,
+        "            _stats['failures'].append(('func', '0x{{:x}} {{}}'.format(addr, name), 'IDA refused add_func or set_name'))"
+    )?;
+    writeln!(w, "    except Exception as e:")?;
+    writeln!(w, "        _stats['func_fail'] += 1")?;
+    writeln!(
+        w,
+        "        _stats['failures'].append(('func', '0x{{:x}} {{}}'.format(addr, name), repr(e)))"
+    )?;
     writeln!(w)?;
     writeln!(w, "def _struct(decl):")?;
+    writeln!(w, "    try:")?;
+    writeln!(w, "        til = ida_typeinf.get_idati()")?;
     writeln!(
         w,
-        "    # parse a single C struct decl into IDA's type system"
+        "        rc = ida_typeinf.parse_decls(til, decl, None, ida_typeinf.PT_TYP)"
     )?;
-    writeln!(w, "    til = ida_typeinf.get_idati()")?;
+    // ida_typeinf.parse_decls returns the number of errors, so 0 means
+    // success. Any positive value indicates the parser rejected at least
+    // one struct in the supplied decl block.
+    writeln!(w, "        if rc == 0:")?;
+    writeln!(w, "            _stats['struct_ok'] += 1")?;
+    writeln!(w, "        else:")?;
+    writeln!(w, "            _stats['struct_fail'] += 1")?;
     writeln!(
         w,
-        "    ida_typeinf.parse_decls(til, decl, None, ida_typeinf.PT_TYP)"
+        "            _stats['failures'].append(('struct', decl.split('{{')[0].strip()[:80], 'IDA parse_decls returned {{}} errors'.format(rc)))"
+    )?;
+    writeln!(w, "    except Exception as e:")?;
+    writeln!(w, "        _stats['struct_fail'] += 1")?;
+    writeln!(
+        w,
+        "        _stats['failures'].append(('struct', decl.split('{{')[0].strip()[:80], repr(e)))"
     )?;
     writeln!(w)?;
 
@@ -97,13 +127,7 @@ fn write_ida<W: Write>(
         }
     }
 
-    writeln!(w)?;
-    writeln!(
-        w,
-        "print('unstrip: applied {} symbols and {} struct types')",
-        funcs.len(),
-        count_struct_types(types)
-    )?;
+    emit_stats_postamble(w)?;
     Ok(())
 }
 
@@ -143,39 +167,55 @@ fn write_ghidra<W: Write>(
     writeln!(w, "dtm = currentProgram.getDataTypeManager()")?;
     writeln!(w, "listing = currentProgram.getListing()")?;
     writeln!(w)?;
+    emit_stats_preamble(w)?;
     writeln!(w, "def _func(addr, name, comment):")?;
-    writeln!(w, "    a = af.getDefaultAddressSpace().getAddress(addr)")?;
-    writeln!(w, "    f = fm.getFunctionAt(a)")?;
-    writeln!(w, "    if f is None:")?;
-    writeln!(w, "        try:")?;
+    writeln!(w, "    label = '0x{{:x}} {{}}'.format(addr, name)")?;
+    writeln!(w, "    try:")?;
+    writeln!(
+        w,
+        "        a = af.getDefaultAddressSpace().getAddress(addr)"
+    )?;
+    writeln!(w, "        f = fm.getFunctionAt(a)")?;
+    writeln!(w, "        if f is None:")?;
     writeln!(
         w,
         "            f = fm.createFunction(name, a, None, USER_DEFINED)"
     )?;
-    writeln!(w, "        except Exception:")?;
-    writeln!(w, "            return")?;
-    writeln!(w, "    else:")?;
-    writeln!(w, "        try:")?;
+    writeln!(w, "        else:")?;
     writeln!(w, "            f.setName(name, USER_DEFINED)")?;
-    writeln!(w, "        except Exception:")?;
-    writeln!(w, "            pass")?;
-    writeln!(w, "    if comment:")?;
-    writeln!(w, "        try:")?;
+    writeln!(w, "        if comment:")?;
     writeln!(w, "            f.setComment(comment)")?;
-    writeln!(w, "        except Exception:")?;
-    writeln!(w, "            pass")?;
+    writeln!(w, "        _stats['func_ok'] += 1")?;
+    writeln!(w, "    except Exception as e:")?;
+    writeln!(w, "        _stats['func_fail'] += 1")?;
+    writeln!(
+        w,
+        "        _stats['failures'].append(('func', label, repr(e)))"
+    )?;
     writeln!(w)?;
     writeln!(w, "def _struct(decl):")?;
+    writeln!(w, "    label = decl.split('{{')[0].strip()[:80]")?;
     writeln!(w, "    try:")?;
     writeln!(w, "        parser = CParser(dtm)")?;
     writeln!(w, "        parsed = parser.parse(decl)")?;
-    writeln!(w, "        if parsed is not None:")?;
+    writeln!(w, "        if parsed is None:")?;
+    writeln!(w, "            _stats['struct_fail'] += 1")?;
     writeln!(
         w,
-        "            dtm.addDataType(parsed, DataTypeConflictHandler.REPLACE_HANDLER)"
+        "            _stats['failures'].append(('struct', label, 'CParser returned None'))"
     )?;
-    writeln!(w, "    except Exception:")?;
-    writeln!(w, "        pass")?;
+    writeln!(w, "            return")?;
+    writeln!(
+        w,
+        "        dtm.addDataType(parsed, DataTypeConflictHandler.REPLACE_HANDLER)"
+    )?;
+    writeln!(w, "        _stats['struct_ok'] += 1")?;
+    writeln!(w, "    except Exception as e:")?;
+    writeln!(w, "        _stats['struct_fail'] += 1")?;
+    writeln!(
+        w,
+        "        _stats['failures'].append(('struct', label, repr(e)))"
+    )?;
     writeln!(w)?;
 
     for f in funcs {
@@ -203,13 +243,7 @@ fn write_ghidra<W: Write>(
         }
     }
 
-    writeln!(w)?;
-    writeln!(
-        w,
-        "print('unstrip: applied {} symbols and {} struct types')",
-        funcs.len(),
-        count_struct_types(types)
-    )?;
+    emit_stats_postamble(w)?;
     Ok(())
 }
 
@@ -229,24 +263,40 @@ fn write_binja<W: Write>(
         "from binaryninja import Symbol, SymbolType, Type as BNType"
     )?;
     writeln!(w)?;
+    emit_stats_preamble(w)?;
     writeln!(w, "def _func(addr, name, comment):")?;
-    writeln!(w, "    bv.add_function(addr)")?;
+    writeln!(w, "    label = '0x{{:x}} {{}}'.format(addr, name)")?;
+    writeln!(w, "    try:")?;
+    writeln!(w, "        bv.add_function(addr)")?;
     writeln!(
         w,
-        "    bv.define_user_symbol(Symbol(SymbolType.FunctionSymbol, addr, name))"
+        "        bv.define_user_symbol(Symbol(SymbolType.FunctionSymbol, addr, name))"
     )?;
-    writeln!(w, "    if comment:")?;
-    writeln!(w, "        f = bv.get_function_at(addr)")?;
-    writeln!(w, "        if f is not None:")?;
-    writeln!(w, "            f.comment = comment")?;
+    writeln!(w, "        if comment:")?;
+    writeln!(w, "            f = bv.get_function_at(addr)")?;
+    writeln!(w, "            if f is not None:")?;
+    writeln!(w, "                f.comment = comment")?;
+    writeln!(w, "        _stats['func_ok'] += 1")?;
+    writeln!(w, "    except Exception as e:")?;
+    writeln!(w, "        _stats['func_fail'] += 1")?;
+    writeln!(
+        w,
+        "        _stats['failures'].append(('func', label, repr(e)))"
+    )?;
     writeln!(w)?;
     writeln!(w, "def _struct(decl):")?;
+    writeln!(w, "    label = decl.split('{{')[0].strip()[:80]")?;
     writeln!(w, "    try:")?;
     writeln!(w, "        types = bv.parse_types_from_string(decl)")?;
     writeln!(w, "        for name, typ in types.types.items():")?;
     writeln!(w, "            bv.define_user_type(name, typ)")?;
-    writeln!(w, "    except Exception:")?;
-    writeln!(w, "        pass")?;
+    writeln!(w, "        _stats['struct_ok'] += 1")?;
+    writeln!(w, "    except Exception as e:")?;
+    writeln!(w, "        _stats['struct_fail'] += 1")?;
+    writeln!(
+        w,
+        "        _stats['failures'].append(('struct', label, repr(e)))"
+    )?;
     writeln!(w)?;
 
     for f in funcs {
@@ -274,12 +324,61 @@ fn write_binja<W: Write>(
         }
     }
 
+    emit_stats_postamble(w)?;
+    Ok(())
+}
+
+/// Emit the shared Python preamble that initializes the per-script
+/// success/failure counters. Every writer calls this once before the
+/// per-symbol _func() and _struct() calls so the helpers have a place
+/// to record what landed and what did not.
+fn emit_stats_preamble<W: Write>(w: &mut W) -> io::Result<()> {
+    writeln!(w, "_stats = {{")?;
+    writeln!(w, "    'func_ok': 0,")?;
+    writeln!(w, "    'func_fail': 0,")?;
+    writeln!(w, "    'struct_ok': 0,")?;
+    writeln!(w, "    'struct_fail': 0,")?;
+    writeln!(w, "    'failures': [],")?;
+    writeln!(w, "}}")?;
     writeln!(w)?;
+    Ok(())
+}
+
+/// Emit the shared Python postamble that prints honest counts and a
+/// per-failure breakdown. Called once at the bottom of every writer
+/// after the last _func() / _struct() call.
+fn emit_stats_postamble<W: Write>(w: &mut W) -> io::Result<()> {
+    writeln!(w)?;
+    writeln!(w, "_func_total = _stats['func_ok'] + _stats['func_fail']")?;
     writeln!(
         w,
-        "print('unstrip: applied {} symbols and {} struct types')",
-        funcs.len(),
-        count_struct_types(types),
+        "_struct_total = _stats['struct_ok'] + _stats['struct_fail']"
+    )?;
+    writeln!(
+        w,
+        "print('unstrip: applied {{}}/{{}} symbols ({{}} failed)'.format(_stats['func_ok'], _func_total, _stats['func_fail']))"
+    )?;
+    writeln!(
+        w,
+        "print('unstrip: applied {{}}/{{}} struct types ({{}} failed)'.format(_stats['struct_ok'], _struct_total, _stats['struct_fail']))"
+    )?;
+    // Limit the per-failure dump to keep the Script Manager output
+    // readable; surface enough to start debugging without dumping
+    // thousands of lines on a bad export.
+    writeln!(w, "if _stats['failures']:")?;
+    writeln!(
+        w,
+        "    print('unstrip: first {{}} failures:'.format(min(20, len(_stats['failures']))))"
+    )?;
+    writeln!(w, "    for kind, key, reason in _stats['failures'][:20]:")?;
+    writeln!(
+        w,
+        "        print('  {{}}  {{}}  {{}}'.format(kind, key, reason))"
+    )?;
+    writeln!(w, "    if len(_stats['failures']) > 20:")?;
+    writeln!(
+        w,
+        "        print('  ... and {{}} more (see _stats[\"failures\"] for the full list)'.format(len(_stats['failures']) - 20))"
     )?;
     Ok(())
 }
@@ -344,6 +443,76 @@ fn count_struct_types(types: &[Type]) -> usize {
 /// Fields whose types we can't easily express in C (other structs, slices,
 /// interfaces) become opaque byte arrays of the right size so the layout
 /// stays correct in the disassembler's struct view.
+/// C keywords and Ghidra-CParser reserved words that would collide with a
+/// Go field name. Any field whose sanitized name lands in this set gets a
+/// trailing underscore so the C parser doesn't reject the whole struct.
+///
+/// The collision is real: `runtime.boundsError` has a Go field named
+/// `signed bool`, which renders as `unsigned char signed;` and breaks the
+/// parse silently. Same story for any Go type with a field named after a
+/// C type-specifier or storage-class keyword.
+fn is_c_reserved(name: &str) -> bool {
+    matches!(
+        name,
+        "auto"
+            | "break"
+            | "case"
+            | "char"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "double"
+            | "else"
+            | "enum"
+            | "extern"
+            | "float"
+            | "for"
+            | "goto"
+            | "if"
+            | "inline"
+            | "int"
+            | "long"
+            | "register"
+            | "restrict"
+            | "return"
+            | "short"
+            | "signed"
+            | "sizeof"
+            | "static"
+            | "struct"
+            | "switch"
+            | "typedef"
+            | "union"
+            | "unsigned"
+            | "void"
+            | "volatile"
+            | "while"
+            | "_Alignas"
+            | "_Alignof"
+            | "_Atomic"
+            | "_Bool"
+            | "_Complex"
+            | "_Generic"
+            | "_Imaginary"
+            | "_Noreturn"
+            | "_Static_assert"
+            | "_Thread_local"
+    )
+}
+
+/// Escape a field name that would otherwise collide with a C reserved
+/// keyword. Suffix with `_`. The original Go field name is preserved in
+/// the recovered function comment elsewhere; this is only the C-decl
+/// identifier used by the disassembler's parser.
+fn escape_c_field_name(name: &str) -> String {
+    if is_c_reserved(name) {
+        format!("{name}_")
+    } else {
+        name.to_string()
+    }
+}
+
 fn struct_c_decls(types: &[Type]) -> Vec<String> {
     let by_addr: std::collections::HashMap<u64, &Type> =
         types.iter().map(|t| (t.addr, t)).collect();
@@ -380,7 +549,7 @@ fn struct_c_decls(types: &[Type]) -> Vec<String> {
             let fname = if fname.is_empty() || fname == "_" {
                 format!("_anon_{idx}")
             } else {
-                fname
+                escape_c_field_name(&fname)
             };
             decl.push_str(&format!("    {prefix} {fname}{suffix};\n"));
             next_offset += fsize;
