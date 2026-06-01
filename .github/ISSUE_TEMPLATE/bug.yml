@@ -1,0 +1,66 @@
+name: Bug report
+description: unstrip behaves incorrectly or crashes on a binary you expected to work.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please fill out every field; the request shape mirrors what we ask for in CONTRIBUTING.md so we can reproduce quickly.
+
+  - type: input
+    id: version
+    attributes:
+      label: unstrip version
+      description: Output of `unstrip --version`.
+      placeholder: unstrip 1.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Host platform
+      description: OS plus arch (`uname -a` on Linux/macOS, `ver` on Windows).
+      placeholder: Linux 6.5.0-generic x86_64
+    validations:
+      required: true
+
+  - type: textarea
+    id: target_info
+    attributes:
+      label: Target binary identification
+      description: |
+        Output of `unstrip <binary> --info`. Redact filenames if you must, but keep the container, Go version, and pclntab geometry intact.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command and output
+      description: The full command you ran and the output (or error) you got.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What you expected to see, and how you know that is the correct answer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Reproducer
+      description: |
+        If you can share the binary, attach it (drag-and-drop into the comment box). If you cannot, a minimal Go program (`main.go` plus the exact build command) is the next best attachment.
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Anything else relevant (the binary was built with garble, the binary was cross-compiled, etc.).

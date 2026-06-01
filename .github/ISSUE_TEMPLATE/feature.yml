@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a new capability or a meaningful change to an existing one.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        unstrip has a focused scope (see the README's Scope section). Proposals that broaden that scope without a concrete use case usually do not land. Proposals that close a real gap with a clear acceptance test usually do. The fields below help us tell which one yours is.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: The capability or change you want, in one paragraph.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: The concrete workflow this unblocks. A specific binary you cannot analyze today, a specific question you cannot answer today, a specific friction you hit in your last engagement. Generic "would be nice" without a workflow usually does not move us.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance test
+      description: |
+        Concretely, what would tell you the feature works? Example: "`unstrip <bin> --new-flag` prints lines of the form `addr  name  source.go:line` for every X." A reproducible test is the difference between a feature that ships and a feature that drifts.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Other tools, other invocations, anything you tried that almost works.

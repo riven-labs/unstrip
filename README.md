@@ -454,6 +454,25 @@ i386 and 32-bit arm. The pclntab layout drifts on 32-bit targets. No demand yet;
 
 Rust binary symbol recovery. Not an unstrip mode. If we build it, it ships as a separate tool. DWARF parsing is its own problem and conflating the two would be a mistake.
 
+## Safety posture
+
+unstrip parses attacker-controlled bytes. We treat that as the default operating assumption.
+
+What we do:
+
+- Every offset read is bounds-checked against the source slice; reads that would run past the end return an error rather than panicking.
+- Every length field decoded from the binary is range-capped at a sane ceiling (function counts, type counts, method counts, slice lengths). A binary that claims `nfunc = 0xffffffff` rejects rather than allocating.
+- `Result`-returning APIs throughout the library; no `unwrap()` on attacker-controlled paths.
+- Per-type recovery is best-effort; one malformed record drops that record, not the whole pass.
+
+What we do not claim:
+
+- We have not run a structured fuzzing campaign against the pclntab and moduledata parsers. The bounds-checking discipline above is the substitute today; a real fuzz runner is post-launch work.
+- Garble-obfuscated inputs are detected and flagged, but garble's full transform surface evolves; an obfuscator update that goes further than current behavior may produce output we mis-parse before we patch.
+- Mach-O code paths are exercised by unit tests, not by a full integration fixture matrix yet.
+
+If you find a crash, an out-of-bounds read, or any other safety issue: see [SECURITY.md](./SECURITY.md) for the private reporting contact.
+
 ## Contributing
 
 PRs welcome. Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening one. Good first issues are tagged [`good first issue`](https://github.com/riven-labs/unstrip/labels/good%20first%20issue). For vulnerability reports see [SECURITY.md](./SECURITY.md).
