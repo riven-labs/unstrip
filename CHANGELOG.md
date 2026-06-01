@@ -43,7 +43,6 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   direct `CALL rel32` sites; Scanner 2 adds direct `CALL [rip+itab+slot]`
   indirect dispatch sites for any interface-method implementation,
   carrying the resolved itab address and interface method name inline.
-  amd64 only.
 - `--data-at <ADDR>` inspects bytes at a data address through every
   recovery map the binary has: function table, itab table, section map.
   Six interpretation modes: `bytes`, `qwords`, `ptrs` (qwords plus
@@ -77,6 +76,12 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 - `docs/USAGE.md` reference with one paragraph per flag.
 - `CONTRIBUTING.md` with development setup and PR conventions.
 - `SECURITY.md` with the vulnerability reporting contact.
+- `CODE_OF_CONDUCT.md` and GitHub issue / PR templates for the
+  community-onboarding surface.
+- README `Safety posture` section: what the parser does to defend
+  against attacker-crafted bytes, and where it does not yet claim
+  coverage (structured fuzzing, garble-update resilience, Mach-O
+  integration fixture matrix).
 
 ### Changed
 

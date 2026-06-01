@@ -7,9 +7,9 @@
 [![Go versions](https://img.shields.io/badge/go-1.18--1.25-00ADD8.svg)](https://go.dev)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
 
-> Recover function names, types, and interface dispatch tables from stripped Go binaries, with inlined call stacks the leaf-only tools miss.
+> Recover function names, method signatures, types, and interface dispatch tables from stripped Go binaries, with inlined call stacks the leaf-only tools miss.
 
-Stripped Go binaries still carry `pclntab`, moduledata, typelinks, and itablinks because the runtime needs them for stack traces and reflection. `unstrip` reads all of it: every function with file and line, every type with full struct layout, every `(interface, concrete)` pair the dispatcher uses, and the module dependency tree. ELF, Mach-O, PE. amd64 and arm64. Go 1.18 through 1.25.
+Stripped Go binaries still carry `pclntab`, moduledata, typelinks, and itablinks because the runtime needs them for stack traces and reflection. `unstrip` reads all of it: every function with file and line, every method with its Go-syntax signature where the linker kept the type record, every type with full struct layout, every `(interface, concrete)` pair the dispatcher uses, and the module dependency tree. ELF, Mach-O, PE. amd64 and arm64. Go 1.18 through 1.25.
 
 ## Install
 
@@ -31,11 +31,17 @@ unstrip ./bin --format ghidra > apply.py    # Python script for Ghidra Script Ma
 
 ## Why unstrip
 
-- Inlined call stacks, not just leaf functions: `--addr` returns the full inline tree from funcdata.
-- Built-in Ghidra, IDA, and Binary Ninja Python exporters via `--format`, with C struct decls and correct field offsets.
-- `--data-at <addr>` interprets bytes at a data address through the recovered itab table and function table: iface headers resolve to concrete type + dispatched method body, slice headers expand to ptr/len/cap with the data pointer symbolized, string headers print a quoted preview.
-- 1.4 MiB static Rust binary, no runtime deps.
-- Go 1.18 through 1.25, ELF + Mach-O + PE, amd64 + arm64, PIE + non-PIE, one tool.
+Method signatures attached to recovered symbols. Every method on a type the Go linker emitted a `_type` record for gets a Go-syntax signature like `(_0 []uint8) (int, error)` appended to its name in the default listing, in `--addr` lookups, and in the Ghidra/IDA/Binja exporter comments. Other Go-binary symbol-recovery tools do not recover signatures at all.
+
+Inlined call stacks, not just leaf functions. `--addr` returns the full inline tree from `FUNCDATA_InlTree`, so a PC that lands in inlined code resolves to the chain that led there, with file and line for every frame.
+
+Built-in Ghidra, IDA, and Binary Ninja Python exporters via `--format`, with C struct decls and correct field offsets. One Rust binary emits scripts for all three RE tools; `--install-plugin <ida|ghidra|binja>` drops a wrapper plugin into the user's plugin directory.
+
+`--data-at <addr>` interprets bytes at a data address through the recovered itab table and function table. Iface headers resolve to concrete type plus dispatched method body. Slice headers expand to ptr/len/cap with the data pointer symbolized. String headers print a quoted preview.
+
+`--xref <symbol>` enumerates every call site targeting a function, on amd64 and arm64 binaries alike. Direct CALL/BL coverage is solid on both. Indirect dispatch through itab method slots is reported alongside direct calls with the resolved itab and method name carried inline.
+
+A 1.4 MiB static Rust binary, no runtime deps. Go 1.18 through 1.25, ELF + Mach-O + PE, amd64 + arm64, PIE + non-PIE, one tool.
 
 ## Compared to
 
@@ -48,9 +54,11 @@ A short verified-only table follows. The longer differences and the "when to rea
 | CLI vs library                          | CLI              | CLI        | CLI      | library  |
 | Go 1.18 through 1.25                    | yes              | yes        | yes      | yes      |
 | Pre-Go-1.18                             | no               | Go 1.2+    | Go 1.5+  | Go 1.5+  |
+| Method-signature recovery               | yes              | no         | no       | no       |
 | Ghidra + IDA + Binja exporters          | yes              | yes        | no       | no       |
 | Inlined call stacks on PC lookup        | yes              | unverified | no       | no       |
 | `--data-at` symbolic data inspection    | yes              | no         | no       | no       |
+| `--xref` on amd64 and arm64             | yes              | n/a        | n/a      | n/a      |
 | Static binary, no runtime deps          | yes (Rust)       | yes (Go)   | yes (Go) | n/a      |
 
 ## Use
@@ -421,10 +429,12 @@ What works:
 - PIE and non-PIE
 - Garble-obfuscated binaries (detected and flagged; structural data still recovered)
 - Function names, file paths, line numbers
+- Method signatures in Go syntax for every method whose type the Go linker kept
 - Full type recovery (names, kinds, sizes, struct fields with offsets and embedded flags)
 - Interface to concrete type recovery via itabs
 - Module dependency tree, build settings, VCS info
 - PC-to-symbol reverse lookup with inlined call stacks
+- Direct CALL/BL call-site enumeration on amd64 and arm64; indirect-itab dispatch reporting alongside
 - IDA, Ghidra, Binary Ninja, JSON, and human-readable output
 
 Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, on Go versions in the supported range. Mach-O code paths are exercised by unit tests; the integration suite has no macOS-built fixture yet. Open an issue if it breaks. Garble heuristic detection works and structural recovery survives the default mode (string literals, inline trees, and the funcdata array all stay walkable).
