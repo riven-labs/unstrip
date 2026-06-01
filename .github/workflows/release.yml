@@ -1,0 +1,129 @@
+name: Release
+
+# Builds release artifacts for every vN.N.N tag, then attaches the tarballs,
+# zip, and SHA256SUMS to the matching GitHub release. The release object is
+# created in draft state if it does not exist yet, so the human still writes
+# the release notes by hand and flips draft to published when ready.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            linker: aarch64-linux-gnu-gcc
+            apt: gcc-aarch64-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-linker (linux-aarch64)
+        if: matrix.apt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+
+      - name: Build
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          tag="${{ steps.tag.outputs.tag }}"
+          target="${{ matrix.target }}"
+          name="unstrip-${tag}-${target}"
+          mkdir -p dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp "target/${target}/release/unstrip.exe" "dist/unstrip.exe"
+            (cd dist && 7z a "${name}.zip" "unstrip.exe" && rm "unstrip.exe")
+          else
+            cp "target/${target}/release/unstrip" "dist/unstrip"
+            (cd dist && tar -czf "${name}.tar.gz" "unstrip" && rm "unstrip")
+          fi
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unstrip-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compute SHA256SUMS
+        shell: bash
+        run: |
+          set -eu
+          cd dist
+          shasum -a 256 *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create draft release if missing, then upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -eu
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --draft \
+              --title "unstrip $TAG" \
+              --notes "Draft release. Notes pending."
+          fi
+          gh release upload "$TAG" dist/* --clobber
