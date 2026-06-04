@@ -17,6 +17,10 @@ pub struct Function {
     pub start_line: Option<u32>,
 }
 
+/// Cloning is cheap: every field is a slice reference or a small scalar. A
+/// clone lets a decoded function carry its own call-resolution handle without
+/// re-parsing, which is what keeps whole-program sweeps linear.
+#[derive(Clone)]
 pub struct Pclntab<'a> {
     data: &'a [u8],
     little_endian: bool,
