@@ -207,8 +207,22 @@ fn bounded_read(bin: &GoBinary, addr: u64, len: usize) -> Result<(usize, usize)>
             s.name
         ))
     })?;
-    let max_available = s.file_size - (addr - s.addr) as usize;
-    let bounded = len.min(max_available);
+    // A NOBITS section (.bss, .noptrbss) is mapped at load but carries no file
+    // bytes: it is zero at startup and filled at runtime. Its addresses have a
+    // nominal file offset that can point past the end of the file, and the
+    // in-section span can exceed the section's file_size. Clamp to both the
+    // section's file-backed span and the real file length, and fail clean when
+    // nothing is backed -- never index past the buffer (that was a panic).
+    let in_section = (s.file_size as u64).saturating_sub(addr - s.addr) as usize;
+    let in_file = bin.bytes.len().saturating_sub(file_off);
+    let bounded = len.min(in_section).min(in_file);
+    if bounded == 0 {
+        return Err(Error::Xrefs(format!(
+            "address 0x{addr:x} is in {} but not backed by file bytes \
+             (zero-initialized at load, computed at runtime)",
+            s.name
+        )));
+    }
     Ok((file_off, bounded))
 }
 
