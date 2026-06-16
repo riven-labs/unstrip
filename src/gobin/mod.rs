@@ -255,7 +255,7 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
     let (pclntab_offset, pclntab_size, pclntab_addr) = match pcln {
         Some(v) => v,
         None => {
-            let (off, size) = scan_for_magic(bytes, little_endian)?;
+            let (off, size) = locate_pclntab(bytes, &sections, text_addr, little_endian)?;
             let addr = addr_for_offset(&sections, off).unwrap_or(0);
             (off, size, addr)
         }
@@ -360,7 +360,7 @@ fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>) -> Result<Described
     let (pclntab_offset, pclntab_size, pclntab_addr) = match pcln {
         Some(v) => v,
         None => {
-            let (off, size) = scan_for_magic(bytes, little_endian)?;
+            let (off, size) = locate_pclntab(bytes, &sections, text_addr, little_endian)?;
             let addr = addr_for_offset(&sections, off).unwrap_or(0);
             (off, size, addr)
         }
@@ -442,7 +442,7 @@ fn describe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> Result<Described> {
     let (pclntab_offset, pclntab_size, pclntab_addr) = match pcln {
         Some(v) => v,
         None => {
-            let (off, size) = scan_for_magic(bytes, little_endian)?;
+            let (off, size) = locate_pclntab(bytes, &sections, text_addr, little_endian)?;
             let addr = addr_for_offset(&sections, off).unwrap_or(0);
             (off, size, addr)
         }
@@ -536,6 +536,128 @@ fn scan_for_magic(bytes: &[u8], little_endian: bool) -> Result<(usize, usize)> {
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Locate the pclntab when no named section points at it: try the fixed-magic
+/// scan first, then a magic-independent structural scan. garble rewrites the
+/// pcHeader magic to a per-build random value, so on a Windows PE (which has no
+/// named pclntab section) the magic scan finds nothing; the structural scan
+/// recovers the header by its shape instead. The same fallback helps any
+/// container whose section table was stripped.
+fn locate_pclntab(
+    bytes: &[u8],
+    sections: &[Section],
+    text_addr: u64,
+    little_endian: bool,
+) -> Result<(usize, usize)> {
+    match scan_for_magic(bytes, little_endian) {
+        Ok(found) => Ok(found),
+        Err(_) => scan_for_pcheader(bytes, sections, text_addr, little_endian),
+    }
+}
+
+fn read_uint_at(bytes: &[u8], off: usize, ptr_size: usize, little_endian: bool) -> Option<u64> {
+    let slice = bytes.get(off..off.checked_add(ptr_size)?)?;
+    let mut v: u64 = 0;
+    if little_endian {
+        for (i, &b) in slice.iter().enumerate() {
+            v |= (b as u64) << (8 * i);
+        }
+    } else {
+        for &b in slice {
+            v = (v << 8) | b as u64;
+        }
+    }
+    Some(v)
+}
+
+/// Magic-independent pcHeader discovery. Slides a pointer-aligned window over
+/// the data-bearing sections and accepts an offset whose bytes form a valid Go
+/// 1.18+ pcHeader: zero pad bytes, a sane quantum and pointer size, the five
+/// table offsets strictly increasing and inside the file, and a textStart that
+/// lands in a recovered text section. The offset-ordering and textStart checks
+/// are what keep this from matching arbitrary data: a bare pad/quantum/ptrsize
+/// test alone would produce false positives across megabytes of `.rdata`.
+fn scan_for_pcheader(
+    bytes: &[u8],
+    sections: &[Section],
+    _text_addr: u64,
+    little_endian: bool,
+) -> Result<(usize, usize)> {
+    for s in sections {
+        // The pclntab lives in read-only or data regions (on PE it sits inside
+        // .rdata). Skip code, bss, and anything without file bytes.
+        match s.kind {
+            SectionKind::ReadOnlyData
+            | SectionKind::Data
+            | SectionKind::NoPtrData
+            | SectionKind::Pclntab
+            | SectionKind::Other => {}
+            SectionKind::Text | SectionKind::Bss => continue,
+        }
+        let start = s.file_offset.min(bytes.len());
+        let end = s.file_offset.saturating_add(s.file_size).min(bytes.len());
+        // pcHeaders are pointer-aligned; step by 8 from an aligned start.
+        let mut off = start + (start % 8 == 0).then_some(0).unwrap_or(8 - start % 8);
+        while off + 8 <= end {
+            if let Some(size) = pcheader_at(bytes, off, sections, little_endian) {
+                return Ok((off, size));
+            }
+            off += 8;
+        }
+    }
+    Err(Error::NoPclntab)
+}
+
+/// Validate that the bytes at `off` look like a pcHeader and return the implied
+/// pclntab size (bytes from `off` to end of file) when they do.
+fn pcheader_at(
+    bytes: &[u8],
+    off: usize,
+    sections: &[Section],
+    little_endian: bool,
+) -> Option<usize> {
+    if bytes.get(off + 4)? != &0 || bytes.get(off + 5)? != &0 {
+        return None;
+    }
+    let quantum = *bytes.get(off + 6)?;
+    let ptr_size = *bytes.get(off + 7)?;
+    if !matches!(quantum, 1 | 2 | 4) || !matches!(ptr_size, 4 | 8) {
+        return None;
+    }
+    let ps = ptr_size as usize;
+    // Need the full Go 1.18+ header: the 8-byte prefix plus eight pointer-sized
+    // fields (nfunc, nfiles, textStart, then the five table offsets).
+    let header_end = off.checked_add(8 + 8 * ps)?;
+    if header_end > bytes.len() {
+        return None;
+    }
+    let text_start = read_uint_at(bytes, off + 8 + 2 * ps, ps, little_endian)?;
+    let funcname = read_uint_at(bytes, off + 8 + 3 * ps, ps, little_endian)?;
+    let cu = read_uint_at(bytes, off + 8 + 4 * ps, ps, little_endian)?;
+    let filetab = read_uint_at(bytes, off + 8 + 5 * ps, ps, little_endian)?;
+    let pctab = read_uint_at(bytes, off + 8 + 6 * ps, ps, little_endian)?;
+    let pcln = read_uint_at(bytes, off + 8 + 7 * ps, ps, little_endian)?;
+    // The table offsets are relative to the pcHeader base and must climb in
+    // order and stay inside the bytes that follow.
+    if !(funcname < cu && cu < filetab && filetab < pctab && pctab < pcln) {
+        return None;
+    }
+    let available = (bytes.len() - off) as u64;
+    if pcln >= available {
+        return None;
+    }
+    // textStart must land in a recovered text section. This is the check that
+    // separates a real header from coincidental data with climbing offsets.
+    let text_ok = sections.iter().any(|t| {
+        t.kind == SectionKind::Text
+            && text_start >= t.addr
+            && text_start < t.addr.saturating_add(t.vmsize.max(t.file_size as u64))
+    });
+    if !text_ok {
+        return None;
+    }
+    Some(bytes.len() - off)
 }
 
 fn finish(bytes: Vec<u8>, d: Described) -> Result<GoBinary> {

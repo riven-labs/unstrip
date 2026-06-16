@@ -1714,6 +1714,49 @@ fn symbols_as_pe_writes_valid_symtab() {
 }
 
 #[test]
+fn locates_pclntab_on_pe_with_rewritten_magic() {
+    // garble rewrites the pcHeader magic to a per-build random value, and a
+    // Windows PE has no named pclntab section, so the fixed-magic scan finds
+    // nothing and every feature dies at discovery. The structural pcHeader scan
+    // must still locate it. Simulate garble exactly: take a real PE, find where
+    // the pclntab sits, overwrite its 4 magic bytes with a random value, and
+    // assert discovery and function recovery survive.
+    let Some(path) = fixture("hello.windows-amd64.stripped.exe") else {
+        return;
+    };
+    let mut bytes = std::fs::read(&path).expect("read pe fixture");
+
+    let clean = GoBinary::parse(bytes.clone()).expect("parse clean pe");
+    let off = clean.pclntab_offset;
+    assert!(
+        off > 0 && off + 8 < bytes.len(),
+        "pclntab should be located in the clean PE"
+    );
+
+    // Overwrite the magic with a non-magic value, leaving the rest of the
+    // pcHeader (pad, quantum, ptrsize, offsets, textStart) intact, exactly as
+    // garble's per-build magic does.
+    bytes[off..off + 4].copy_from_slice(&[0xab, 0xcd, 0x12, 0x34]);
+
+    let garbled = GoBinary::parse(bytes).expect("discovery must survive a rewritten magic");
+    assert_eq!(
+        garbled.pclntab_offset, off,
+        "structural scan must rediscover the same pclntab"
+    );
+    let pcln = Pclntab::parse(&garbled).expect("parse pclntab found structurally");
+    assert!(
+        !pcln.magic_is_official(),
+        "the rewritten magic must read as unofficial"
+    );
+    let funcs = pcln.functions().expect("functions");
+    assert!(
+        funcs.len() > 100,
+        "functions must still recover on the garbled PE, got {}",
+        funcs.len()
+    );
+}
+
+#[test]
 fn pe_with_huge_image_base_does_not_overflow() {
     // A PE section address is image_base + the section's relative virtual
     // address, both read from the file. A crafted image_base near u64::MAX
