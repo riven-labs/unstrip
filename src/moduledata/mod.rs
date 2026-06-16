@@ -86,6 +86,10 @@ pub enum Layout {
     V118,
     /// Go 1.20 through 1.25, adds the two coverage fields.
     V120,
+    /// Go 1.26, adds an `epclntab` pointer after `gofunc` (before
+    /// `textsectmap`). Shares the pclntab magic with V120, so the two are told
+    /// apart by parsing both and keeping whichever yields valid typelinks.
+    V126,
 }
 
 impl ModuleData {
@@ -109,19 +113,6 @@ impl ModuleData {
                 reason: format!("unsupported pointer size {ps}"),
             });
         }
-        // Sniff the layout from the pclntab magic (first 4 bytes).
-        let layout = match bin.pclntab_slice().get(0..4) {
-            Some(b) => {
-                let magic = u32::from_le_bytes(b.try_into().unwrap());
-                if magic == 0xfffffff0 {
-                    Layout::V118
-                } else {
-                    Layout::V120
-                }
-            }
-            None => Layout::V120,
-        };
-
         let target = bin.pclntab_addr;
         if target == 0 {
             return Err(Error::ModuleData(
@@ -141,10 +132,15 @@ impl ModuleData {
             SectionKind::ReadOnlyData,
         ];
 
-        for kind in scan_kinds {
-            for section in bin.sections.iter().filter(|s| s.kind == kind) {
-                if let Some(md) = scan_section(bin, section, &target_bytes, ps, layout) {
-                    return Ok(md);
+        // Each candidate layout is tried in turn; try_parse validates the
+        // version-drifting tail (typelinks/itablinks) and rejects the wrong
+        // one, so the layout that yields a sound moduledata wins.
+        for &layout in layouts_for(bin) {
+            for kind in scan_kinds {
+                for section in bin.sections.iter().filter(|s| s.kind == kind) {
+                    if let Some(md) = scan_section(bin, section, &target_bytes, ps, layout) {
+                        return Ok(md);
+                    }
                 }
             }
         }
@@ -217,9 +213,11 @@ impl ModuleData {
                     if !looks_like_moduledata(bin, file_off) {
                         continue;
                     }
-                    let layout = guess_layout(bin);
                     let ps = bin.pointer_size();
-                    if let Ok(next_md) = try_parse(bin, file_off, ps, layout) {
+                    if let Some(next_md) = layouts_for(bin)
+                        .iter()
+                        .find_map(|&layout| try_parse(bin, file_off, ps, layout).ok())
+                    {
                         visited.insert(file_off);
                         out.push(next_md);
                         break; // only one next per scan
@@ -270,17 +268,16 @@ fn looks_like_moduledata(bin: &GoBinary, file_off: usize) -> bool {
     magic == 0xfffffff0 || magic == 0xfffffff1
 }
 
-fn guess_layout(bin: &GoBinary) -> Layout {
+/// Candidate moduledata layouts to try, in order, chosen from the pclntab
+/// magic. Go 1.18/1.19 use 0xfffffff0; 1.20 through 1.26 share 0xfffffff1 but
+/// drift in the tail (1.26 inserted `epclntab`), so both are offered and
+/// try_parse keeps whichever validates. Obfuscators rewrite the magic to a
+/// random value, which lands in the second arm and still gets the 1.20/1.26
+/// pair.
+fn layouts_for(bin: &GoBinary) -> &'static [Layout] {
     match bin.pclntab_slice().get(0..4) {
-        Some(b) => {
-            let magic = u32::from_le_bytes(b.try_into().unwrap());
-            if magic == 0xfffffff0 {
-                Layout::V118
-            } else {
-                Layout::V120
-            }
-        }
-        None => Layout::V120,
+        Some(b) if u32::from_le_bytes(b.try_into().unwrap()) == 0xfffffff0 => &[Layout::V118],
+        _ => &[Layout::V120, Layout::V126],
     }
 }
 
@@ -421,9 +418,10 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
     let ebss = r.uptr()?;
     let noptrbss = r.uptr()?;
     let enoptrbss = r.uptr()?;
-    // covctrs/ecovctrs were added in Go 1.20. The pre-1.20 layout skips
-    // straight from enoptrbss to end/gcdata/gcbss.
-    let (covctrs, ecovctrs) = if matches!(layout, Layout::V120) {
+    // covctrs/ecovctrs were added in Go 1.20 and are present in every layout
+    // since. The pre-1.20 layout skips straight from enoptrbss to
+    // end/gcdata/gcbss.
+    let (covctrs, ecovctrs) = if matches!(layout, Layout::V120 | Layout::V126) {
         (r.uptr()?, r.uptr()?)
     } else {
         (0, 0)
@@ -435,6 +433,11 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
     let etypes = r.uptr()?;
     let rodata = r.uptr()?;
     let gofunc = r.uptr()?;
+    // Go 1.26 inserted an `epclntab` pointer here, before textsectmap. Reading
+    // it keeps the slice headers that follow aligned; older layouts skip it.
+    if matches!(layout, Layout::V126) {
+        let _epclntab = r.uptr()?;
+    }
 
     let textsectmap = r.slice_header()?;
     let typelinks = r.slice_header()?;
@@ -487,6 +490,24 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
     if gofunc != 0 && bin.section_for_addr(gofunc).is_none() {
         return Err(Error::ModuleData(format!(
             "gofunc 0x{gofunc:x} does not fall in any mapped section"
+        )));
+    }
+    // typelinks and itablinks come after the version-drifting tail, so a layout
+    // mismatch leaves their slice headers shifted by a pointer. When they carry
+    // entries, the data pointer must resolve to a mapped section; a one-pointer
+    // shift reads a small count there instead (e.g. Go 1.26 inserted a field
+    // before these), which fails this check and lets the caller try the other
+    // layout.
+    if typelinks.len > 0 && bin.section_for_addr(typelinks.data).is_none() {
+        return Err(Error::ModuleData(format!(
+            "typelinks data 0x{:x} (len {}) not in any mapped section",
+            typelinks.data, typelinks.len
+        )));
+    }
+    if itablinks.len > 0 && bin.section_for_addr(itablinks.data).is_none() {
+        return Err(Error::ModuleData(format!(
+            "itablinks data 0x{:x} (len {}) not in any mapped section",
+            itablinks.data, itablinks.len
         )));
     }
 

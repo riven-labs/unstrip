@@ -777,6 +777,50 @@ fn recovers_featureset_go_1_25() {
 }
 
 #[test]
+fn recovers_featureset_go_1_26() {
+    // Go 1.26 inserted an `epclntab` pointer into moduledata; without the V126
+    // layout the typelinks slice reads garbage and type recovery fails outright.
+    assert_recovers_featureset("featureset.go126.stripped", "go1.26");
+}
+
+#[test]
+fn recovers_from_garbled_go_1_26() {
+    // A garble-obfuscated Go 1.26 binary stresses two fixes at once: the pclntab
+    // magic is rewritten (structural discovery must find the header) and the
+    // moduledata uses the 1.26 layout (the V126 epclntab field). Names are
+    // hashed, but the structures survive, so functions, types, and itabs must
+    // all recover.
+    let Some(path) = fixture("gtest.garbled.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open garbled binary");
+    let pcln = Pclntab::parse(&bin).expect("parse pclntab on garbled");
+    assert!(
+        !pcln.magic_is_official(),
+        "garble rewrites the pclntab magic"
+    );
+    let funcs = pcln.functions().expect("functions");
+    assert!(
+        funcs.len() > 100,
+        "functions must recover on a garbled binary, got {}",
+        funcs.len()
+    );
+    let md = ModuleData::locate(&bin).expect("locate 1.26 moduledata on garbled");
+    let recovered = types::recover_all(&bin, &md).expect("recover types");
+    assert!(
+        recovered.len() > 100,
+        "types must recover on garbled 1.26, got {}",
+        recovered.len()
+    );
+    let pairs = itabs::recover_all(&bin, &md).expect("recover itabs");
+    assert!(
+        pairs.len() > 10,
+        "itabs must recover on garbled 1.26, got {}",
+        pairs.len()
+    );
+}
+
+#[test]
 fn pie_addresses_are_rebased_into_text() {
     // A PIE binary stores text-relative offsets; a wrong load base makes function
     // addresses land outside the text section while their names still parse from

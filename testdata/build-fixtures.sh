@@ -63,6 +63,7 @@ build_hello_version go1.22.0 hello.go122.stripped
 build_hello_version go1.23.0 hello.go123.stripped
 build_hello_version go1.24.0 hello.go124.stripped
 build_hello_version go1.25.0 hello.go125.stripped
+build_hello_version go1.26.0 hello.go126.stripped
 
 # featureset.go is a richer program (interfaces+itabs, generics, struct methods,
 # goroutines, crypto) built with every release, so the tests pin type, itab, and
@@ -87,6 +88,7 @@ build_featureset_version go1.22.0 featureset.go122.stripped
 build_featureset_version go1.23.0 featureset.go123.stripped
 build_featureset_version go1.24.0 featureset.go124.stripped
 build_featureset_version go1.25.0 featureset.go125.stripped
+build_featureset_version go1.26.0 featureset.go126.stripped
 
 # A fixture with real third-party deps so we can exercise buildinfo, itabs,
 # and type recovery against something richer than `hello`.
@@ -101,6 +103,16 @@ fi
 if command -v "$GARBLE" >/dev/null 2>&1 && [ -d depsdemo ]; then
     echo "building depsdemo.garbled.stripped"
     (cd depsdemo && "$GARBLE" -literals build -ldflags='-s -w' -o ../depsdemo.garbled.stripped .)
+fi
+
+# Optional: a reflected program built with garble, used to test recovery on
+# obfuscated binaries: the magic is rewritten (structural pclntab discovery) and
+# the moduledata uses the toolchain's layout. garble needs a matching Go
+# toolchain; for Go 1.26 set GOTOOLCHAIN=local with a writable 1.26 GOROOT on
+# PATH (see the garble notes). Skips when garble or the module is absent.
+if command -v "$GARBLE" >/dev/null 2>&1 && [ -d gtest ]; then
+    echo "building gtest.garbled.stripped"
+    (cd gtest && GOOS=linux GOARCH=amd64 "$GARBLE" build -ldflags='-s -w' -o ../gtest.garbled.stripped .)
 fi
 
 echo "done. fixtures written to $(pwd)"
