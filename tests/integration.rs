@@ -594,6 +594,65 @@ fn recovers_symbols_from_go_1_18() {
     );
 }
 
+/// Full recovery on one Go release: the same hello.go built with a specific
+/// toolchain. Pins functions, moduledata, types, and the build version across
+/// the supported range so a layout drift in any release fails loudly.
+fn assert_recovers_version(fixture_name: &str, version_prefix: &str) {
+    let Some(path) = fixture(fixture_name) else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let pcln = Pclntab::parse(&bin).expect("parse pclntab");
+    assert!(
+        pcln.magic_is_official(),
+        "{version_prefix}: official pclntab magic expected"
+    );
+
+    let funcs = pcln.functions().expect("walk functab");
+    let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+    for required in ["main.main", "main.greet", "main.parseFlags"] {
+        assert!(
+            names.contains(&required),
+            "{version_prefix}: expected {required} in recovered symbols ({} funcs)",
+            names.len()
+        );
+    }
+
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    assert!(
+        md.types > 0 && md.etypes > md.types,
+        "{version_prefix}: types region must be non-empty"
+    );
+    let recovered = types::recover_all(&bin, &md).expect("recover types");
+    assert!(
+        recovered.len() > 50,
+        "{version_prefix}: expected real types, got {}",
+        recovered.len()
+    );
+
+    let info = BuildInfo::parse(&bin).expect("parse buildinfo");
+    assert!(
+        info.go_version.starts_with(version_prefix),
+        "expected {version_prefix}, got {}",
+        info.go_version
+    );
+}
+
+#[test]
+fn recovers_go_1_20() {
+    assert_recovers_version("hello.go120.stripped", "go1.20");
+}
+
+#[test]
+fn recovers_go_1_22() {
+    assert_recovers_version("hello.go122.stripped", "go1.22");
+}
+
+#[test]
+fn recovers_go_1_24() {
+    assert_recovers_version("hello.go124.stripped", "go1.24");
+}
+
 #[test]
 fn exporter_python_parses_for_all_targets() {
     // Emit IDA, Ghidra, and Binja scripts for a real fixture and verify

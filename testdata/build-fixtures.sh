@@ -38,6 +38,27 @@ build_hello darwin  arm64 hello.darwin-arm64.stripped
 build_hello windows amd64 hello.windows-amd64.stripped.exe
 build_hello_pie     hello.linux-amd64.pie.stripped
 
+# Per-version fixtures: the same hello.go built with specific Go releases, to
+# pin parser behavior across the supported range. The pclntab magic and the
+# moduledata layout differ between releases, so each version is its own case.
+# Each build is optional; the integration test skips a version it can't find.
+# Install a release with, e.g.:
+#   go install golang.org/dl/go1.20.14@latest && go1.20.14 download
+build_hello_version() {
+    local gobin=$1
+    local out=$2
+    if command -v "$gobin" >/dev/null 2>&1; then
+        echo "building $out ($("$gobin" version | awk '{print $3}'))"
+        GOOS=linux GOARCH=amd64 "$gobin" build -ldflags='-s -w' -o "$out" hello.go
+    else
+        echo "$gobin not installed; skipping $out"
+    fi
+}
+
+build_hello_version go1.20.14 hello.go120.stripped
+build_hello_version go1.22.0 hello.go122.stripped
+build_hello_version go1.24.0 hello.go124.stripped
+
 # A fixture with real third-party deps so we can exercise buildinfo, itabs,
 # and type recovery against something richer than `hello`.
 if [ -d depsdemo ]; then
