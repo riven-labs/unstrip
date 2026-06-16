@@ -19,6 +19,7 @@ exclude = [
     "testdata/",
     "mb-corpus/",
     "benches/",
+    "fuzz/",
     ".github/",
     ".editorconfig",
     ".gitignore",

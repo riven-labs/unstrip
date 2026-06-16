@@ -1,0 +1,34 @@
+[package]
+name = "unstrip-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# A standalone workspace so the fuzz crate stays out of the unstrip workspace and
+# keeps its own release profile. unstrip's release profile sets panic = abort,
+# which would make libFuzzer abort opaquely instead of reporting the panic.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+unstrip = { path = ".." }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "parse_container"
+path = "fuzz_targets/parse_container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "recover"
+path = "fuzz_targets/recover.rs"
+test = false
+doc = false
+bench = false
