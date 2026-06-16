@@ -20,4 +20,5 @@ fuzz_target!(|data: &[u8]| {
         let _ = unstrip::itabs::recover_all(&bin, &md);
     }
     let _ = unstrip::buildinfo::BuildInfo::parse(&bin);
+    let _ = unstrip::garble::recover_reflect_names(&bin);
 });
