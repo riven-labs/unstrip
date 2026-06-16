@@ -236,10 +236,13 @@ impl ModuleData {
 /// does not fall inside any mapped section.
 fn vaddr_to_file_offset(bin: &GoBinary, vaddr: u64) -> Option<usize> {
     for s in &bin.sections {
-        if vaddr >= s.addr && vaddr < s.addr + s.vmsize {
-            let off = (vaddr - s.addr) as usize + s.file_offset;
-            if off < bin.bytes.len() {
-                return Some(off);
+        // saturating/checked: a crafted section addr+vmsize or vaddr-relative
+        // offset must not overflow into a false match or a panic.
+        if vaddr >= s.addr && vaddr < s.addr.saturating_add(s.vmsize) {
+            if let Some(off) = ((vaddr - s.addr) as usize).checked_add(s.file_offset) {
+                if off < bin.bytes.len() {
+                    return Some(off);
+                }
             }
         }
     }
@@ -289,7 +292,11 @@ fn scan_section(
     layout: Layout,
 ) -> Option<ModuleData> {
     let start = section.file_offset;
-    let end = section.file_offset + section.file_size;
+    // A crafted section header can carry a file_offset + file_size that overflows
+    // usize; that wraps end small and the slice below panics. Bail instead.
+    let Some(end) = start.checked_add(section.file_size) else {
+        return None;
+    };
     if end > bin.bytes.len() {
         return None;
     }
@@ -354,12 +361,12 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
     // they're all sub-slices of the same blob the linker emitted. This is a
     // much stronger corroborating signal than checking any single offset.
     let pclntab_lo = bin.pclntab_addr;
-    let pclntab_hi = bin.pclntab_addr + bin.pclntab_size as u64;
+    let pclntab_hi = bin.pclntab_addr.saturating_add(bin.pclntab_size as u64);
     let inside = |h: SliceHeader| {
         h.data >= pclntab_lo
             && h.data < pclntab_hi
             && h.len <= bin.pclntab_size as u64
-            && h.data + h.len <= pclntab_hi
+            && h.data.saturating_add(h.len) <= pclntab_hi
             && h.len == h.cap
     };
     for (name, h) in [
