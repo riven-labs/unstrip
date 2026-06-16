@@ -863,6 +863,49 @@ fn recovers_reflect_name_dictionary_from_garbled() {
 }
 
 #[test]
+fn degarble_relabels_struct_to_plaintext() {
+    // Applying the recovered dictionary to the recovered types must turn the
+    // hashed Account struct back into plaintext: the type name and all three
+    // field names. This is the end-to-end payoff behind --degarble.
+    let Some(path) = fixture("gtest.garbled.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open garbled binary");
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    let mut all = types::recover_all(&bin, &md).expect("recover types");
+
+    // Before relabeling, no struct carries the original field names.
+    let has_plaintext = |types: &[unstrip::types::Type]| {
+        types.iter().any(|t| {
+            matches!(&t.kind_data, KindData::Struct { fields }
+                if fields.iter().any(|f| f.name == "Username"))
+        })
+    };
+    assert!(
+        !has_plaintext(&all),
+        "garbled types should start with hashed field names"
+    );
+
+    let names = unstrip::garble::recover_reflect_names(&bin).expect("reflect names");
+    names.relabel_types(&mut all);
+
+    let account = all
+        .iter()
+        .find(|t| t.name == "main.Account")
+        .expect("Account type name should relabel to plaintext");
+    let KindData::Struct { fields } = &account.kind_data else {
+        panic!("main.Account should decode as a struct");
+    };
+    let field_names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+    for expected in ["Username", "Password", "Balance"] {
+        assert!(
+            field_names.contains(&expected),
+            "relabeled Account should have field {expected}; got {field_names:?}"
+        );
+    }
+}
+
+#[test]
 fn pie_addresses_are_rebased_into_text() {
     // A PIE binary stores text-relative offsets; a wrong load base makes function
     // addresses land outside the text section while their names still parse from

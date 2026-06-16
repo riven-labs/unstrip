@@ -433,6 +433,36 @@ impl ReflectNames {
             .map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
+    /// Relabel every function name in place.
+    pub fn relabel_functions(&self, functions: &mut [Function]) {
+        for f in functions {
+            f.name = self.relabel(&f.name);
+        }
+    }
+
+    /// Relabel type names and, for structs, their field names in place.
+    pub fn relabel_types(&self, types: &mut [crate::types::Type]) {
+        for t in types {
+            t.name = self.relabel(&t.name);
+            if let crate::types::KindData::Struct { fields } = &mut t.kind_data {
+                for field in fields {
+                    field.name = self.relabel(&field.name);
+                }
+            }
+        }
+    }
+
+    /// Relabel the interface, concrete, and method names of each itab in place.
+    pub fn relabel_itabs(&self, itabs: &mut [crate::itabs::Itab]) {
+        for it in itabs {
+            it.interface_name = self.relabel(&it.interface_name);
+            it.concrete_name = self.relabel(&it.concrete_name);
+            for m in &mut it.methods {
+                m.interface_method = self.relabel(&m.interface_method);
+            }
+        }
+    }
+
     /// Rewrite a qualified name, replacing each obfuscated identifier token with
     /// its original where the dictionary knows it. Tokens are the maximal
     /// `[A-Za-z0-9_]` runs, so the separators in `*pkg.Type.Method` survive and

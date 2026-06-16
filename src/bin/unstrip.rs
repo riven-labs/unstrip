@@ -98,6 +98,11 @@ struct Args {
     detect_garble: bool,
 
     // ----- Mode modifiers -----
+    /// Relabel hashed names from garble's recovered reflected-name table, where
+    /// known. Applies to function, type, and itab output.
+    #[arg(long, help_heading = "Mode modifiers")]
+    degarble: bool,
+
     /// With --types: include primitive leaves (GoReSym-parity catalog).
     #[arg(long, help_heading = "Mode modifiers")]
     types_full: bool,
@@ -1292,6 +1297,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.itabs {
         let md = ModuleData::locate(&bin)?;
         let mut all = itabs::recover_all(&bin, &md)?;
+        if args.degarble {
+            if let Some(names) = unstrip::garble::recover_reflect_names(&bin) {
+                names.relabel_itabs(&mut all);
+            }
+        }
         if let Some(needle) = &args.filter {
             // Match interface name, concrete name, OR any recovered
             // interface-method name. On garble-default binaries the
@@ -1343,6 +1353,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             types::Mode::Focused
         };
         let mut all = types::recover_with_mode(&bin, &md, mode)?;
+        if args.degarble {
+            if let Some(names) = unstrip::garble::recover_reflect_names(&bin) {
+                names.relabel_types(&mut all);
+            }
+        }
         if let Some(needle) = &args.filter {
             all.retain(|t| t.name.contains(needle));
         }
@@ -1397,6 +1412,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut functions = pcln.functions()?;
+    if args.degarble {
+        if let Some(names) = unstrip::garble::recover_reflect_names(&bin) {
+            names.relabel_functions(&mut functions);
+        }
+    }
     if let Some(needle) = &args.filter {
         functions.retain(|f| f.name.contains(needle));
     }
