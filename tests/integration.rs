@@ -654,6 +654,60 @@ fn recovers_go_1_24() {
 }
 
 #[test]
+fn pie_addresses_are_rebased_into_text() {
+    // A PIE binary stores text-relative offsets; a wrong load base makes function
+    // addresses land outside the text section while their names still parse from
+    // the funcname table. Pin that main.main both resolves by name and sits
+    // inside [text, etext), which only holds when the base is applied correctly.
+    let Some(path) = fixture("hello.linux-amd64.pie.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open pie binary");
+    let pcln = Pclntab::parse(&bin).expect("parse pie pclntab");
+    let main_fn = pcln
+        .functions()
+        .expect("functions")
+        .into_iter()
+        .find(|f| f.name == "main.main")
+        .expect("main.main recovered");
+    assert_eq!(
+        pcln.lookup(main_fn.address).expect("lookup at entry").name,
+        "main.main"
+    );
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    assert!(
+        md.text <= main_fn.address && main_fn.address < md.etext,
+        "main.main 0x{:x} must fall inside text [0x{:x}, 0x{:x})",
+        main_fn.address,
+        md.text,
+        md.etext
+    );
+}
+
+#[test]
+fn recovers_types_on_linux_arm64() {
+    // Type recovery is architecture-independent (it walks the type catalog, not
+    // code), but the moduledata scan reads pointer-width fields, so pin that the
+    // arm64 path reaches real types and not just function names.
+    let Some(path) = fixture("hello.linux-arm64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open arm64 binary");
+    let md = ModuleData::locate(&bin).expect("locate moduledata on arm64");
+    let recovered = types::recover_all(&bin, &md).expect("recover types on arm64");
+    assert!(
+        recovered.len() > 50,
+        "arm64 should yield real types, got {}",
+        recovered.len()
+    );
+    let kinds: std::collections::HashSet<KindName> = recovered.iter().map(|t| t.kind).collect();
+    assert!(
+        kinds.contains(&KindName::Struct),
+        "expected struct types in the arm64 recovered set"
+    );
+}
+
+#[test]
 fn exporter_python_parses_for_all_targets() {
     // Emit IDA, Ghidra, and Binja scripts for a real fixture and verify
     // each one is syntactically valid Python. Catches escape bugs in
