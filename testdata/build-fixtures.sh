@@ -55,9 +55,38 @@ build_hello_version() {
     fi
 }
 
+build_hello_version go1.18.10 hello.go118.stripped
+build_hello_version go1.19.13 hello.go119.stripped
 build_hello_version go1.20.14 hello.go120.stripped
+build_hello_version go1.21.13 hello.go121.stripped
 build_hello_version go1.22.0 hello.go122.stripped
+build_hello_version go1.23.0 hello.go123.stripped
 build_hello_version go1.24.0 hello.go124.stripped
+build_hello_version go1.25.0 hello.go125.stripped
+
+# featureset.go is a richer program (interfaces+itabs, generics, struct methods,
+# goroutines, crypto) built with every release, so the tests pin type, itab, and
+# signature recovery across the whole range, not just function names. Same
+# optional-skip contract as hello above.
+build_featureset_version() {
+    local gobin=$1
+    local out=$2
+    if command -v "$gobin" >/dev/null 2>&1; then
+        echo "building $out ($("$gobin" version | awk '{print $3}'))"
+        GOOS=linux GOARCH=amd64 "$gobin" build -ldflags='-s -w' -o "$out" featureset.go
+    else
+        echo "$gobin not installed; skipping $out"
+    fi
+}
+
+build_featureset_version go1.18.10 featureset.go118.stripped
+build_featureset_version go1.19.13 featureset.go119.stripped
+build_featureset_version go1.20.14 featureset.go120.stripped
+build_featureset_version go1.21.13 featureset.go121.stripped
+build_featureset_version go1.22.0 featureset.go122.stripped
+build_featureset_version go1.23.0 featureset.go123.stripped
+build_featureset_version go1.24.0 featureset.go124.stripped
+build_featureset_version go1.25.0 featureset.go125.stripped
 
 # A fixture with real third-party deps so we can exercise buildinfo, itabs,
 # and type recovery against something richer than `hello`.

@@ -649,8 +649,131 @@ fn recovers_go_1_22() {
 }
 
 #[test]
+fn recovers_go_1_19() {
+    assert_recovers_version("hello.go119.stripped", "go1.19");
+}
+
+#[test]
+fn recovers_go_1_21() {
+    assert_recovers_version("hello.go121.stripped", "go1.21");
+}
+
+#[test]
+fn recovers_go_1_23() {
+    assert_recovers_version("hello.go123.stripped", "go1.23");
+}
+
+#[test]
 fn recovers_go_1_24() {
     assert_recovers_version("hello.go124.stripped", "go1.24");
+}
+
+#[test]
+fn recovers_go_1_25() {
+    assert_recovers_version("hello.go125.stripped", "go1.25");
+}
+
+/// Deep recovery on one Go release using the richer featureset.go fixture:
+/// interfaces with concrete implementers (itabs), generics, struct methods,
+/// goroutines, and a crypto dependency. Pins that functions, the program's own
+/// types, the custom-interface itabs, and the build version all recover on every
+/// release, so a type-walker or itab-walker drift in any version fails loudly
+/// where the minimal hello.go fixture would not exercise the code at all.
+fn assert_recovers_featureset(fixture_name: &str, version_prefix: &str) {
+    let Some(path) = fixture(fixture_name) else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let pcln = Pclntab::parse(&bin).expect("parse pclntab");
+
+    let funcs = pcln.functions().expect("walk functab");
+    let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+    for required in ["main.main", "main.run"] {
+        assert!(
+            names.contains(&required),
+            "{version_prefix}: expected {required} in recovered symbols ({} funcs)",
+            names.len()
+        );
+    }
+
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    let recovered = types::recover_all(&bin, &md).expect("recover types");
+    assert!(
+        recovered.len() > 50,
+        "{version_prefix}: expected real types, got {}",
+        recovered.len()
+    );
+    // The program's own types must survive, not just stdlib ones: the type
+    // walker has to handle this binary's main-package definitions.
+    assert!(
+        recovered.iter().any(|t| t.name.contains("main.")),
+        "{version_prefix}: expected a main.* type in the recovered catalog"
+    );
+    let kinds: std::collections::HashSet<KindName> = recovered.iter().map(|t| t.kind).collect();
+    for required_kind in [KindName::Struct, KindName::Interface] {
+        assert!(
+            kinds.contains(&required_kind),
+            "{version_prefix}: expected at least one {required_kind:?} type"
+        );
+    }
+
+    // The []Codec literal builds two itabs (Codec/xorCodec, Codec/addCodec) that
+    // the linker keeps in itablinks. Pin that the custom interface's itabs walk.
+    let pairs = itabs::recover_all(&bin, &md).expect("recover itabs");
+    assert!(
+        pairs
+            .iter()
+            .any(|p| p.interface_name.contains("main.Codec")),
+        "{version_prefix}: expected a main.Codec itab among {} pairs",
+        pairs.len()
+    );
+
+    let info = BuildInfo::parse(&bin).expect("parse buildinfo");
+    assert!(
+        info.go_version.starts_with(version_prefix),
+        "expected {version_prefix}, got {}",
+        info.go_version
+    );
+}
+
+#[test]
+fn recovers_featureset_go_1_18() {
+    assert_recovers_featureset("featureset.go118.stripped", "go1.18");
+}
+
+#[test]
+fn recovers_featureset_go_1_19() {
+    assert_recovers_featureset("featureset.go119.stripped", "go1.19");
+}
+
+#[test]
+fn recovers_featureset_go_1_20() {
+    assert_recovers_featureset("featureset.go120.stripped", "go1.20");
+}
+
+#[test]
+fn recovers_featureset_go_1_21() {
+    assert_recovers_featureset("featureset.go121.stripped", "go1.21");
+}
+
+#[test]
+fn recovers_featureset_go_1_22() {
+    assert_recovers_featureset("featureset.go122.stripped", "go1.22");
+}
+
+#[test]
+fn recovers_featureset_go_1_23() {
+    assert_recovers_featureset("featureset.go123.stripped", "go1.23");
+}
+
+#[test]
+fn recovers_featureset_go_1_24() {
+    assert_recovers_featureset("featureset.go124.stripped", "go1.24");
+}
+
+#[test]
+fn recovers_featureset_go_1_25() {
+    assert_recovers_featureset("featureset.go125.stripped", "go1.25");
 }
 
 #[test]
