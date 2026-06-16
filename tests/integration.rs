@@ -1714,6 +1714,35 @@ fn symbols_as_pe_writes_valid_symtab() {
 }
 
 #[test]
+fn fat_binary_with_absurd_arch_count_bails_fast() {
+    // A crafted universal (fat) Mach-O header can claim billions of arch
+    // slices. Counting them to fill the unsupported-format error must not walk
+    // the claimed count: with overflow-safe but uncapped iteration this single
+    // 8-byte header spun for over a minute under instrumentation. Pin that the
+    // claimed count is capped, so parse returns the FatBinary error well under a
+    // second. Found by fuzzing the recovery stack.
+    let mut bytes = vec![0xca, 0xfe, 0xba, 0xbe]; // FAT_MAGIC, big-endian
+    bytes.extend_from_slice(&0xCFFF_FFFEu32.to_be_bytes()); // nfat_arch ~3.5 billion
+    bytes.resize(64, 0); // truncated arch table; the count is the only hostile field
+
+    let start = std::time::Instant::now();
+    let result = GoBinary::parse(bytes);
+    let elapsed = start.elapsed();
+    let err = match result {
+        Ok(_) => panic!("fat binary must be refused"),
+        Err(e) => e,
+    };
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "counting fat arches took {elapsed:?}; the claimed count must be capped"
+    );
+    assert!(
+        matches!(err, unstrip::Error::FatBinary { .. }),
+        "expected FatBinary error, got {err:?}"
+    );
+}
+
+#[test]
 fn rejects_non_go_binary() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let result = GoBinary::open(&path);

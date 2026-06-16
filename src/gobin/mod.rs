@@ -305,7 +305,14 @@ fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>) -> Result<Described
             // We don't yet expose a way to pick one, and silently grabbing
             // slice 0 would analyze the wrong arch on most ARM Macs. Refuse
             // until we add --arch selection.
-            let count = fat.iter_arches().count();
+            //
+            // iter_arches() yields one item per arch count claimed in the
+            // header, and a crafted fat header can claim billions; counting
+            // the full sequence to fill this error would spin. A real
+            // universal binary has a handful of slices, so cap the walk well
+            // above any genuine count and bail.
+            const MAX_FAT_ARCHES: usize = 64;
+            let count = fat.iter_arches().take(MAX_FAT_ARCHES).count();
             return Err(Error::FatBinary { slice_count: count });
         }
     };
