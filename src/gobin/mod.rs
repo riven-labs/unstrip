@@ -82,7 +82,10 @@ impl Section {
         if delta >= self.file_size {
             return None;
         }
-        Some(self.file_offset + delta)
+        // file_offset comes straight from the container's section header, so a
+        // crafted offset near usize::MAX would overflow this add; saturate and
+        // let the caller's bounds check against the file length reject it.
+        Some(self.file_offset.saturating_add(delta))
     }
 
     /// Coarse memory classification a Go RE consumer cares about, in
@@ -414,7 +417,11 @@ fn describe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> Result<Described> {
     for sect in &pe.sections {
         let name = sect.name().unwrap_or("").to_string();
         let kind = classify_pe_section(&name, sect.characteristics);
-        let addr = image_base + sect.virtual_address as u64;
+        // A PE section's address is image_base plus a relative virtual address,
+        // both read from the file. A crafted image_base near u64::MAX overflows
+        // this add; saturate so a hostile header yields an out-of-range address
+        // that no real vaddr lookup matches, rather than panicking.
+        let addr = image_base.saturating_add(sect.virtual_address as u64);
         let s = Section {
             name: name.clone(),
             kind,
@@ -480,9 +487,12 @@ fn classify_pe_section(name: &str, characteristics: u32) -> SectionKind {
 
 fn addr_for_offset(sections: &[Section], offset: usize) -> Option<u64> {
     for s in sections {
-        if offset >= s.file_offset && offset < s.file_offset + s.file_size {
+        // file_offset, file_size, and addr all come from the section header, so
+        // a crafted header can drive either add past its type's range; saturate
+        // both so a hostile section is skipped rather than overflowing.
+        if offset >= s.file_offset && offset < s.file_offset.saturating_add(s.file_size) {
             let delta = (offset - s.file_offset) as u64;
-            return Some(s.addr + delta);
+            return Some(s.addr.saturating_add(delta));
         }
     }
     None

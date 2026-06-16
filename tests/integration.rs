@@ -1714,6 +1714,28 @@ fn symbols_as_pe_writes_valid_symtab() {
 }
 
 #[test]
+fn pe_with_huge_image_base_does_not_overflow() {
+    // A PE section address is image_base + the section's relative virtual
+    // address, both read from the file. A crafted image_base near u64::MAX
+    // overflowed that add and panicked. Take a real, parseable PE and patch
+    // only its ImageBase to the top of the address space, then parse: it must
+    // not panic. Found by fuzzing the recovery stack.
+    let Some(path) = fixture("hello.windows-amd64.stripped.exe") else {
+        return;
+    };
+    let mut bytes = std::fs::read(&path).expect("read pe fixture");
+    // e_lfanew at 0x3C points at the PE signature. The PE32+ optional header's
+    // ImageBase is a u64 at signature(4) + COFF header(20) + 24.
+    let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
+    let image_base_off = e_lfanew + 4 + 20 + 24;
+    bytes[image_base_off..image_base_off + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+
+    // The contract is "no panic", whatever the parse verdict: a hostile base
+    // should bail to an error or yield out-of-range addresses, never overflow.
+    let _ = GoBinary::parse(bytes);
+}
+
+#[test]
 fn fat_binary_with_absurd_arch_count_bails_fast() {
     // A crafted universal (fat) Mach-O header can claim billions of arch
     // slices. Counting them to fill the unsupported-format error must not walk
