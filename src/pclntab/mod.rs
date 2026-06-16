@@ -501,15 +501,22 @@ impl<'a> Pclntab<'a> {
     }
 
     fn resolve_file(&self, cu_offset: usize, file_idx: usize) -> Option<String> {
-        let cutab_entry = self.cu_off + (cu_offset + file_idx) * 4;
-        if cutab_entry + 4 > self.data.len() {
+        // cu_offset and file_idx come from attacker-controlled pc-value tables,
+        // so the cutab index arithmetic is checked: a crafted value resolves to
+        // no file rather than overflowing (a panic with overflow checks on, or a
+        // wrapped bad offset in a release build).
+        let cutab_entry = cu_offset
+            .checked_add(file_idx)?
+            .checked_mul(4)?
+            .checked_add(self.cu_off)?;
+        if cutab_entry.checked_add(4)? > self.data.len() {
             return None;
         }
         let raw = read_u32(self.data, cutab_entry, self.little_endian).ok()?;
         if raw == u32::MAX {
             return None;
         }
-        let abs = self.filetab_off + raw as usize;
+        let abs = self.filetab_off.checked_add(raw as usize)?;
         read_cstring(self.data, abs).ok()
     }
 
@@ -895,5 +902,26 @@ mod tests {
         let buf = [0x01, 0x02, 0x03, 0x04];
         assert_eq!(read_u32(&buf, 0, true).unwrap(), 0x04030201);
         assert_eq!(read_u32(&buf, 0, false).unwrap(), 0x01020304);
+    }
+
+    #[test]
+    fn resolve_file_rejects_overflowing_indices() {
+        // A crafted pc-value table can feed resolve_file enormous cu_offset and
+        // file_idx values; the cutab index arithmetic must resolve to no file
+        // rather than overflow. Found by fuzzing the recovery stack.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join("hello.linux-amd64.stripped");
+        if !path.exists() {
+            return;
+        }
+        let bin = GoBinary::open(&path).expect("open fixture");
+        let pcln = Pclntab::parse(&bin).expect("parse pclntab");
+        for (cu, idx) in [(usize::MAX, usize::MAX), (usize::MAX, 0), (0, usize::MAX)] {
+            assert!(
+                pcln.resolve_file(cu, idx).is_none(),
+                "overflowing ({cu}, {idx}) must resolve to no file"
+            );
+        }
     }
 }
