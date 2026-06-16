@@ -821,6 +821,48 @@ fn recovers_from_garbled_go_1_26() {
 }
 
 #[test]
+fn recovers_reflect_name_dictionary_from_garbled() {
+    // garble embeds an obfuscated->original name table so reflect keeps working.
+    // Recover it from the data section and confirm it maps the hashed names back
+    // to the originals the program defined. The Account struct's field names are
+    // hashed in the type descriptor, so this dictionary is the only path back to
+    // them. (Exported method names like Describe are never obfuscated and so do
+    // not appear here.)
+    let Some(path) = fixture("gtest.garbled.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open garbled binary");
+    let names = unstrip::garble::recover_reflect_names(&bin)
+        .expect("garbled binary must carry a reflect-name table");
+    assert!(
+        names.len() >= 8,
+        "expected a real dictionary, got {} entries",
+        names.len()
+    );
+
+    let originals: std::collections::HashSet<&str> = names.iter().map(|(_, orig)| orig).collect();
+    for expected in ["Username", "Password", "Balance"] {
+        assert!(
+            originals.contains(expected),
+            "reflect dictionary should recover the original field name {expected:?}"
+        );
+    }
+
+    // The dictionary should also translate a hashed token back: find the key
+    // that maps to Username and confirm relabel rewrites it.
+    let (obf, _) = names
+        .iter()
+        .find(|(_, orig)| *orig == "Username")
+        .expect("Username must have an obfuscated key");
+    assert_eq!(names.translate(obf), Some("Username"));
+    assert_eq!(
+        names.relabel(&format!("main.{obf}")),
+        "main.Username",
+        "relabel should rewrite the hashed token in a qualified name"
+    );
+}
+
+#[test]
 fn pie_addresses_are_rebased_into_text() {
     // A PIE binary stores text-relative offsets; a wrong load base makes function
     // addresses land outside the text section while their names still parse from

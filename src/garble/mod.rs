@@ -23,6 +23,7 @@
 //! `crate::output::detect_garble` and gates the warning emitted from
 //! `--info` and `--buildinfo`.
 
+use crate::gobin::{GoBinary, SectionKind};
 use crate::pclntab::Function;
 
 /// Minimum number of user-space functions required before the heuristic
@@ -394,6 +395,186 @@ fn mean_stdev(xs: &[f32]) -> (f32, f32) {
     let mean = xs.iter().sum::<f32>() / n;
     let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n;
     (mean, var.sqrt())
+}
+
+/// An obfuscated-to-original name dictionary recovered from a garble binary.
+///
+/// To keep `reflect` working, garble embeds a table mapping every obfuscated
+/// reflected name back to its original, and patches the runtime name reader to
+/// translate on the fly. The table is a `[]string` of `[obf, orig, obf, orig,
+/// ...]` injected into the main package; even though `-s -w` strips its symbol,
+/// the backing array is a run of Go string headers in a data section and the
+/// keys are sorted, which is enough to find and parse it. This is the highest
+/// value artifact on a garbled binary: it recovers type, field, and method
+/// names that are otherwise only present as hashes.
+#[derive(Debug, Clone, Default)]
+pub struct ReflectNames {
+    obf_to_orig: std::collections::HashMap<String, String>,
+}
+
+impl ReflectNames {
+    pub fn len(&self) -> usize {
+        self.obf_to_orig.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.obf_to_orig.is_empty()
+    }
+
+    /// Original name for one obfuscated token, if known.
+    pub fn translate(&self, obf: &str) -> Option<&str> {
+        self.obf_to_orig.get(obf).map(String::as_str)
+    }
+
+    /// Pairs in arbitrary order, for dumping the dictionary.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.obf_to_orig
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// Rewrite a qualified name, replacing each obfuscated identifier token with
+    /// its original where the dictionary knows it. Tokens are the maximal
+    /// `[A-Za-z0-9_]` runs, so the separators in `*pkg.Type.Method` survive and
+    /// only the hashed parts change.
+    pub fn relabel(&self, name: &str) -> String {
+        let mut out = String::with_capacity(name.len());
+        let mut tok = String::new();
+        let flush = |tok: &mut String, out: &mut String| {
+            if !tok.is_empty() {
+                match self.obf_to_orig.get(tok.as_str()) {
+                    Some(orig) => out.push_str(orig),
+                    None => out.push_str(tok),
+                }
+                tok.clear();
+            }
+        };
+        for ch in name.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                tok.push(ch);
+            } else {
+                flush(&mut tok, &mut out);
+                out.push(ch);
+            }
+        }
+        flush(&mut tok, &mut out);
+        out
+    }
+}
+
+/// Smallest pair count we will accept as the name table. A handful of valid
+/// string headers can occur by chance in any data section; a sorted run this
+/// long of identifier-charset keys does not.
+const MIN_NAME_PAIRS: usize = 8;
+
+/// Recover garble's obfuscated-to-original reflected-name dictionary, if the
+/// binary carries one. Returns None on a non-garbled binary (no such table) or
+/// when the table can't be located.
+pub fn recover_reflect_names(bin: &GoBinary) -> Option<ReflectNames> {
+    if bin.pointer_size() != 8 {
+        return None; // 64-bit string headers only for now
+    }
+    let mut best: Option<ReflectNames> = None;
+    for section in &bin.sections {
+        // The table lives in writable or read-only data, never in code or bss.
+        match section.kind {
+            SectionKind::Data | SectionKind::NoPtrData | SectionKind::ReadOnlyData => {}
+            _ => continue,
+        }
+        let start = section.file_offset.min(bin.bytes.len());
+        let end = section
+            .file_offset
+            .saturating_add(section.file_size)
+            .min(bin.bytes.len());
+        let mut off = start;
+        while off + 16 <= end {
+            // A run is consecutive 16-byte string headers that each resolve to
+            // a short printable string.
+            if string_header(bin, off).is_some() {
+                let mut run = Vec::new();
+                let mut p = off;
+                while p + 16 <= end {
+                    match string_header(bin, p) {
+                        Some(s) => run.push(s),
+                        None => break,
+                    }
+                    p += 16;
+                }
+                if let Some(map) = pairs_from_run(&run) {
+                    if best.as_ref().map_or(true, |b| map.len() > b.len()) {
+                        best = Some(map);
+                    }
+                }
+                off = p.max(off + 16);
+            } else {
+                off += 8;
+            }
+        }
+    }
+    best.filter(|m| !m.is_empty())
+}
+
+/// Read a Go string header (`{data *byte; len int}`) at file offset `off` and
+/// return the pointed-to string when it is a short printable run.
+fn string_header(bin: &GoBinary, off: usize) -> Option<String> {
+    let ptr = u64::from_le_bytes(bin.bytes.get(off..off + 8)?.try_into().ok()?);
+    let len = u64::from_le_bytes(bin.bytes.get(off + 8..off + 16)?.try_into().ok()?);
+    if len == 0 || len > 128 {
+        return None;
+    }
+    let bytes = bin.read_at_addr(ptr, len as usize)?;
+    if bytes.iter().all(|&b| b.is_ascii_graphic() || b == b' ') {
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    } else {
+        None
+    }
+}
+
+/// Interpret a run of string-header strings as the `[obf, orig, ...]` table.
+/// garble sorts the array by the obfuscated key, so the table shows up as a
+/// long stretch of pairs whose key column is strictly ascending and
+/// identifier-charset. The run may also absorb adjacent, unrelated string
+/// headers, so rather than demanding the whole run qualify, take the longest
+/// contiguous segment of ascending identifier keys under each pairing
+/// alignment. The wrong alignment (keys land on the original column) is not
+/// sorted, so its longest segment stays short.
+fn pairs_from_run(run: &[String]) -> Option<ReflectNames> {
+    let mut best: Option<ReflectNames> = None;
+    for align in [0usize, 1] {
+        let pairs: Vec<(&String, &String)> = (align..run.len().saturating_sub(1))
+            .step_by(2)
+            .map(|i| (&run[i], &run[i + 1]))
+            .collect();
+        let mut j = 0;
+        while j < pairs.len() {
+            let mut k = j;
+            while k < pairs.len()
+                && is_identifier_token(pairs[k].0)
+                && (k == j || pairs[k - 1].0 < pairs[k].0)
+            {
+                k += 1;
+            }
+            if k - j >= MIN_NAME_PAIRS {
+                let map: std::collections::HashMap<String, String> = pairs[j..k]
+                    .iter()
+                    .map(|(key, val)| ((*key).clone(), (*val).clone()))
+                    .collect();
+                if best.as_ref().map_or(true, |b| map.len() > b.len()) {
+                    best = Some(ReflectNames { obf_to_orig: map });
+                }
+            }
+            j = k.max(j + 1);
+        }
+    }
+    best
+}
+
+/// A garble key is a base64-derived identifier: only `[A-Za-z0-9_]`, no dots or
+/// slashes, within a plausible hash length.
+fn is_identifier_token(s: &str) -> bool {
+    (1..=32).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 #[cfg(test)]

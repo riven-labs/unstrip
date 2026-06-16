@@ -49,6 +49,10 @@ struct Args {
     #[arg(long, help_heading = "Analysis modes")]
     capabilities: bool,
 
+    /// Recover garble's obfuscated-to-original reflected-name dictionary.
+    #[arg(long, help_heading = "Analysis modes")]
+    reflect_names: bool,
+
     /// Stable structural hash for clustering recompiles.
     #[arg(long, help_heading = "Analysis modes")]
     fingerprint: bool,
@@ -985,6 +989,46 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             f => return Err(format!("--capabilities does not support --format {:?}", f).into()),
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
+    if args.reflect_names {
+        match unstrip::garble::recover_reflect_names(&bin) {
+            Some(names) => {
+                let mut pairs: Vec<(&str, &str)> = names.iter().collect();
+                pairs.sort();
+                match args.format {
+                    OutFormat::Json => {
+                        let map: std::collections::BTreeMap<&str, &str> =
+                            pairs.iter().copied().collect();
+                        serde_json::to_writer_pretty(&mut out, &map)?;
+                        writeln!(out)?;
+                    }
+                    OutFormat::Text => {
+                        writeln!(
+                            out,
+                            "recovered {} reflected names (obfuscated -> original)",
+                            pairs.len()
+                        )?;
+                        for (obf, orig) in pairs {
+                            writeln!(out, "  {obf}  ->  {orig}")?;
+                        }
+                    }
+                    f => {
+                        return Err(
+                            format!("--reflect-names does not support --format {:?}", f).into()
+                        )
+                    }
+                }
+            }
+            None => {
+                writeln!(
+                    out,
+                    "no reflected-name table found (not garbled, or it carries none)"
+                )?;
+            }
         }
         out.flush()?;
         return Ok(());
