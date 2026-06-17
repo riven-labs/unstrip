@@ -937,6 +937,31 @@ fn pie_addresses_are_rebased_into_text() {
 }
 
 #[test]
+fn recovers_types_on_darwin_amd64() {
+    // Go's Darwin linker puts runtime.firstmoduledata in a __go_module section,
+    // not __noptrdata as on ELF, so moduledata location has to scan it. Without
+    // that, every moduledata-dependent feature fails on Mach-O. The existing
+    // Darwin tests only check the function table (which comes from the named
+    // pclntab section), so they did not exercise this; pin that types recover.
+    let Some(path) = fixture("hello.darwin-amd64.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open darwin binary");
+    let md = ModuleData::locate(&bin).expect("locate moduledata on Mach-O");
+    let recovered = types::recover_all(&bin, &md).expect("recover types on Mach-O");
+    assert!(
+        recovered.len() > 50,
+        "Mach-O should yield real types, got {}",
+        recovered.len()
+    );
+    let kinds: std::collections::HashSet<KindName> = recovered.iter().map(|t| t.kind).collect();
+    assert!(
+        kinds.contains(&KindName::Struct),
+        "expected struct types in the Mach-O recovered set"
+    );
+}
+
+#[test]
 fn recovers_types_on_linux_arm64() {
     // Type recovery is architecture-independent (it walks the type catalog, not
     // code), but the moduledata scan reads pointer-width fields, so pin that the

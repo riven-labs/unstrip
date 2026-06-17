@@ -388,7 +388,12 @@ fn classify_mach_section(segname: &str, sectname: &str) -> SectionKind {
             SectionKind::ReadOnlyData
         }
         ("__DATA", "__data") => SectionKind::Data,
-        ("__DATA", "__noptrdata") => SectionKind::NoPtrData,
+        // Go's Darwin linker places runtime.firstmoduledata in its own
+        // __go_module section rather than in __noptrdata as on ELF. Classify it
+        // like noptrdata so the moduledata scan looks there; without this,
+        // moduledata location (and every itab/type/buildinfo feature that needs
+        // it) fails on every Mach-O binary, garbled or not.
+        ("__DATA", "__noptrdata") | ("__DATA", "__go_module") => SectionKind::NoPtrData,
         ("__DATA", "__bss") | ("__DATA", "__noptrbss") => SectionKind::Bss,
         _ => SectionKind::Other,
     }
