@@ -122,8 +122,16 @@ fn decode_inline(bytes: &[u8], mut pos: usize) -> Result<BuildInfo> {
     let go_version = std::str::from_utf8(go_version_bytes)
         .map_err(|_| Error::BuildInfo("go version string is not valid utf-8".into()))?
         .to_string();
-    let modinfo = trim_modinfo_framing(modinfo_bytes)?;
-    let mut info = parse_modinfo(modinfo);
+    // A real modinfo blob is always at least 32 bytes: the 16-byte sentinel
+    // frames at each end. Obfuscators such as garble blank it entirely, so it
+    // arrives shorter than the framing. The module table is gone, but the
+    // version above can survive; degrade to a version-only result rather than
+    // failing the whole parse. A present-but-malformed blob still errors.
+    let mut info = if modinfo_bytes.len() < 32 {
+        parse_modinfo("")
+    } else {
+        parse_modinfo(trim_modinfo_framing(modinfo_bytes)?)
+    };
     info.go_version = go_version;
     Ok(info)
 }

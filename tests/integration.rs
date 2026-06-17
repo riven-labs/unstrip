@@ -308,6 +308,25 @@ fn parses_buildinfo_with_real_deps() {
 }
 
 #[test]
+fn buildinfo_degrades_on_stripped_modinfo() {
+    // garble blanks the module-info blob. Parsing must degrade to a version-only
+    // result rather than failing: the module table is gone, but recovery should
+    // not stop on it. Before this, --buildinfo on a garbled binary errored with
+    // a raw "modinfo too short" parse failure.
+    let Some(path) = fixture("gtest.garbled.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open garbled binary");
+    let info = BuildInfo::parse(&bin)
+        .expect("buildinfo must degrade, not error, when the modinfo blob is stripped");
+    assert!(
+        info.deps.is_empty(),
+        "a stripped modinfo should yield no deps, got {}",
+        info.deps.len()
+    );
+}
+
+#[test]
 fn reverse_lookup_finds_main_main() {
     let Some(path) = fixture("hello.linux-amd64.stripped") else {
         return;
