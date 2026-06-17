@@ -647,13 +647,19 @@ fn pcheader_at(
     if pcln >= available {
         return None;
     }
-    // textStart must land in a recovered text section. This is the check that
-    // separates a real header from coincidental data with climbing offsets.
-    let text_ok = sections.iter().any(|t| {
-        t.kind == SectionKind::Text
-            && text_start >= t.addr
-            && text_start < t.addr.saturating_add(t.vmsize.max(t.file_size as u64))
-    });
+    // textStart must land in a recovered text section, which separates a real
+    // header from coincidental data with climbing offsets. A zero textStart is
+    // accepted: every Windows PE leaves the field zero and the runtime resolves
+    // the text base from moduledata instead, so rejecting it discards the real
+    // header on the one platform the structural scan exists for. The parser
+    // already tolerates a zero textStart the same way; the offset-ordering check
+    // above is what carries the no-false-positive guarantee here.
+    let text_ok = text_start == 0
+        || sections.iter().any(|t| {
+            t.kind == SectionKind::Text
+                && text_start >= t.addr
+                && text_start < t.addr.saturating_add(t.vmsize.max(t.file_size as u64))
+        });
     if !text_ok {
         return None;
     }

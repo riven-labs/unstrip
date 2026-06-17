@@ -1862,10 +1862,16 @@ fn locates_pclntab_on_pe_with_rewritten_magic() {
         "pclntab should be located in the clean PE"
     );
 
-    // Overwrite the magic with a non-magic value, leaving the rest of the
-    // pcHeader (pad, quantum, ptrsize, offsets, textStart) intact, exactly as
-    // garble's per-build magic does.
+    // Overwrite the magic with a non-magic value, exactly as garble's per-build
+    // magic does.
     bytes[off..off + 4].copy_from_slice(&[0xab, 0xcd, 0x12, 0x34]);
+    // Also force pcHeader.textStart (a pointer-sized field at off+8+2*ptrsize,
+    // ptrsize=8 here) to zero. Every Windows PE leaves textStart zero and the
+    // runtime resolves the text base from moduledata, so the structural scan
+    // must accept a zero textStart; a fixture with a non-zero value would not
+    // exercise the path the real PEs take.
+    let text_start_off = off + 8 + 2 * 8;
+    bytes[text_start_off..text_start_off + 8].copy_from_slice(&[0u8; 8]);
 
     let garbled = GoBinary::parse(bytes).expect("discovery must survive a rewritten magic");
     assert_eq!(
