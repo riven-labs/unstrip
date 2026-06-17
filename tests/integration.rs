@@ -173,6 +173,41 @@ fn recovers_cobra_struct_fields() {
 }
 
 #[test]
+fn recovers_struct_field_tags() {
+    // The gtest Account struct carries `json:"..."` tags. Recovery must surface
+    // them verbatim: the tag is the struct's wire schema (the field names a
+    // marshaler emits), and it survives obfuscation, so recovering it is how a
+    // garbled config struct gives up its real json/db field names even when the
+    // Go field identifiers are hashed away. Skips if the fixture is unbuilt.
+    let Some(path) = fixture("gtest.plain.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open binary");
+    let md = ModuleData::locate(&bin).expect("locate moduledata");
+    let all = types::recover_all(&bin, &md).expect("recover types");
+
+    let account = match all
+        .iter()
+        .find(|t| t.name == "main.Account" && t.kind == KindName::Struct)
+    {
+        Some(t) => t,
+        None => return, // tolerate layout drift across Go versions
+    };
+
+    let KindData::Struct { fields } = &account.kind_data else {
+        panic!("main.Account should decode as Struct kind_data");
+    };
+    let username = fields
+        .iter()
+        .find(|f| f.name == "Username")
+        .expect("Account should have a Username field");
+    assert_eq!(
+        username.tag, "json:\"username\"",
+        "struct field tag must be recovered verbatim"
+    );
+}
+
+#[test]
 fn recovers_itabs_on_depsdemo() {
     let Some(path) = fixture("depsdemo.linux-amd64.stripped") else {
         return;

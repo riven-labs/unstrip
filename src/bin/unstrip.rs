@@ -1705,11 +1705,16 @@ fn write_types<W: Write>(w: &mut W, all: &[unstrip::Type]) -> io::Result<()> {
         match &t.kind_data {
             unstrip::types::KindData::Struct { fields } => {
                 for f in fields {
-                    let tag = if f.embedded { " (embedded)" } else { "" };
+                    let embedded = if f.embedded { " (embedded)" } else { "" };
+                    let struct_tag = if f.tag.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  `{}`", f.tag)
+                    };
                     writeln!(
                         w,
-                        "    +{:04x}  {}: type@0x{:x}{}",
-                        f.offset, f.name, f.typ, tag
+                        "    +{:04x}  {}: type@0x{:x}{}{}",
+                        f.offset, f.name, f.typ, embedded, struct_tag
                     )?;
                 }
             }

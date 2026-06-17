@@ -115,4 +115,11 @@ if command -v "$GARBLE" >/dev/null 2>&1 && [ -d gtest ]; then
     (cd gtest && GOOS=linux GOARCH=amd64 "$GARBLE" build -ldflags='-s -w' -o ../gtest.garbled.stripped .)
 fi
 
+# Plain build of the same reflected program: its Account struct carries json
+# tags, so the struct-tag recovery test has a clean fixture.
+if [ -d gtest ]; then
+    echo "building gtest.plain.stripped"
+    (cd gtest && GOOS=linux GOARCH=amd64 "$GO" build -ldflags='-s -w' -o ../gtest.plain.stripped .)
+fi
+
 echo "done. fixtures written to $(pwd)"

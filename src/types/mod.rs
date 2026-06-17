@@ -179,6 +179,12 @@ pub struct StructField {
     pub typ: u64,
     pub offset: u64,
     pub embedded: bool,
+    /// The struct tag (`json:"user" db:"u"`), verbatim, or empty when the field
+    /// has none. The tag is stored in the field's name encoding right after the
+    /// name and survives obfuscation, so it reconstructs a garbled struct's
+    /// schema even when other names are hashed.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tag: String,
 }
 
 pub(crate) const TYPE_HEADER_SIZE_64: usize = 48;
@@ -653,27 +659,69 @@ fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<Kin
         let typ = u64::from_le_bytes(buf[off + 8..off + 16].try_into().unwrap());
         let offset = u64::from_le_bytes(buf[off + 16..off + 24].try_into().unwrap());
 
-        let (name, embedded) =
-            read_name_with_flags(bin, name_ptr).unwrap_or((String::new(), false));
+        let (name, embedded, tag) =
+            read_name_full(bin, name_ptr).unwrap_or((String::new(), false, String::new()));
         fields.push(StructField {
             name,
             typ,
             offset,
             embedded,
+            tag,
         });
     }
     let _ = md;
     Ok(KindData::Struct { fields })
 }
 
-fn read_name_with_flags(bin: &GoBinary, addr: u64) -> Result<(String, bool)> {
+/// Read a struct field's name encoding: its name, the embedded flag, and the
+/// struct tag. The Go `Name` lays the tag out right after the name -- flag byte,
+/// varint name length, name bytes, then (when the has-tag flag is set) varint
+/// tag length and tag bytes. Reading it recovers a field's `json:"..."` schema,
+/// which garble leaves verbatim even when the field name itself is hashed.
+fn read_name_full(bin: &GoBinary, addr: u64) -> Result<(String, bool, String)> {
     let header = bin
         .read_at_addr(addr, 1 + 10)
         .ok_or_else(|| Error::TypeRecovery(format!("name header at 0x{addr:x} unmapped")))?;
     let flag_byte = header[0];
     let embedded = flag_byte & (1 << 3) != 0;
-    let name = read_name(bin, addr)?;
-    Ok((name, embedded))
+    let has_tag = flag_byte & (1 << 1) != 0;
+
+    let (name_len, name_vbytes) = read_varint(&header[1..]).ok_or_else(|| {
+        Error::TypeRecovery(format!("varint at name 0x{addr:x} did not terminate"))
+    })?;
+    if name_len > 1 << 20 {
+        return Err(Error::TypeRecovery(format!(
+            "name length {name_len} unreasonably large"
+        )));
+    }
+    let name_start = 1 + name_vbytes;
+    let name_end = name_start + name_len as usize;
+    let body = bin
+        .read_at_addr(addr, name_end)
+        .ok_or_else(|| Error::TypeRecovery(format!("name body at 0x{addr:x} unmapped")))?;
+    let name = std::str::from_utf8(&body[name_start..name_end])
+        .map_err(|_| Error::TypeRecovery("name is not valid utf-8".into()))?
+        .to_string();
+
+    let tag = if has_tag {
+        read_tag(bin, addr + name_end as u64).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Ok((name, embedded, tag))
+}
+
+/// Read the tag at `addr`: a varint length followed by that many bytes. The tag
+/// follows the name in the field's `Name` encoding. A bad length or non-UTF-8
+/// body yields an empty tag rather than failing the whole struct decode.
+fn read_tag(bin: &GoBinary, addr: u64) -> Option<String> {
+    let hdr = bin.read_at_addr(addr, 10)?;
+    let (len, vbytes) = read_varint(hdr)?;
+    if len == 0 || len > 1 << 16 {
+        return None;
+    }
+    let bytes = bin.read_at_addr(addr + vbytes as u64, len as usize)?;
+    std::str::from_utf8(bytes).ok().map(str::to_string)
 }
 
 /// InterfaceType extra layout (after _type header):
