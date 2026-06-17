@@ -493,20 +493,34 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
         )));
     }
     // typelinks and itablinks come after the version-drifting tail, so a layout
-    // mismatch leaves their slice headers shifted by a pointer. When they carry
-    // entries, the data pointer must resolve to a mapped section; a one-pointer
-    // shift reads a small count there instead (e.g. Go 1.26 inserted a field
-    // before these), which fails this check and lets the caller try the other
-    // layout.
-    if typelinks.len > 0 && bin.section_for_addr(typelinks.data).is_none() {
+    // mismatch leaves their slice headers shifted by a pointer. The whole array
+    // must fit inside the section that holds its data: a one-pointer shift (e.g.
+    // Go 1.26 inserted a field before these) reads a wildly large length whose
+    // array would overrun the section, which fails this check and lets the
+    // caller try the other layout. Checking only that the data pointer resolves
+    // is not enough -- a shifted pointer can land in a real section by chance
+    // while the length stays garbage.
+    let slice_fits = |hdr: &SliceHeader, elem: u64| -> bool {
+        if hdr.len == 0 {
+            return true;
+        }
+        match bin.section_for_addr(hdr.data) {
+            Some(s) => {
+                let end = hdr.data.saturating_add(hdr.len.saturating_mul(elem));
+                end <= s.addr.saturating_add(s.vmsize.max(s.file_size as u64))
+            }
+            None => false,
+        }
+    };
+    if !slice_fits(&typelinks, 4) {
         return Err(Error::ModuleData(format!(
-            "typelinks data 0x{:x} (len {}) not in any mapped section",
+            "typelinks (data 0x{:x}, len {}) does not fit its section",
             typelinks.data, typelinks.len
         )));
     }
-    if itablinks.len > 0 && bin.section_for_addr(itablinks.data).is_none() {
+    if !slice_fits(&itablinks, ps as u64) {
         return Err(Error::ModuleData(format!(
-            "itablinks data 0x{:x} (len {}) not in any mapped section",
+            "itablinks (data 0x{:x}, len {}) does not fit its section",
             itablinks.data, itablinks.len
         )));
     }
