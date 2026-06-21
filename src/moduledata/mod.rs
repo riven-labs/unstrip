@@ -120,10 +120,11 @@ impl ModuleData {
             ));
         }
 
-        let target_bytes = if ps == 8 {
-            target.to_le_bytes().to_vec()
-        } else {
-            (target as u32).to_le_bytes().to_vec()
+        let target_bytes = match (ps, bin.little_endian) {
+            (8, true) => target.to_le_bytes().to_vec(),
+            (8, false) => target.to_be_bytes().to_vec(),
+            (_, true) => (target as u32).to_le_bytes().to_vec(),
+            (_, false) => (target as u32).to_be_bytes().to_vec(),
         };
 
         let scan_kinds = [
@@ -183,22 +184,22 @@ impl ModuleData {
         while idx < out.len() {
             let md = out[idx].clone();
             idx += 1;
-            let scan_start = md.file_offset + 8; // skip past pcHeader pointer
+            let ps = bin.pointer_size();
+            let scan_start = md.file_offset + ps; // skip past pcHeader pointer
             let scan_end = (scan_start + WINDOW).min(bin.bytes.len());
             if scan_start >= bin.bytes.len() {
                 continue;
             }
             let buf = &bin.bytes[scan_start..scan_end];
-            // Walk 8-byte-aligned candidates. The first one that resolves
+            // Walk pointer-aligned candidates. The first one that resolves
             // to a valid moduledata IS the next pointer; subsequent
             // pointer-shaped values further into the tail can also point
             // at moduledatas (modulehashes carry pointers too), so we
             // accept only the first hit per scan.
-            for off in (0..buf.len()).step_by(8) {
-                if off + 8 > buf.len() {
+            for off in (0..buf.len()).step_by(ps) {
+                let Some(cand) = read_ptr(buf, off, ps, bin.little_endian) else {
                     break;
-                }
-                let cand = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+                };
                 if cand == 0 {
                     continue;
                 }
@@ -213,7 +214,6 @@ impl ModuleData {
                     if !looks_like_moduledata(bin, file_off) {
                         continue;
                     }
-                    let ps = bin.pointer_size();
                     if let Some(next_md) = layouts_for(bin)
                         .iter()
                         .find_map(|&layout| try_parse(bin, file_off, ps, layout).ok())
@@ -228,6 +228,23 @@ impl ModuleData {
 
         Ok(out)
     }
+}
+
+/// Read a `ps`-byte pointer at `off` in the binary's endianness.
+fn read_ptr(bytes: &[u8], off: usize, ps: usize, le: bool) -> Option<u64> {
+    let b = bytes.get(off..off + ps)?;
+    Some(match (ps, le) {
+        (8, true) => u64::from_le_bytes(b.try_into().ok()?),
+        (8, false) => u64::from_be_bytes(b.try_into().ok()?),
+        (_, true) => u32::from_le_bytes(b.try_into().ok()?) as u64,
+        (_, false) => u32::from_be_bytes(b.try_into().ok()?) as u64,
+    })
+}
+
+/// Read a u32 at `off` in the binary's endianness.
+fn read_u32_e(bytes: &[u8], off: usize, le: bool) -> Option<u32> {
+    let b: [u8; 4] = bytes.get(off..off + 4)?.try_into().ok()?;
+    Some(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
 }
 
 /// Translate a runtime VA to a file offset. Returns None when the VA
@@ -251,21 +268,20 @@ fn vaddr_to_file_offset(bin: &GoBinary, vaddr: u64) -> Option<usize> {
 /// field. The target of that pointer should be 4-byte-aligned and start
 /// with a pclntab magic (0xfffffff0 or 0xfffffff1).
 fn looks_like_moduledata(bin: &GoBinary, file_off: usize) -> bool {
-    if file_off + 8 > bin.bytes.len() {
+    let Some(pc_header_addr) = read_ptr(&bin.bytes, file_off, bin.pointer_size(), bin.little_endian)
+    else {
         return false;
-    }
-    let pc_header_addr = u64::from_le_bytes(bin.bytes[file_off..file_off + 8].try_into().unwrap());
+    };
     if pc_header_addr == 0 {
         return false;
     }
     let Some(pc_off) = vaddr_to_file_offset(bin, pc_header_addr) else {
         return false;
     };
-    if pc_off + 4 > bin.bytes.len() {
-        return false;
-    }
-    let magic = u32::from_le_bytes(bin.bytes[pc_off..pc_off + 4].try_into().unwrap());
-    magic == 0xfffffff0 || magic == 0xfffffff1
+    matches!(
+        read_u32_e(&bin.bytes, pc_off, bin.little_endian),
+        Some(0xfffffff0) | Some(0xfffffff1)
+    )
 }
 
 /// Candidate moduledata layouts to try, in order, chosen from the pclntab
@@ -275,8 +291,8 @@ fn looks_like_moduledata(bin: &GoBinary, file_off: usize) -> bool {
 /// random value, which lands in the second arm and still gets the 1.20/1.26
 /// pair.
 fn layouts_for(bin: &GoBinary) -> &'static [Layout] {
-    match bin.pclntab_slice().get(0..4) {
-        Some(b) if u32::from_le_bytes(b.try_into().unwrap()) == 0xfffffff0 => &[Layout::V118],
+    match read_u32_e(bin.pclntab_slice(), 0, bin.little_endian) {
+        Some(0xfffffff0) => &[Layout::V118],
         _ => &[Layout::V120, Layout::V126],
     }
 }
@@ -334,10 +350,8 @@ fn scan_section(
 
 fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Result<ModuleData> {
     let bytes = &bin.bytes;
-    let mut r = Reader::new(bytes, file_off, ps);
+    let mut r = Reader::new(bytes, file_off, ps, bin.little_endian);
 
-    // We're parsing assuming little-endian. Big-endian Go targets exist
-    // (s390x) but are vanishingly rare. Add when we have a fixture.
     let pc_header_addr = r.uptr()?;
     if pc_header_addr != bin.pclntab_addr {
         return Err(Error::ModuleData(format!(
@@ -574,11 +588,12 @@ struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
     ps: usize,
+    le: bool,
 }
 
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8], pos: usize, ps: usize) -> Self {
-        Self { bytes, pos, ps }
+    fn new(bytes: &'a [u8], pos: usize, ps: usize, le: bool) -> Self {
+        Self { bytes, pos, ps, le }
     }
 
     fn uptr(&mut self) -> Result<u64> {
@@ -593,11 +608,11 @@ impl<'a> Reader<'a> {
         let v = match self.ps {
             8 => {
                 let arr: [u8; 8] = self.bytes[self.pos..end].try_into().unwrap();
-                u64::from_le_bytes(arr)
+                if self.le { u64::from_le_bytes(arr) } else { u64::from_be_bytes(arr) }
             }
             4 => {
                 let arr: [u8; 4] = self.bytes[self.pos..end].try_into().unwrap();
-                u32::from_le_bytes(arr) as u64
+                (if self.le { u32::from_le_bytes(arr) } else { u32::from_be_bytes(arr) }) as u64
             }
             _ => unreachable!(),
         };
