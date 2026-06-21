@@ -9,6 +9,20 @@ pub const MAGIC_1_20: u32 = 0xfffffff1;
 /// 1.20+ for the fields we care about, only the magic differs.
 pub const MAGIC_1_18: u32 = 0xfffffff0;
 
+/// The Go release family for a known pre-1.18 pclntab magic, whose on-disk table
+/// layout differs from 1.18+ and that relift does not read. Returns None for
+/// 1.18/1.20 and for unknown magics (e.g. a garble-rewritten value), which the
+/// structural header checks handle instead. Naming the version lets the parser
+/// fail with an honest "this is Go 1.16" instead of walking the old layout with
+/// the new reader and tripping a confusing internal offset error.
+pub fn unsupported_pre118_magic(magic: u32) -> Option<&'static str> {
+    match magic {
+        0xfffffffb => Some("Go 1.2 to 1.15"),
+        0xfffffffa => Some("Go 1.16 or 1.17"),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Function {
     pub address: u64,
@@ -80,14 +94,22 @@ impl<'a> Pclntab<'a> {
         }
 
         let magic = read_u32(data, 0, little_endian)?;
+        // Reject the known pre-1.18 pclntab layouts up front. Their table layout
+        // differs from 1.18+, so walking them with the 1.18 reader produces
+        // garbage -- a funcdata offset that lands in string data and trips the
+        // bounds check with a confusing internal error. Naming the version is
+        // the honest answer. garble rewrites the magic to a per-build random
+        // value that will not collide with these specific constants, so this
+        // does not regress obfuscated-binary support.
+        if let Some(version) = unsupported_pre118_magic(magic) {
+            return Err(Error::UnsupportedPclntabVersion { magic, version });
+        }
         // Garble and similar obfuscators rewrite the magic to defeat naive
         // parsers. The rest of the header layout is unchanged, so we accept
-        // any magic when the structural fields (zero pad, valid quantum,
+        // any other magic when the structural fields (zero pad, valid quantum,
         // valid ptrsize) match. The caller can read the magic to detect
         // tampering. We still reject obviously broken values via the
         // structural check below.
-        let magic_unexpected = magic != MAGIC_1_20;
-        let _ = magic_unexpected;
 
         if data[4] != 0 || data[5] != 0 {
             return Err(Error::BadPclntab {
@@ -864,6 +886,18 @@ fn read_cstring(buf: &[u8], off: usize) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_118_magics_are_rejected_by_version() {
+        // The known pre-1.18 layouts are named and refused...
+        assert_eq!(unsupported_pre118_magic(0xfffffffa), Some("Go 1.16 or 1.17"));
+        assert_eq!(unsupported_pre118_magic(0xfffffffb), Some("Go 1.2 to 1.15"));
+        // ...while the supported magics and an unknown (garble-rewritten) value
+        // pass through to the structural checks.
+        assert_eq!(unsupported_pre118_magic(MAGIC_1_18), None);
+        assert_eq!(unsupported_pre118_magic(MAGIC_1_20), None);
+        assert_eq!(unsupported_pre118_magic(0x1234_5678), None);
+    }
 
     #[test]
     fn varint_decodes_single_byte() {

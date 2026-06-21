@@ -21,9 +21,9 @@ pub enum Error {
     BadPclntab { offset: usize, reason: String },
 
     #[error(
-        "pclntab magic 0x{magic:08x} is not a supported Go version (want 0xfffffff1 for Go 1.20+)"
+        "pclntab magic 0x{magic:08x} is a pre-1.18 Go layout ({version}); relift recovers Go 1.18 and later"
     )]
-    UnsupportedPclntabVersion { magic: u32 },
+    UnsupportedPclntabVersion { magic: u32, version: &'static str },
 
     #[error(
         "read past end of pclntab: wanted {wanted} bytes at offset {offset}, have {available}"
