@@ -187,7 +187,11 @@ impl GoBinary {
         let s = self.section_for_addr(addr)?;
         let start_off = s.file_offset_of(addr)?;
         let end_off = start_off.checked_add(len)?;
-        if end_off > s.file_offset + s.file_size {
+        // saturating_add: a crafted section can carry a file_offset/file_size
+        // whose sum overflows usize; saturate so the bound stays meaningful
+        // instead of wrapping (which would let the range slip through) or
+        // panicking on overflow.
+        if end_off > s.file_offset.saturating_add(s.file_size) {
             return None;
         }
         // Belt-and-suspenders: the section bookkeeping should keep us within
@@ -728,13 +732,25 @@ fn finish(bytes: Vec<u8>, d: Described) -> Result<GoBinary> {
             ),
         });
     }
+    // Clamp every section's file range to the bytes we actually hold. A crafted
+    // header can declare a file_offset/file_size past the end of the input (or
+    // one whose sum overflows usize); without this, any consumer that slices
+    // `bytes[file_offset..file_offset + file_size]` panics. Clamp once here so
+    // every reader downstream is safe. vmsize (the in-memory size) is left as
+    // declared -- only the on-disk range is bounded by the file.
+    let len = bytes.len();
+    let mut sections = d.sections;
+    for s in &mut sections {
+        s.file_offset = s.file_offset.min(len);
+        s.file_size = s.file_size.min(len - s.file_offset);
+    }
     Ok(GoBinary {
         bytes,
         container: d.container,
         arch: d.arch,
         little_endian: d.little_endian,
         ptr_size: d.ptr_size,
-        sections: d.sections,
+        sections,
         pclntab_offset: d.pclntab_offset,
         pclntab_size: d.pclntab_size,
         pclntab_addr: d.pclntab_addr,
@@ -755,6 +771,68 @@ mod tests {
             addr: 0x1000,
             vmsize: 1,
         }
+    }
+
+    #[test]
+    fn read_at_addr_rejects_overflowing_section_range() {
+        // A fuzz-found crash: a crafted section carried a file_offset/file_size
+        // whose sum overflows usize, so the bound check `end_off > file_offset +
+        // file_size` panicked on the addition before it could reject the read.
+        // read_at_addr must return None for any address in such a section, not
+        // panic. (Build the GoBinary directly so the bad section bypasses the
+        // finish() clamp and exercises read_at_addr's own guard.)
+        let bin = GoBinary {
+            bytes: vec![0u8; 64],
+            container: Container::Elf,
+            arch: Arch::X86_64,
+            little_endian: true,
+            ptr_size: 8,
+            sections: vec![Section {
+                name: ".text".to_string(),
+                kind: SectionKind::Text,
+                file_offset: usize::MAX - 16,
+                file_size: usize::MAX,
+                addr: 0x1000,
+                vmsize: usize::MAX as u64,
+            }],
+            pclntab_offset: 0,
+            pclntab_size: 0,
+            pclntab_addr: 0,
+            text_addr: 0x1000,
+        };
+        assert_eq!(bin.read_at_addr(0x1000, 16), None);
+        assert_eq!(bin.read_at_addr(0x1008, 8), None);
+    }
+
+    #[test]
+    fn finish_clamps_section_file_range_to_input_length() {
+        // finish() must clamp every section's on-disk range to the bytes it
+        // holds so downstream `bytes[file_offset..file_offset + file_size]`
+        // slices can never run past the end or overflow.
+        let d = Described {
+            container: Container::Elf,
+            arch: Arch::X86_64,
+            little_endian: true,
+            ptr_size: 8,
+            sections: vec![Section {
+                name: ".text".to_string(),
+                kind: SectionKind::Text,
+                file_offset: usize::MAX - 8,
+                file_size: usize::MAX,
+                addr: 0x1000,
+                vmsize: 1,
+            }],
+            pclntab_offset: 0,
+            pclntab_size: 0,
+            pclntab_addr: 0,
+            text_addr: 0x1000,
+        };
+        let bin = finish(vec![0u8; 100], d).expect("finish");
+        let s = &bin.sections[0];
+        assert!(s.file_offset <= 100);
+        assert!(s.file_offset + s.file_size <= 100);
+        // The slice every consumer takes must now be in bounds.
+        let _ = &bin.bytes[s.file_offset..s.file_offset + s.file_size];
     }
 
     #[test]
