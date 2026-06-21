@@ -18,6 +18,7 @@ pub mod moduledata;
 pub mod output;
 pub mod pclntab;
 pub mod plugin;
+pub mod probe;
 pub mod rewrite;
 pub mod stdlib;
 pub mod strings;
@@ -31,6 +32,7 @@ pub use gobin::{Container, GoBinary, Section, SectionKind};
 pub use itabs::Itab;
 pub use moduledata::{ModuleData, SliceHeader};
 pub use pclntab::{Function, Pclntab};
+pub use probe::{probe, ContainerProbe, SectionInfo};
 pub use types::{KindName, Type};
 
 pub type Result<T> = std::result::Result<T, Error>;

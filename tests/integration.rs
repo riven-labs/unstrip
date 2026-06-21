@@ -50,6 +50,33 @@ fn recovers_symbols_from_linux_amd64() {
 }
 
 #[test]
+fn probe_describes_a_clean_go_binary() {
+    // A normal Go binary probes as a low-entropy ELF that owns a pclntab and
+    // raises no packer verdict -- the baseline the packed-binary path degrades
+    // from.
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
+    let bytes = std::fs::read(&path).expect("read fixture");
+    let p = unstrip::probe::probe(&bytes).expect("probe");
+    assert_eq!(p.container, "ELF");
+    assert_eq!(p.arch, "x86-64");
+    assert_eq!(p.bits, 64);
+    assert!(p.has_go_pclntab, "a clean Go ELF has a .gopclntab section");
+    assert!(
+        p.packer.is_none(),
+        "a clean Go binary must not be flagged as packed (got {:?})",
+        p.packer
+    );
+    assert!(!p.sections.is_empty());
+    assert!(
+        p.file_entropy < 7.0,
+        "clean Go binary whole-file entropy should be moderate, got {}",
+        p.file_entropy
+    );
+}
+
+#[test]
 fn recovers_symbols_from_linux_arm64() {
     let Some(path) = fixture("hello.linux-arm64.stripped") else {
         return;
