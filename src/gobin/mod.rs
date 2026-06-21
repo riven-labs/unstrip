@@ -136,6 +136,10 @@ pub struct GoBinary {
     pub container: Container,
     pub arch: Arch,
     pub little_endian: bool,
+    /// Pointer width in bytes, read from the container header (ELF class, PE
+    /// magic, Mach-O ABI64 bit) rather than inferred from `arch`. This is correct
+    /// even for an arch we don't otherwise name, so 32-bit targets get 4.
+    pub ptr_size: usize,
     pub sections: Vec<Section>,
     pub pclntab_offset: usize,
     pub pclntab_size: usize,
@@ -159,11 +163,7 @@ impl GoBinary {
     }
 
     pub fn pointer_size(&self) -> usize {
-        match self.arch {
-            Arch::X86_64 | Arch::Aarch64 => 8,
-            Arch::X86 | Arch::Arm => 4,
-            Arch::Other => 8,
-        }
+        self.ptr_size
     }
 
     pub fn section_for_addr(&self, addr: u64) -> Option<&Section> {
@@ -201,6 +201,7 @@ struct Described {
     container: Container,
     arch: Arch,
     little_endian: bool,
+    ptr_size: usize,
     sections: Vec<Section>,
     pclntab_offset: usize,
     pclntab_size: usize,
@@ -227,6 +228,7 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
         _ => Arch::Other,
     };
     let little_endian = elf.little_endian;
+    let ptr_size = if elf.is_64 { 8 } else { 4 };
 
     let mut sections = Vec::new();
     let mut text_addr = 0u64;
@@ -265,6 +267,7 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
         container: Container::Elf,
         arch,
         little_endian,
+        ptr_size,
         sections,
         pclntab_offset,
         pclntab_size,
@@ -328,6 +331,7 @@ fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>) -> Result<Described
         _ => Arch::Other,
     };
     let little_endian = macho.little_endian;
+    let ptr_size = if macho.is_64 { 8 } else { 4 };
 
     let mut sections = Vec::new();
     let mut text_addr = 0u64;
@@ -370,6 +374,7 @@ fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>) -> Result<Described
         container: Container::MachO,
         arch,
         little_endian,
+        ptr_size,
         sections,
         pclntab_offset,
         pclntab_size,
@@ -408,6 +413,7 @@ fn describe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> Result<Described> {
         _ => Arch::Other,
     };
     let little_endian = true;
+    let ptr_size = if pe.is_64 { 8 } else { 4 };
 
     let image_base = pe
         .header
@@ -457,6 +463,7 @@ fn describe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> Result<Described> {
         container: Container::Pe,
         arch,
         little_endian,
+        ptr_size,
         sections,
         pclntab_offset,
         pclntab_size,
@@ -686,6 +693,7 @@ fn finish(bytes: Vec<u8>, d: Described) -> Result<GoBinary> {
         container: d.container,
         arch: d.arch,
         little_endian: d.little_endian,
+        ptr_size: d.ptr_size,
         sections: d.sections,
         pclntab_offset: d.pclntab_offset,
         pclntab_size: d.pclntab_size,
