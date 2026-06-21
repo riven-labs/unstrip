@@ -38,6 +38,20 @@ build_hello darwin  arm64 hello.darwin-arm64.stripped
 build_hello windows amd64 hello.windows-amd64.stripped.exe
 build_hello_pie     hello.linux-amd64.pie.stripped
 
+# Cross-width and cross-endian featureset builds (interfaces+itabs+types), to
+# pin moduledata, itab, and type recovery on a 32-bit pointer width (386) and a
+# big-endian byte order (s390x), not just 64-bit little-endian amd64.
+build_featureset() {
+    local goos=$1
+    local goarch=$2
+    local out=$3
+    echo "building $out ($goos/$goarch)"
+    GOOS=$goos GOARCH=$goarch "$GO" build -ldflags='-s -w' -o "$out" featureset.go
+}
+
+build_featureset linux 386   featureset.linux-386.stripped
+build_featureset linux s390x featureset.linux-s390x.stripped
+
 # Per-version fixtures: the same hello.go built with specific Go releases, to
 # pin parser behavior across the supported range. The pclntab magic and the
 # moduledata layout differ between releases, so each version is its own case.

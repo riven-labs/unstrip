@@ -36,17 +36,37 @@ pub struct ItabMethod {
     pub concrete_fn: u64,
 }
 
-const ITAB_HEADER_SIZE: usize = 24;
-const TYPE_STR_OFFSET: usize = 40;
-const TYPE_HEADER_SIZE: usize = 48;
+/// Read a `ps`-byte pointer at `off` in the binary's endianness.
+fn rd_ptr(buf: &[u8], off: usize, ps: usize, le: bool) -> Option<u64> {
+    let b = buf.get(off..off + ps)?;
+    Some(match (ps, le) {
+        (8, true) => u64::from_le_bytes(b.try_into().ok()?),
+        (8, false) => u64::from_be_bytes(b.try_into().ok()?),
+        (_, true) => u32::from_le_bytes(b.try_into().ok()?) as u64,
+        (_, false) => u32::from_be_bytes(b.try_into().ok()?) as u64,
+    })
+}
+
+/// Read a u32 at `off` in the binary's endianness.
+fn rd_u32(buf: &[u8], off: usize, le: bool) -> Option<u32> {
+    let b: [u8; 4] = buf.get(off..off + 4)?.try_into().ok()?;
+    Some(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+}
+
+/// The `_type` (rtype) header: four uintptr fields (size, ptrdata, equal,
+/// gcdata) plus the 4-byte hash, 4 flag bytes, and the str/ptrToThis offsets.
+fn type_header_size(ps: usize) -> usize {
+    4 * ps + 16
+}
+
+/// Byte offset of the `str` nameOff field inside the `_type` header.
+fn type_str_offset(ps: usize) -> usize {
+    4 * ps + 8
+}
 
 pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Itab>> {
-    if bin.pointer_size() != 8 {
-        return Err(Error::ItabRecovery(format!(
-            "itab recovery requires pointer size 8, got {}",
-            bin.pointer_size()
-        )));
-    }
+    let ps = bin.pointer_size();
+    let le = bin.little_endian;
 
     const MAX_ITABS: u64 = 5_000_000;
     if md.itablinks.len > MAX_ITABS {
@@ -56,7 +76,7 @@ pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Itab>> {
         )));
     }
     let n = md.itablinks.len as usize;
-    let table_bytes = bin.read_at_addr(md.itablinks.data, n * 8).ok_or_else(|| {
+    let table_bytes = bin.read_at_addr(md.itablinks.data, n * ps).ok_or_else(|| {
         Error::ItabRecovery(format!(
             "itablinks at 0x{:x} (len {}) unmapped",
             md.itablinks.data, md.itablinks.len
@@ -64,8 +84,8 @@ pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Itab>> {
     })?;
 
     let mut out = Vec::with_capacity(n);
-    for chunk in table_bytes.chunks_exact(8) {
-        let itab_addr = u64::from_le_bytes(chunk.try_into().unwrap());
+    for chunk in table_bytes.chunks_exact(ps) {
+        let itab_addr = rd_ptr(chunk, 0, ps, le).unwrap_or(0);
         if itab_addr == 0 {
             continue;
         }
@@ -78,13 +98,18 @@ pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Itab>> {
 }
 
 fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Itab> {
+    let ps = bin.pointer_size();
+    let le = bin.little_endian;
+    // itab header: inter *interfacetype, _type *_type, hash uint32, then a
+    // 4-byte pad before the fun[] array.
+    let header_size = 2 * ps + 8;
     let buf = bin
-        .read_at_addr(addr, ITAB_HEADER_SIZE)
+        .read_at_addr(addr, header_size)
         .ok_or_else(|| Error::ItabRecovery(format!("itab at 0x{addr:x} unmapped")))?;
 
-    let inter_ptr = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-    let type_ptr = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-    let hash = u32::from_le_bytes(buf[16..20].try_into().unwrap());
+    let inter_ptr = rd_ptr(buf, 0, ps, le).unwrap_or(0);
+    let type_ptr = rd_ptr(buf, ps, ps, le).unwrap_or(0);
+    let hash = rd_u32(buf, 2 * ps, le).unwrap_or(0);
 
     let interface_name =
         read_type_name(bin, md, inter_ptr).unwrap_or_else(|_| format!("iface@0x{inter_ptr:x}"));
@@ -96,17 +121,15 @@ fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Itab> {
     // return the basic pairing.
     let methods = read_interface_method_names(bin, md, inter_ptr).unwrap_or_default();
 
-    // The fun[] array begins right after the 24-byte itab header. Each entry
-    // is a function pointer (8 bytes on amd64). A zero entry marks an
-    // incomplete itab.
+    // The fun[] array begins right after the itab header. Each entry is a
+    // function pointer. A zero entry marks an incomplete itab.
     let mut populated_methods = Vec::new();
     let mut incomplete = false;
-    let fun_base = addr + ITAB_HEADER_SIZE as u64;
+    let fun_base = addr + header_size as u64;
     for (i, name) in methods.iter().enumerate() {
-        let slot_addr = fun_base + (i as u64) * 8;
-        let slot = bin.read_at_addr(slot_addr, 8);
-        let concrete_fn = match slot {
-            Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
+        let slot_addr = fun_base + (i as u64) * ps as u64;
+        let concrete_fn = match bin.read_at_addr(slot_addr, ps) {
+            Some(b) => rd_ptr(b, 0, ps, le).unwrap_or(0),
             None => break,
         };
         if concrete_fn == 0 {
@@ -119,11 +142,10 @@ fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Itab> {
     }
 
     // If we couldn't enumerate methods (interface decode failed), still
-    // check the first slot as a degraded "incomplete" signal, same as
-    // before.
+    // check the first slot as a degraded "incomplete" signal.
     if populated_methods.is_empty() {
-        if let Some(b) = bin.read_at_addr(fun_base, 8) {
-            if u64::from_le_bytes(b.try_into().unwrap()) == 0 {
+        if let Some(b) = bin.read_at_addr(fun_base, ps) {
+            if rd_ptr(b, 0, ps, le).unwrap_or(0) == 0 {
                 incomplete = true;
             }
         }
@@ -163,16 +185,19 @@ fn read_interface_method_names(
             md.types, md.etypes
         )));
     }
-    let extra = inter_addr + TYPE_HEADER_SIZE as u64;
-    // PkgPath Name (8 bytes) then Methods slice header (24 bytes).
+    let ps = bin.pointer_size();
+    let le = bin.little_endian;
+    let extra = inter_addr + type_header_size(ps) as u64;
+    // PkgPath Name (one pointer) then Methods slice header (data, len, cap).
     let buf = bin
-        .read_at_addr(extra, 8 + 24)
+        .read_at_addr(extra, 4 * ps)
         .ok_or_else(|| Error::ItabRecovery(format!("interface extra at 0x{extra:x} unmapped")))?;
-    let methods_data = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-    let methods_len = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+    let methods_data = rd_ptr(buf, ps, ps, le).unwrap_or(0);
+    let methods_len = rd_ptr(buf, 2 * ps, ps, le).unwrap_or(0);
     if methods_len == 0 || methods_len > 256 {
         return Ok(Vec::new());
     }
+    // An imethod is two 4-byte offsets (name, typ), the same on every arch.
     let arr = bin
         .read_at_addr(methods_data, methods_len as usize * 8)
         .ok_or_else(|| {
@@ -180,7 +205,7 @@ fn read_interface_method_names(
         })?;
     let mut out = Vec::with_capacity(methods_len as usize);
     for chunk in arr.chunks_exact(8) {
-        let name_off = i32::from_le_bytes(chunk[0..4].try_into().unwrap());
+        let name_off = rd_u32(chunk, 0, le).unwrap_or(0) as i32;
         let name_addr = md.types.wrapping_add(name_off as i64 as u64);
         let name = types::read_name_public(bin, name_addr).unwrap_or_else(|_| "?".into());
         out.push(name);
@@ -189,14 +214,12 @@ fn read_interface_method_names(
 }
 
 fn read_type_name(bin: &GoBinary, md: &ModuleData, type_addr: u64) -> Result<String> {
+    let ps = bin.pointer_size();
+    let le = bin.little_endian;
     let buf = bin
-        .read_at_addr(type_addr, TYPE_HEADER_SIZE)
+        .read_at_addr(type_addr, type_header_size(ps))
         .ok_or_else(|| Error::ItabRecovery(format!("type header at 0x{type_addr:x} unmapped")))?;
-    let str_off = i32::from_le_bytes(
-        buf[TYPE_STR_OFFSET..TYPE_STR_OFFSET + 4]
-            .try_into()
-            .unwrap(),
-    );
+    let str_off = rd_u32(buf, type_str_offset(ps), le).unwrap_or(0) as i32;
     let name_addr = md.types.wrapping_add(str_off as i64 as u64);
     types::read_name_public(bin, name_addr).map_err(|e| Error::ItabRecovery(e.to_string()))
 }

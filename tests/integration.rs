@@ -233,6 +233,38 @@ fn recovers_itabs_on_depsdemo() {
 }
 
 #[test]
+fn recovers_itabs_on_32bit_and_big_endian() {
+    // The moduledata, itab, and type readers must honor pointer width and byte
+    // order. 386 is a 32-bit pointer width; s390x is big-endian. Both must
+    // recover the same pairings amd64 does, including the program's own Codec
+    // interface and the universal io.Writer => os.File.
+    for name in [
+        "featureset.linux-386.stripped",
+        "featureset.linux-s390x.stripped",
+    ] {
+        let Some(path) = fixture(name) else {
+            continue;
+        };
+        let bin = GoBinary::open(&path).expect("open binary");
+        let md = ModuleData::locate(&bin).expect("locate moduledata");
+        let pairs = itabs::recover_all(&bin, &md).expect("recover itabs");
+
+        assert!(pairs.len() > 5, "{name}: expected several itabs, got {}", pairs.len());
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.interface_name.contains("io.Writer")
+                    && p.concrete_name.contains("os.File")),
+            "{name}: expected *io.Writer => *os.File pairing"
+        );
+        assert!(
+            pairs.iter().any(|p| p.interface_name.contains("main.Codec")),
+            "{name}: expected the program's main.Codec interface"
+        );
+    }
+}
+
+#[test]
 fn itabs_filter_matches_method_names() {
     // --itabs --filter applies the predicate (interface_name OR
     // concrete_name OR any interface_method). This test pins the
