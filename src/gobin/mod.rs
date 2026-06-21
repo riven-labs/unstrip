@@ -559,7 +559,11 @@ const PCLNTAB_MAGIC_1_20_BE: [u8; 4] = [0xff, 0xff, 0xff, 0xf1];
 const PCLNTAB_MAGIC_1_18: [u8; 4] = [0xf0, 0xff, 0xff, 0xff];
 const PCLNTAB_MAGIC_1_18_BE: [u8; 4] = [0xff, 0xff, 0xff, 0xf0];
 
-fn scan_for_magic(bytes: &[u8], little_endian: bool) -> Result<(usize, usize)> {
+fn scan_for_magic(
+    bytes: &[u8],
+    sections: &[Section],
+    little_endian: bool,
+) -> Result<(usize, usize)> {
     let candidates: [[u8; 4]; 2] = if little_endian {
         [PCLNTAB_MAGIC_1_20, PCLNTAB_MAGIC_1_18]
     } else {
@@ -574,10 +578,15 @@ fn scan_for_magic(bytes: &[u8], little_endian: bool) -> Result<(usize, usize)> {
             if offset + 8 > bytes.len() {
                 break;
             }
-            let pad_ok = bytes[offset + 4] == 0 && bytes[offset + 5] == 0;
-            let quantum = bytes[offset + 6];
-            let ptrsize = bytes[offset + 7];
-            if pad_ok && matches!(quantum, 1 | 2 | 4) && matches!(ptrsize, 4 | 8) {
+            // Validate the whole pcHeader, not just the 8-byte prefix: the magic
+            // is only four bytes and turns up in string and rodata by chance. A
+            // bare pad/quantum/ptrsize check accepts those false positives, and
+            // the functab walk later fails with a confusing internal offset
+            // error (a candidate whose funcdata offset is ASCII text). Requiring
+            // the full structural check -- climbing table offsets inside the
+            // file, textStart in a text section -- rejects the stray match so the
+            // scan continues to the real header, or reports none found.
+            if pcheader_at(bytes, offset, sections, little_endian).is_some() {
                 best = Some(best.map(|b| b.min(offset)).unwrap_or(offset));
                 break;
             }
@@ -606,7 +615,7 @@ fn locate_pclntab(
     text_addr: u64,
     little_endian: bool,
 ) -> Result<(usize, usize)> {
-    match scan_for_magic(bytes, little_endian) {
+    match scan_for_magic(bytes, sections, little_endian) {
         Ok(found) => Ok(found),
         Err(_) => scan_for_pcheader(bytes, sections, text_addr, little_endian),
     }
