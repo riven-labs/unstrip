@@ -154,6 +154,11 @@ impl GoBinary {
     }
 
     pub fn parse(bytes: Vec<u8>) -> Result<Self> {
+        // A Mach-O universal (fat) binary holds several arch slices. Select one
+        // and parse it as a standalone Mach-O so every offset is consistent.
+        if let Some(slice) = fat_slice(&bytes) {
+            return Self::parse(slice);
+        }
         let parsed = describe(&bytes)?;
         finish(bytes, parsed)
     }
@@ -207,6 +212,41 @@ struct Described {
     pclntab_size: usize,
     pclntab_addr: u64,
     text_addr: u64,
+}
+
+/// If `bytes` is a Mach-O universal (fat) binary, return the bytes of one arch
+/// slice to parse on its own. Prefer amd64 (the arch relift can also
+/// decompile), then arm64, then the first slice. Returns None for non-fat
+/// input, so the common path pays only a 4-byte magic check.
+fn fat_slice(bytes: &[u8]) -> Option<Vec<u8>> {
+    // FAT_MAGIC / FAT_MAGIC_64, stored big-endian. (Java class files share
+    // 0xcafebabe, so confirm with a real parse below.)
+    let fat_magic = matches!(
+        bytes.get(0..4),
+        Some([0xca, 0xfe, 0xba, 0xbe]) | Some([0xca, 0xfe, 0xba, 0xbf])
+    );
+    if !fat_magic {
+        return None;
+    }
+    let Ok(Object::Mach(goblin::mach::Mach::Fat(fat))) = Object::parse(bytes) else {
+        return None;
+    };
+    use goblin::mach::cputype::{CPU_TYPE_ARM64, CPU_TYPE_X86_64};
+    const MAX_FAT_ARCHES: usize = 64;
+    let mut best: Option<(usize, usize, u8)> = None; // (offset, size, rank)
+    for arch in fat.iter_arches().take(MAX_FAT_ARCHES).flatten() {
+        let rank = match arch.cputype() {
+            CPU_TYPE_X86_64 => 0,
+            CPU_TYPE_ARM64 => 1,
+            _ => 2,
+        };
+        if best.map_or(true, |(_, _, r)| rank < r) {
+            best = Some((arch.offset as usize, arch.size as usize, rank));
+        }
+    }
+    let (off, size, _) = best?;
+    let end = off.checked_add(size).filter(|&e| e <= bytes.len())?;
+    Some(bytes[off..end].to_vec())
 }
 
 fn describe(bytes: &[u8]) -> Result<Described> {

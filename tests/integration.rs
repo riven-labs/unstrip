@@ -264,6 +264,53 @@ fn recovers_itabs_on_32bit_and_big_endian() {
     }
 }
 
+/// Wrap arch slices in a Mach-O universal (fat) header. cputype/data pairs;
+/// offsets are 16k-aligned, all fields big-endian, matching the on-disk format.
+fn make_fat(slices: &[(u32, &[u8])]) -> Vec<u8> {
+    let align = 0x4000usize;
+    let round = |n: usize| n.div_ceil(align) * align;
+    let mut out = Vec::new();
+    out.extend_from_slice(&0xcafebabeu32.to_be_bytes()); // FAT_MAGIC
+    out.extend_from_slice(&(slices.len() as u32).to_be_bytes());
+    let mut offset = round(8 + slices.len() * 20);
+    let mut offsets = Vec::new();
+    for (cputype, data) in slices {
+        out.extend_from_slice(&cputype.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes()); // cpusubtype
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(&14u32.to_be_bytes()); // align = 2^14
+        offsets.push(offset);
+        offset = round(offset + data.len());
+    }
+    for ((_, data), off) in slices.iter().zip(offsets) {
+        out.resize(off, 0);
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+#[test]
+fn parses_macho_universal_and_selects_amd64() {
+    let (Some(amd), Some(arm)) = (
+        fixture("hello.darwin-amd64.stripped"),
+        fixture("hello.darwin-arm64.stripped"),
+    ) else {
+        return;
+    };
+    let amd = std::fs::read(amd).expect("read amd64 slice");
+    let arm = std::fs::read(arm).expect("read arm64 slice");
+    // arm64 first, so a pass proves selection prefers amd64 over slice order.
+    let fat = make_fat(&[(0x0100000c, &arm), (0x01000007, &amd)]);
+
+    let bin = GoBinary::parse(fat).expect("parse universal binary");
+    assert_eq!(bin.arch.as_str(), "amd64", "should select the amd64 slice");
+    assert!(
+        ModuleData::locate(&bin).is_ok(),
+        "moduledata should locate in the selected slice"
+    );
+}
+
 #[test]
 fn itabs_filter_matches_method_names() {
     // --itabs --filter applies the predicate (interface_name OR
@@ -2027,11 +2074,11 @@ fn pe_with_huge_image_base_does_not_overflow() {
 #[test]
 fn fat_binary_with_absurd_arch_count_bails_fast() {
     // A crafted universal (fat) Mach-O header can claim billions of arch
-    // slices. Counting them to fill the unsupported-format error must not walk
-    // the claimed count: with overflow-safe but uncapped iteration this single
-    // 8-byte header spun for over a minute under instrumentation. Pin that the
-    // claimed count is capped, so parse returns the FatBinary error well under a
-    // second. Found by fuzzing the recovery stack.
+    // slices. Walking the claimed count to select a slice must not spin: with
+    // uncapped iteration this single 8-byte header ran for over a minute under
+    // instrumentation. The arch walk is capped, and the bogus slices it does
+    // see do not resolve, so parse bails to an error well under a second
+    // without panicking. Found by fuzzing the recovery stack.
     let mut bytes = vec![0xca, 0xfe, 0xba, 0xbe]; // FAT_MAGIC, big-endian
     bytes.extend_from_slice(&0xCFFF_FFFEu32.to_be_bytes()); // nfat_arch ~3.5 billion
     bytes.resize(64, 0); // truncated arch table; the count is the only hostile field
@@ -2039,17 +2086,13 @@ fn fat_binary_with_absurd_arch_count_bails_fast() {
     let start = std::time::Instant::now();
     let result = GoBinary::parse(bytes);
     let elapsed = start.elapsed();
-    let err = match result {
-        Ok(_) => panic!("fat binary must be refused"),
-        Err(e) => e,
-    };
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "counting fat arches took {elapsed:?}; the claimed count must be capped"
+        result.is_err(),
+        "a fat header with no resolvable slice must not parse"
     );
     assert!(
-        matches!(err, unstrip::Error::FatBinary { .. }),
-        "expected FatBinary error, got {err:?}"
+        elapsed < std::time::Duration::from_secs(2),
+        "selecting a fat slice took {elapsed:?}; the claimed count must be capped"
     );
 }
 
