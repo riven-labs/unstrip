@@ -277,11 +277,15 @@ fn linear_scan_types_region(
 /// address; bounded by the [types, etypes) region.
 fn recover_focused(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
     let ps = bin.pointer_size();
-    if ps != 8 {
-        // 32-bit Go support exists but the offsets and struct sizes shift.
-        // Wire it in when we have a 32-bit fixture to test against.
+    if ps != 8 || !bin.little_endian {
+        // The kind-specific readers below (struct fields, map buckets, func
+        // params) still assume 64-bit little-endian field offsets. Function
+        // names, moduledata, and itab/interface recovery already handle 32-bit
+        // and big-endian; the type graph does not yet, so refuse rather than
+        // return field offsets and names read at the wrong width or byte order.
+        let order = if bin.little_endian { "little-endian" } else { "big-endian" };
         return Err(Error::TypeRecovery(format!(
-            "type recovery requires pointer size 8, got {ps}"
+            "type-graph recovery needs 64-bit little-endian (got pointer size {ps}, {order})"
         )));
     }
 
