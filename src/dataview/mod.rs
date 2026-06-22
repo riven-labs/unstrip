@@ -319,7 +319,7 @@ fn rows_slice_headers(start: u64, bytes: &[u8], ctx: &SymCtx) -> Vec<DataRow> {
     out
 }
 
-fn rows_strings(start: u64, bytes: &[u8], bin: &GoBinary, ctx: &SymCtx) -> Vec<DataRow> {
+fn rows_strings(start: u64, bytes: &[u8], bin: &GoBinary, _ctx: &SymCtx) -> Vec<DataRow> {
     let mut out = Vec::new();
     for (i, chunk) in bytes.chunks(16).enumerate() {
         if chunk.len() < 16 {
@@ -327,21 +327,39 @@ fn rows_strings(start: u64, bytes: &[u8], bin: &GoBinary, ctx: &SymCtx) -> Vec<D
         }
         let data_ptr = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
         let len = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
-        let preview = read_string_preview(bin, data_ptr, len);
-        let preview_render = match preview {
-            Some(s) => format!("{s:?}"),
-            None => format!("({})", ctx.symbolize(data_ptr).render()),
-        };
         out.push(DataRow {
             addr: start + (i as u64) * 16,
             bytes: chunk.to_vec(),
-            rendering: format!(
-                "string{{ ptr=0x{:016x}, len={} }} {}",
-                data_ptr, len, preview_render,
-            ),
+            rendering: render_string_header(bin, data_ptr, len),
         });
     }
     out
+}
+
+/// Render a 16-byte window as a Go string header, telling the truth when it is
+/// not one. Reading code or a pointer field as a string (a wrong `--data-as
+/// string`) yields a wild pointer and a nonsense length; presenting that as a
+/// string with a quiet "(unmapped)" reads as real data. So reject an implausible
+/// header outright and point at `--data-as bytes`. A real header with non-text
+/// bytes is labelled as such rather than dropped.
+fn render_string_header(bin: &GoBinary, ptr: u64, len: u64) -> String {
+    if len == 0 {
+        return format!("string{{ ptr=0x{ptr:016x}, len=0 }} (empty)");
+    }
+    if !bin.sections.iter().any(|s| s.contains_addr(ptr)) {
+        return format!(
+            "not a string header here: pointer 0x{ptr:016x} is unmapped (try --data-as bytes)"
+        );
+    }
+    if len as usize > bin.bytes.len() {
+        return format!(
+            "not a string header here: length {len} exceeds the file (try --data-as bytes)"
+        );
+    }
+    match read_string_preview(bin, ptr, len) {
+        Some(s) => format!("string{{ ptr=0x{ptr:016x}, len={len} }} {s:?}"),
+        None => format!("string{{ ptr=0x{ptr:016x}, len={len} }} ({len} bytes, not printable text)"),
+    }
 }
 
 fn read_string_preview(bin: &GoBinary, ptr: u64, len: u64) -> Option<String> {
