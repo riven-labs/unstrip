@@ -14,6 +14,7 @@ pub mod gobin;
 pub mod goroutines;
 pub mod inline;
 pub mod itabs;
+pub mod itabsig;
 pub mod moduledata;
 pub mod output;
 pub mod pclntab;

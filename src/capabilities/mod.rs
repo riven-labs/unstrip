@@ -462,6 +462,12 @@ pub fn compute(functions: &[Function], types: &[Type], itabs: &[Itab]) -> Capabi
         }
     }
 
+    // Interface fingerprinting by method set: catches capabilities the name- and
+    // type-keyed rules miss on a garbled binary, where concrete and interface
+    // names are hashed but exported method names survive. The `iface.*` rule ids
+    // are a separate, additive channel.
+    out.extend(crate::itabsig::identify(itabs));
+
     CapabilityReport { capabilities: out }
 }
 
