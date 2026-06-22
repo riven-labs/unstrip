@@ -1472,6 +1472,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 &functions,
                 &recovered_types,
                 signatures.as_ref(),
+                "unstrip",
             )?;
         }
         plain => {
