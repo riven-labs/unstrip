@@ -216,6 +216,11 @@ struct Described {
     pclntab_size: usize,
     pclntab_addr: u64,
     text_addr: u64,
+    /// The section table was stripped and the section map was rebuilt from ELF
+    /// program headers. The executable segment's base is only a coarse text
+    /// address (it can sit a page below the real `.text`), so `finish` refines it
+    /// from `moduledata.text` when that recovers.
+    stripped_sections: bool,
 }
 
 /// If `bytes` is a Mach-O universal (fat) binary, return the bytes of one arch
@@ -244,7 +249,7 @@ fn fat_slice(bytes: &[u8]) -> Option<Vec<u8>> {
             CPU_TYPE_ARM64 => 1,
             _ => 2,
         };
-        if best.map_or(true, |(_, _, r)| rank < r) {
+        if best.is_none_or(|(_, _, r)| rank < r) {
             best = Some((arch.offset as usize, arch.size as usize, rank));
         }
     }
@@ -276,6 +281,7 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
 
     let mut sections = Vec::new();
     let mut text_addr = 0u64;
+    let mut stripped_sections = false;
     let mut pcln: Option<(usize, usize, u64)> = None;
 
     for sh in elf.section_headers.iter() {
@@ -298,6 +304,43 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
         sections.push(section);
     }
 
+    // A stripped section table (a real anti-analysis move on ELF) leaves
+    // `section_headers` empty: with no `.text` the text address stays zero and
+    // `addr_for_offset` has nothing to map, so every recovered address comes out
+    // relative to zero instead of its load VA -- wrong, and silently so. Rebuild a
+    // coarse map from the PT_LOAD program headers, which the loader needs and which
+    // malware therefore leaves intact. Each loadable segment maps a file offset to
+    // its `p_vaddr` exactly (it is the kernel's own mapping), so `addr_for_offset`
+    // becomes correct; the executable segment's base is the text address the
+    // pclntab's `textStart` is taken relative to when the header stores zero.
+    if sections.is_empty() {
+        use goblin::elf::program_header::{PF_W, PF_X, PT_LOAD};
+        stripped_sections = true;
+        for ph in elf.program_headers.iter() {
+            if ph.p_type != PT_LOAD {
+                continue;
+            }
+            let (name, kind) = if ph.p_flags & PF_X != 0 {
+                (".text", SectionKind::Text)
+            } else if ph.p_flags & PF_W != 0 {
+                (".data", SectionKind::Data)
+            } else {
+                (".rodata", SectionKind::ReadOnlyData)
+            };
+            if kind == SectionKind::Text && text_addr == 0 {
+                text_addr = ph.p_vaddr;
+            }
+            sections.push(Section {
+                name: name.to_string(),
+                kind,
+                file_offset: ph.p_offset as usize,
+                file_size: ph.p_filesz as usize,
+                addr: ph.p_vaddr,
+                vmsize: ph.p_memsz,
+            });
+        }
+    }
+
     let (pclntab_offset, pclntab_size, pclntab_addr) = match pcln {
         Some(v) => v,
         None => {
@@ -317,6 +360,7 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
         pclntab_size,
         pclntab_addr,
         text_addr,
+        stripped_sections,
     })
 }
 
@@ -424,6 +468,9 @@ fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>) -> Result<Described
         pclntab_size,
         pclntab_addr,
         text_addr,
+        // Mach-O already maps via segments/load commands, which survive a stripped
+        // section table, so there is no program-header refinement step here.
+        stripped_sections: false,
     })
 }
 
@@ -513,6 +560,9 @@ fn describe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> Result<Described> {
         pclntab_size,
         pclntab_addr,
         text_addr,
+        // PE recovers the pclntab structurally and resolves addresses through the
+        // section table / image base; no program-header refinement applies.
+        stripped_sections: false,
     })
 }
 
@@ -663,7 +713,7 @@ fn scan_for_pcheader(
         let start = s.file_offset.min(bytes.len());
         let end = s.file_offset.saturating_add(s.file_size).min(bytes.len());
         // pcHeaders are pointer-aligned; step by 8 from an aligned start.
-        let mut off = start + (start % 8 == 0).then_some(0).unwrap_or(8 - start % 8);
+        let mut off = start + if start % 8 == 0 { 0 } else { 8 - start % 8 };
         while off + 8 <= end {
             if let Some(size) = pcheader_at(bytes, off, sections, little_endian) {
                 return Ok((off, size));
@@ -753,7 +803,7 @@ fn finish(bytes: Vec<u8>, d: Described) -> Result<GoBinary> {
         s.file_offset = s.file_offset.min(len);
         s.file_size = s.file_size.min(len - s.file_offset);
     }
-    Ok(GoBinary {
+    let mut bin = GoBinary {
         bytes,
         container: d.container,
         arch: d.arch,
@@ -764,7 +814,26 @@ fn finish(bytes: Vec<u8>, d: Described) -> Result<GoBinary> {
         pclntab_size: d.pclntab_size,
         pclntab_addr: d.pclntab_addr,
         text_addr: d.text_addr,
-    })
+    };
+
+    // When the section table was stripped, `text_addr` is only the executable
+    // segment's base, which can sit a page below the real `.text` -- and the
+    // pclntab's `textStart` is the value function addresses are taken relative to
+    // when it stores zero, so a coarse base shifts every recovered address by that
+    // gap. `moduledata.text` is the authoritative text start (`runtime.text`),
+    // recovered without the section table by scanning the data for the pclntab
+    // pointer. Refine from it when it parses to a plausible value; otherwise keep
+    // the segment base, which is still far closer than zero. Best-effort: a failure
+    // here never breaks parsing.
+    if d.stripped_sections {
+        if let Ok(md) = crate::moduledata::ModuleData::locate(&bin) {
+            if md.text != 0 {
+                bin.text_addr = md.text;
+            }
+        }
+    }
+
+    Ok(bin)
 }
 
 #[cfg(test)]
@@ -835,6 +904,7 @@ mod tests {
             pclntab_size: 0,
             pclntab_addr: 0,
             text_addr: 0x1000,
+            stripped_sections: false,
         };
         let bin = finish(vec![0u8; 100], d).expect("finish");
         let s = &bin.sections[0];
