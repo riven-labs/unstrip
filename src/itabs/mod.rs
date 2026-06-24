@@ -50,7 +50,11 @@ fn rd_ptr(buf: &[u8], off: usize, ps: usize, le: bool) -> Option<u64> {
 /// Read a u32 at `off` in the binary's endianness.
 fn rd_u32(buf: &[u8], off: usize, le: bool) -> Option<u32> {
     let b: [u8; 4] = buf.get(off..off + 4)?.try_into().ok()?;
-    Some(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+    Some(if le {
+        u32::from_le_bytes(b)
+    } else {
+        u32::from_be_bytes(b)
+    })
 }
 
 /// The `_type` (rtype) header: four uintptr fields (size, ptrdata, equal,

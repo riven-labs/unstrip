@@ -283,7 +283,11 @@ fn recover_focused(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
         // names, moduledata, and itab/interface recovery already handle 32-bit
         // and big-endian; the type graph does not yet, so refuse rather than
         // return field offsets and names read at the wrong width or byte order.
-        let order = if bin.little_endian { "little-endian" } else { "big-endian" };
+        let order = if bin.little_endian {
+            "little-endian"
+        } else {
+            "big-endian"
+        };
         return Err(Error::TypeRecovery(format!(
             "type-graph recovery needs 64-bit little-endian (got pointer size {ps}, {order})"
         )));

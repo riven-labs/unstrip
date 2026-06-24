@@ -890,7 +890,10 @@ mod tests {
     #[test]
     fn pre_118_magics_are_rejected_by_version() {
         // The known pre-1.18 layouts are named and refused...
-        assert_eq!(unsupported_pre118_magic(0xfffffffa), Some("Go 1.16 or 1.17"));
+        assert_eq!(
+            unsupported_pre118_magic(0xfffffffa),
+            Some("Go 1.16 or 1.17")
+        );
         assert_eq!(unsupported_pre118_magic(0xfffffffb), Some("Go 1.2 to 1.15"));
         // ...while the supported magics and an unknown (garble-rewritten) value
         // pass through to the structural checks.

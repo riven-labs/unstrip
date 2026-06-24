@@ -358,7 +358,9 @@ fn render_string_header(bin: &GoBinary, ptr: u64, len: u64) -> String {
     }
     match read_string_preview(bin, ptr, len) {
         Some(s) => format!("string{{ ptr=0x{ptr:016x}, len={len} }} {s:?}"),
-        None => format!("string{{ ptr=0x{ptr:016x}, len={len} }} ({len} bytes, not printable text)"),
+        None => {
+            format!("string{{ ptr=0x{ptr:016x}, len={len} }} ({len} bytes, not printable text)")
+        }
     }
 }
 

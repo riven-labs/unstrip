@@ -94,7 +94,11 @@ fn packer_by_section_name(name: &str) -> Option<&'static str> {
 }
 
 /// Decide a packer/obfuscation verdict from the section table and entropy.
-fn packer_verdict(sections: &[SectionInfo], has_go_pclntab: bool, file_entropy: f64) -> Option<String> {
+fn packer_verdict(
+    sections: &[SectionInfo],
+    has_go_pclntab: bool,
+    file_entropy: f64,
+) -> Option<String> {
     for s in sections {
         if let Some(label) = packer_by_section_name(&s.name) {
             return Some(format!("{label} (section `{}`)", s.name));
@@ -104,7 +108,11 @@ fn packer_verdict(sections: &[SectionInfo], has_go_pclntab: bool, file_entropy: 
     let exec_hi = sections
         .iter()
         .filter(|s| s.executable && s.file_size >= 1024)
-        .max_by(|a, b| a.entropy.partial_cmp(&b.entropy).unwrap_or(std::cmp::Ordering::Equal));
+        .max_by(|a, b| {
+            a.entropy
+                .partial_cmp(&b.entropy)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     if let Some(s) = exec_hi {
         if s.entropy >= 7.2 {
             return Some(format!(
@@ -199,7 +207,11 @@ fn probe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> ContainerProbe {
         let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("").to_string();
         // NOBITS (.bss) occupies no file bytes; skip its file range/entropy.
         let occupies_file = sh.sh_type != goblin::elf::section_header::SHT_NOBITS;
-        let fsize = if occupies_file { sh.sh_size as usize } else { 0 };
+        let fsize = if occupies_file {
+            sh.sh_size as usize
+        } else {
+            0
+        };
         let data = slice(bytes, sh.sh_offset as usize, fsize);
         if occupies_file {
             max_file_end = max_file_end.max((sh.sh_offset as usize).saturating_add(fsize));
@@ -213,7 +225,15 @@ fn probe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> ContainerProbe {
             executable: (sh.sh_flags & SHF_EXECINSTR as u64) != 0,
         });
     }
-    finish("ELF", arch, bits, elf.little_endian, bytes, sections, max_file_end)
+    finish(
+        "ELF",
+        arch,
+        bits,
+        elf.little_endian,
+        bytes,
+        sections,
+        max_file_end,
+    )
 }
 
 fn probe_mach(bytes: &[u8], macho: goblin::mach::MachO<'_>) -> ContainerProbe {
@@ -238,8 +258,8 @@ fn probe_mach(bytes: &[u8], macho: goblin::mach::MachO<'_>) -> ContainerProbe {
                 let size = sect.size as usize;
                 let data = slice(bytes, off, size);
                 max_file_end = max_file_end.max(off.saturating_add(size));
-                let executable = seg_exec
-                    || sect.flags & goblin::mach::constants::S_ATTR_PURE_INSTRUCTIONS != 0;
+                let executable =
+                    seg_exec || sect.flags & goblin::mach::constants::S_ATTR_PURE_INSTRUCTIONS != 0;
                 sections.push(SectionInfo {
                     name,
                     vaddr: sect.addr,
@@ -251,7 +271,15 @@ fn probe_mach(bytes: &[u8], macho: goblin::mach::MachO<'_>) -> ContainerProbe {
             }
         }
     }
-    finish("Mach-O", arch, bits, macho.little_endian, bytes, sections, max_file_end)
+    finish(
+        "Mach-O",
+        arch,
+        bits,
+        macho.little_endian,
+        bytes,
+        sections,
+        max_file_end,
+    )
 }
 
 fn probe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> ContainerProbe {
@@ -293,7 +321,7 @@ mod tests {
     fn entropy_bounds() {
         assert_eq!(entropy(&[]), 0.0);
         assert_eq!(entropy(&[7, 7, 7, 7]), 0.0); // single symbol -> 0 bits
-        // A uniform 0..=255 ramp uses every symbol once -> 8 bits/byte.
+                                                 // A uniform 0..=255 ramp uses every symbol once -> 8 bits/byte.
         let ramp: Vec<u8> = (0..=255).collect();
         assert!((entropy(&ramp) - 8.0).abs() < 1e-9);
     }

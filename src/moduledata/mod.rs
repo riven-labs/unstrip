@@ -244,7 +244,11 @@ fn read_ptr(bytes: &[u8], off: usize, ps: usize, le: bool) -> Option<u64> {
 /// Read a u32 at `off` in the binary's endianness.
 fn read_u32_e(bytes: &[u8], off: usize, le: bool) -> Option<u32> {
     let b: [u8; 4] = bytes.get(off..off + 4)?.try_into().ok()?;
-    Some(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+    Some(if le {
+        u32::from_le_bytes(b)
+    } else {
+        u32::from_be_bytes(b)
+    })
 }
 
 /// Translate a runtime VA to a file offset. Returns None when the VA
@@ -268,7 +272,8 @@ fn vaddr_to_file_offset(bin: &GoBinary, vaddr: u64) -> Option<usize> {
 /// field. The target of that pointer should be 4-byte-aligned and start
 /// with a pclntab magic (0xfffffff0 or 0xfffffff1).
 fn looks_like_moduledata(bin: &GoBinary, file_off: usize) -> bool {
-    let Some(pc_header_addr) = read_ptr(&bin.bytes, file_off, bin.pointer_size(), bin.little_endian)
+    let Some(pc_header_addr) =
+        read_ptr(&bin.bytes, file_off, bin.pointer_size(), bin.little_endian)
     else {
         return false;
     };
@@ -307,9 +312,7 @@ fn scan_section(
     let start = section.file_offset;
     // A crafted section header can carry a file_offset + file_size that overflows
     // usize; that wraps end small and the slice below panics. Bail instead.
-    let Some(end) = start.checked_add(section.file_size) else {
-        return None;
-    };
+    let end = start.checked_add(section.file_size)?;
     if end > bin.bytes.len() {
         return None;
     }
@@ -608,11 +611,19 @@ impl<'a> Reader<'a> {
         let v = match self.ps {
             8 => {
                 let arr: [u8; 8] = self.bytes[self.pos..end].try_into().unwrap();
-                if self.le { u64::from_le_bytes(arr) } else { u64::from_be_bytes(arr) }
+                if self.le {
+                    u64::from_le_bytes(arr)
+                } else {
+                    u64::from_be_bytes(arr)
+                }
             }
             4 => {
                 let arr: [u8; 4] = self.bytes[self.pos..end].try_into().unwrap();
-                (if self.le { u32::from_le_bytes(arr) } else { u32::from_be_bytes(arr) }) as u64
+                (if self.le {
+                    u32::from_le_bytes(arr)
+                } else {
+                    u32::from_be_bytes(arr)
+                }) as u64
             }
             _ => unreachable!(),
         };

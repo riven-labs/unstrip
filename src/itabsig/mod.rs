@@ -58,7 +58,14 @@ static FINGERPRINTS: &[Fingerprint] = &[
         interface: "golang.org/x/crypto/ssh.Conn",
     },
     Fingerprint {
-        methods: &["Close", "CloseWrite", "Read", "SendRequest", "Stderr", "Write"],
+        methods: &[
+            "Close",
+            "CloseWrite",
+            "Read",
+            "SendRequest",
+            "Stderr",
+            "Write",
+        ],
         rule_id: "iface.ssh",
         name: "SSH transport",
         category: "network",
@@ -310,7 +317,14 @@ mod tests {
             "User",
             "Wait",
         ]);
-        let chan = itab_with(&["Close", "CloseWrite", "Read", "SendRequest", "Stderr", "Write"]);
+        let chan = itab_with(&[
+            "Close",
+            "CloseWrite",
+            "Read",
+            "SendRequest",
+            "Stderr",
+            "Write",
+        ]);
         let caps = identify(&[conn, chan]);
         assert_eq!(caps.len(), 1, "both ssh interfaces share rule_id iface.ssh");
         assert_eq!(caps[0].rule_id, "iface.ssh");

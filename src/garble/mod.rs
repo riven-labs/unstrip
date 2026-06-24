@@ -531,7 +531,7 @@ pub fn recover_reflect_names(bin: &GoBinary) -> Option<ReflectNames> {
                     p += 16;
                 }
                 if let Some(map) = pairs_from_run(&run) {
-                    if best.as_ref().map_or(true, |b| map.len() > b.len()) {
+                    if best.as_ref().is_none_or(|b| map.len() > b.len()) {
                         best = Some(map);
                     }
                 }
@@ -589,7 +589,7 @@ fn pairs_from_run(run: &[String]) -> Option<ReflectNames> {
                     .iter()
                     .map(|(key, val)| ((*key).clone(), (*val).clone()))
                     .collect();
-                if best.as_ref().map_or(true, |b| map.len() > b.len()) {
+                if best.as_ref().is_none_or(|b| map.len() > b.len()) {
                     best = Some(ReflectNames { obf_to_orig: map });
                 }
             }
@@ -602,9 +602,7 @@ fn pairs_from_run(run: &[String]) -> Option<ReflectNames> {
 /// A garble key is a base64-derived identifier: only `[A-Za-z0-9_]`, no dots or
 /// slashes, within a plausible hash length.
 fn is_identifier_token(s: &str) -> bool {
-    (1..=32).contains(&s.len())
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    (1..=32).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 #[cfg(test)]
