@@ -1062,7 +1062,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let old_pcln = Pclntab::parse(&old_bin)?;
         let old_funcs = old_pcln.functions()?;
         let new_funcs = pcln.functions()?;
-        let report = unstrip::diff::compute(&old_funcs, &new_funcs);
+        // unstrip matches by recovered name; code-signature rename detection lives
+        // in relift, so this CLI passes no signatures and pairs by name alone.
+        let report = unstrip::diff::compute(&old_funcs, &new_funcs, None, None);
 
         if let Some(target) = &args.port_symbols {
             let t = match target.as_str() {
@@ -1092,11 +1094,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 writeln!(out, "new:        {} functions", report.new_total)?;
                 writeln!(out)?;
                 writeln!(out, "identical:  {}", report.identical)?;
-                writeln!(out, "renamed:    {}", report.renamed)?;
+                writeln!(out, "moved:      {} (same name, new address)", report.moved)?;
                 writeln!(
                     out,
-                    "moved addr: {} (same address, different name)",
-                    report.address_moved
+                    "renamed:    {} (same code, different name)",
+                    report.renamed
                 )?;
                 writeln!(out, "added:      {} (in new, not in old)", report.added)?;
                 writeln!(out, "removed:    {} (in old, not in new)", report.removed)?;
@@ -1570,17 +1572,18 @@ fn print_pairing<W: Write>(w: &mut W, p: &unstrip::diff::Pairing) -> io::Result<
             p.old_addr.unwrap_or(0),
             p.old_name.as_deref().unwrap_or("?")
         ),
-        MatchKind::Renamed => writeln!(
+        MatchKind::Moved => writeln!(
             w,
-            "  R  0x{:x} -> 0x{:x}  {}",
+            "  M  0x{:x} -> 0x{:x}  {}",
             p.old_addr.unwrap_or(0),
             p.new_addr.unwrap_or(0),
             p.old_name.as_deref().unwrap_or("?")
         ),
-        MatchKind::AddressMoved => writeln!(
+        MatchKind::Renamed => writeln!(
             w,
-            "  M  0x{:x}  {}  ->  {}",
+            "  R  0x{:x} -> 0x{:x}  {}  ->  {}",
             p.old_addr.unwrap_or(0),
+            p.new_addr.unwrap_or(0),
             p.old_name.as_deref().unwrap_or("?"),
             p.new_name.as_deref().unwrap_or("?")
         ),

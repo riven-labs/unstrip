@@ -2,21 +2,27 @@
 //! a diff suitable for porting annotations across malware-family
 //! rebuilds.
 //!
-//! The matching strategy is two-pass:
+//! The matching strategy keys on identity, not address, because a rebuild
+//! relinks everything at new offsets -- address-first matching reports the
+//! whole binary as "moved" and is noise:
 //!
-//! 1. **By address.** Functions at the same `address` in old and new are
-//!    paired directly. On a minor-version bump this catches most of the
-//!    binary because the linker typically rebuilds at the same offsets.
-//! 2. **By name (only when both also disagree on address).** Functions
-//!    with the same recovered Go name in both binaries but different
-//!    addresses are paired with a `moved` flag. The analyst can carry
-//!    over their renames at the new address.
+//! 1. **By recovered name.** The stable identity across a rebuild. Same name
+//!    is the same function; if the address also matches it is `Identical`,
+//!    otherwise it `Moved` (the common case -- the function is unchanged, the
+//!    linker just placed it elsewhere).
+//! 2. **By masked-code signature**, for what name-matching left over. Same code
+//!    under a different name is a real `Renamed`, and on a `garble` build --
+//!    where every name is a per-build hash, so step 1 matches almost nothing --
+//!    this is what pairs the two builds at all. Only signatures that are unique
+//!    on both sides are paired, so an ambiguous hash is never matched by guess.
+//!    Signatures are supplied by the caller (the matcher itself does not decode
+//!    instructions); pass `None` to match by name alone.
 //!
 //! Everything left over is either `added` (in new, not in old) or
 //! `removed` (in old, not in new). That's the worklist the analyst opens
 //! when triaging the rebuild.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -24,14 +30,14 @@ use crate::pclntab::Function;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum MatchKind {
-    /// Same address, same name. Nothing changed; existing annotations
-    /// port directly.
+    /// Same recovered name, same address. Nothing changed; existing
+    /// annotations port directly.
     Identical,
-    /// Same address, different recovered name. Rare; usually a Go
-    /// version bump that renamed an internal symbol.
-    AddressMoved,
-    /// Same name in both binaries but at a different address. Existing
-    /// annotations can be ported to the new address.
+    /// Same recovered name, different address. The function is unchanged; the
+    /// rebuild relinked it elsewhere. Annotations port to the new address.
+    Moved,
+    /// Different (or hashed) name, but the masked code matches. A genuine
+    /// rename, or the same library function under garble's per-build hash.
     Renamed,
     /// In new, no counterpart in old.
     Added,
@@ -53,33 +59,43 @@ pub struct DiffReport {
     pub old_total: usize,
     pub new_total: usize,
     pub identical: usize,
+    pub moved: usize,
     pub renamed: usize,
     pub added: usize,
     pub removed: usize,
-    pub address_moved: usize,
     pub pairings: Vec<Pairing>,
 }
 
-pub fn compute(old: &[Function], new: &[Function]) -> DiffReport {
-    let _old_by_addr: HashMap<u64, &Function> = old.iter().map(|f| (f.address, f)).collect();
-    let new_by_addr: HashMap<u64, &Function> = new.iter().map(|f| (f.address, f)).collect();
-    let new_by_name: HashMap<&str, &Function> = new.iter().map(|f| (f.name.as_str(), f)).collect();
-
+/// Diff two function sets. `old_sigs`/`new_sigs` map a function's address to its
+/// masked-code signature (see the module docs); pass `None` to match by name only.
+pub fn compute(
+    old: &[Function],
+    new: &[Function],
+    old_sigs: Option<&HashMap<u64, u64>>,
+    new_sigs: Option<&HashMap<u64, u64>>,
+) -> DiffReport {
     let mut pairings = Vec::with_capacity(old.len().max(new.len()));
-    let mut matched_old: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    let mut matched_new: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut matched_old: HashSet<u64> = HashSet::new();
+    let mut matched_new: HashSet<u64> = HashSet::new();
     let mut identical = 0usize;
+    let mut moved = 0usize;
     let mut renamed = 0usize;
     let mut added = 0usize;
     let mut removed = 0usize;
-    let mut address_moved = 0usize;
 
-    // Pass 1: address-keyed matches.
+    // Pass 1: exact (name, address) -- a function that did not move at all. Keying
+    // on the pair (not name alone) is also what makes a duplicate name correct: Go
+    // emits several functions sharing a name (type-equality and hash thunks), and
+    // each is distinguished by its address, so a same-build diff pairs them all here
+    // rather than orphaning the duplicates.
+    let new_by_name_addr: HashMap<(&str, u64), &Function> = new
+        .iter()
+        .map(|g| ((g.name.as_str(), g.address), g))
+        .collect();
     for f in old {
-        if let Some(g) = new_by_addr.get(&f.address) {
-            matched_old.insert(f.address);
-            matched_new.insert(g.address);
-            if f.name == g.name {
+        if let Some(g) = new_by_name_addr.get(&(f.name.as_str(), f.address)) {
+            if matched_new.insert(g.address) {
+                matched_old.insert(f.address);
                 identical += 1;
                 pairings.push(Pairing {
                     kind: MatchKind::Identical,
@@ -88,42 +104,56 @@ pub fn compute(old: &[Function], new: &[Function]) -> DiffReport {
                     old_name: Some(f.name.clone()),
                     new_name: Some(g.name.clone()),
                 });
-            } else {
-                address_moved += 1;
-                pairings.push(Pairing {
-                    kind: MatchKind::AddressMoved,
-                    old_addr: Some(f.address),
-                    new_addr: Some(g.address),
-                    old_name: Some(f.name.clone()),
-                    new_name: Some(g.name.clone()),
-                });
             }
         }
     }
 
-    // Pass 2: name-keyed matches on whatever's left.
-    for f in old {
-        if matched_old.contains(&f.address) {
+    // Pass 2: by recovered name, for names that are unambiguous among what is still
+    // unmatched on both sides -- the function kept its name and was relinked
+    // elsewhere. An ambiguous name (the same name on two unmatched functions) is
+    // left for the signature pass rather than paired by guess.
+    let old_by_name = unique_name_index(old, &matched_old);
+    let new_by_name = unique_name_index(new, &matched_new);
+    for (name, f) in &old_by_name {
+        let Some(g) = new_by_name.get(name) else {
             continue;
-        }
-        if let Some(g) = new_by_name.get(f.name.as_str()) {
-            if matched_new.contains(&g.address) {
+        };
+        matched_old.insert(f.address);
+        matched_new.insert(g.address);
+        moved += 1;
+        pairings.push(Pairing {
+            kind: MatchKind::Moved,
+            old_addr: Some(f.address),
+            new_addr: Some(g.address),
+            old_name: Some(f.name.clone()),
+            new_name: Some(g.name.clone()),
+        });
+    }
+
+    // Pass 3: by masked-code signature, over what name-matching left unmatched.
+    // Only signatures unique on both sides are paired, so a hash shared by several
+    // unmatched functions is never matched by guess (those fall to added/removed).
+    if let (Some(os), Some(ns)) = (old_sigs, new_sigs) {
+        let old_uni = unique_sig_index(old, &matched_old, os);
+        let new_uni = unique_sig_index(new, &matched_new, ns);
+        for (sig, of) in &old_uni {
+            let Some(gf) = new_uni.get(sig) else {
                 continue;
-            }
-            matched_old.insert(f.address);
-            matched_new.insert(g.address);
+            };
+            matched_old.insert(of.address);
+            matched_new.insert(gf.address);
             renamed += 1;
             pairings.push(Pairing {
                 kind: MatchKind::Renamed,
-                old_addr: Some(f.address),
-                new_addr: Some(g.address),
-                old_name: Some(f.name.clone()),
-                new_name: Some(g.name.clone()),
+                old_addr: Some(of.address),
+                new_addr: Some(gf.address),
+                old_name: Some(of.name.clone()),
+                new_name: Some(gf.name.clone()),
             });
         }
     }
 
-    // Pass 3: leftovers.
+    // Pass 4: leftovers.
     for f in old {
         if matched_old.contains(&f.address) {
             continue;
@@ -155,12 +185,61 @@ pub fn compute(old: &[Function], new: &[Function]) -> DiffReport {
         old_total: old.len(),
         new_total: new.len(),
         identical,
+        moved,
         renamed,
         added,
         removed,
-        address_moved,
         pairings,
     }
+}
+
+/// Index the still-unmatched functions by name, keeping only names that belong to
+/// exactly one such function -- a name shared by two unmatched functions cannot be
+/// paired without guessing which is which, so it is dropped (the signature pass may
+/// still pair them by code).
+fn unique_name_index<'a>(
+    funcs: &'a [Function],
+    matched: &HashSet<u64>,
+) -> HashMap<&'a str, &'a Function> {
+    let mut count: HashMap<&str, usize> = HashMap::new();
+    let mut first: HashMap<&str, &Function> = HashMap::new();
+    for f in funcs {
+        if matched.contains(&f.address) {
+            continue;
+        }
+        *count.entry(f.name.as_str()).or_insert(0) += 1;
+        first.entry(f.name.as_str()).or_insert(f);
+    }
+    first
+        .into_iter()
+        .filter(|(name, _)| count.get(name) == Some(&1))
+        .collect()
+}
+
+/// Index the still-unmatched functions by signature, keeping only signatures that
+/// belong to exactly one such function -- an ambiguous hash cannot be paired
+/// without guessing, so it is dropped.
+fn unique_sig_index<'a>(
+    funcs: &'a [Function],
+    matched: &HashSet<u64>,
+    sigs: &HashMap<u64, u64>,
+) -> HashMap<u64, &'a Function> {
+    let mut count: HashMap<u64, usize> = HashMap::new();
+    let mut first: HashMap<u64, &Function> = HashMap::new();
+    for f in funcs {
+        if matched.contains(&f.address) {
+            continue;
+        }
+        let Some(&sig) = sigs.get(&f.address) else {
+            continue;
+        };
+        *count.entry(sig).or_insert(0) += 1;
+        first.entry(sig).or_insert(f);
+    }
+    first
+        .into_iter()
+        .filter(|(sig, _)| count.get(sig) == Some(&1))
+        .collect()
 }
 
 /// Emit a port-symbols script for the given target. The script, run
@@ -211,7 +290,9 @@ pub fn write_port_script(target: crate::export::Target, report: &DiffReport) -> 
 
     for p in &report.pairings {
         match p.kind {
-            MatchKind::Identical | MatchKind::Renamed => {
+            // Every matched pairing carries the old name to wherever the function
+            // now lives, whether it stayed put, moved, or was renamed.
+            MatchKind::Identical | MatchKind::Moved | MatchKind::Renamed => {
                 if let (Some(addr), Some(name)) = (p.new_addr, &p.old_name) {
                     s.push_str(&format!("_rename(0x{addr:x}, {})\n", quote_py(name)));
                 }
@@ -221,9 +302,10 @@ pub fn write_port_script(target: crate::export::Target, report: &DiffReport) -> 
     }
 
     s.push_str(&format!(
-        "\nprint('unstrip: ported {} symbols ({} unchanged, {} renamed, {} added in new, {} removed from old)')\n",
-        report.identical + report.renamed,
+        "\nprint('unstrip: ported {} symbols ({} unchanged, {} moved, {} renamed, {} added in new, {} removed from old)')\n",
+        report.identical + report.moved + report.renamed,
         report.identical,
+        report.moved,
         report.renamed,
         report.added,
         report.removed,
@@ -244,4 +326,93 @@ fn quote_py(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn f(addr: u64, name: &str) -> Function {
+        Function {
+            address: addr,
+            name: name.to_string(),
+            file: None,
+            start_line: None,
+        }
+    }
+
+    #[test]
+    fn self_diff_is_all_identical_even_with_duplicate_names() {
+        // Two functions share a name (Go does this for type-equality thunks);
+        // address disambiguates, so a same-build diff must pair every one as
+        // identical -- never orphan a duplicate into added/removed.
+        let fns = vec![
+            f(0x1000, "main.main"),
+            f(0x1100, "type..eq.T"),
+            f(0x1200, "type..eq.T"),
+        ];
+        let r = compute(&fns, &fns, None, None);
+        assert_eq!(r.identical, 3);
+        assert_eq!(r.moved, 0);
+        assert_eq!(r.renamed, 0);
+        assert_eq!(r.added, 0);
+        assert_eq!(r.removed, 0);
+    }
+
+    #[test]
+    fn a_rebuild_relocates_functions_as_moved_not_renamed() {
+        // Same names, every address shifted: the bulk of a version bump. These are
+        // moves (the function is unchanged), not renames.
+        let old = vec![f(0x1000, "main.a"), f(0x1100, "main.b")];
+        let new = vec![f(0x2000, "main.a"), f(0x2100, "main.b")];
+        let r = compute(&old, &new, None, None);
+        assert_eq!(r.moved, 2);
+        assert_eq!(r.identical, 0);
+        assert_eq!(r.renamed, 0);
+    }
+
+    #[test]
+    fn a_real_rename_is_found_by_signature_not_name() {
+        // The function moved AND was renamed; only its code signature pairs it. With
+        // signatures it reads as one rename; without them it falls to add/remove.
+        let old = vec![f(0x1000, "main.old")];
+        let new = vec![f(0x2000, "main.new")];
+        let old_sigs: HashMap<u64, u64> = [(0x1000, 0xABCD)].into_iter().collect();
+        let new_sigs: HashMap<u64, u64> = [(0x2000, 0xABCD)].into_iter().collect();
+
+        let r = compute(&old, &new, Some(&old_sigs), Some(&new_sigs));
+        assert_eq!(r.renamed, 1);
+        assert_eq!(r.added, 0);
+        assert_eq!(r.removed, 0);
+
+        let r = compute(&old, &new, None, None);
+        assert_eq!(r.renamed, 0);
+        assert_eq!(r.added, 1);
+        assert_eq!(r.removed, 1);
+    }
+
+    #[test]
+    fn an_ambiguous_signature_is_not_paired_by_guess() {
+        // Two unmatched functions per side share one signature: pairing either way
+        // would be a guess, so none are paired -- they fall to add/remove.
+        let old = vec![f(0x1000, "old.a"), f(0x1100, "old.b")];
+        let new = vec![f(0x2000, "new.a"), f(0x2100, "new.b")];
+        let sig: u64 = 0x1111;
+        let old_sigs: HashMap<u64, u64> = [(0x1000, sig), (0x1100, sig)].into_iter().collect();
+        let new_sigs: HashMap<u64, u64> = [(0x2000, sig), (0x2100, sig)].into_iter().collect();
+        let r = compute(&old, &new, Some(&old_sigs), Some(&new_sigs));
+        assert_eq!(r.renamed, 0);
+        assert_eq!(r.added, 2);
+        assert_eq!(r.removed, 2);
+    }
+
+    #[test]
+    fn added_and_removed_are_reported() {
+        let old = vec![f(0x1000, "shared"), f(0x1100, "gone")];
+        let new = vec![f(0x1000, "shared"), f(0x1200, "fresh")];
+        let r = compute(&old, &new, None, None);
+        assert_eq!(r.identical, 1);
+        assert_eq!(r.removed, 1);
+        assert_eq!(r.added, 1);
+    }
 }

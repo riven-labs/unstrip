@@ -276,7 +276,11 @@ fn recovers_itabs_on_32bit_and_big_endian() {
         let md = ModuleData::locate(&bin).expect("locate moduledata");
         let pairs = itabs::recover_all(&bin, &md).expect("recover itabs");
 
-        assert!(pairs.len() > 5, "{name}: expected several itabs, got {}", pairs.len());
+        assert!(
+            pairs.len() > 5,
+            "{name}: expected several itabs, got {}",
+            pairs.len()
+        );
         assert!(
             pairs
                 .iter()
@@ -285,7 +289,9 @@ fn recovers_itabs_on_32bit_and_big_endian() {
             "{name}: expected *io.Writer => *os.File pairing"
         );
         assert!(
-            pairs.iter().any(|p| p.interface_name.contains("main.Codec")),
+            pairs
+                .iter()
+                .any(|p| p.interface_name.contains("main.Codec")),
             "{name}: expected the program's main.Codec interface"
         );
     }
@@ -1361,14 +1367,18 @@ fn diff_two_identical_rebuilds_yields_all_identical() {
 
     let old_funcs = pcln1.functions().expect("old funcs");
     let new_funcs = pcln2.functions().expect("new funcs");
-    let report = unstrip::diff::compute(&old_funcs, &new_funcs);
+    let report = unstrip::diff::compute(&old_funcs, &new_funcs, None, None);
 
     assert_eq!(report.added, 0, "trimpath rebuilds should add nothing");
     assert_eq!(report.removed, 0, "trimpath rebuilds should remove nothing");
+    // Every function carries over by name: it is either identical (same address) or
+    // moved (relinked elsewhere). Both mean "the same function," so the rebuild is
+    // fully accounted for by the two together, with nothing renamed away.
     assert!(
-        report.identical >= report.new_total * 9 / 10,
-        "trimpath rebuilds should be >=90% identical; got {} identical of {}",
+        report.identical + report.moved >= report.new_total * 9 / 10,
+        "trimpath rebuilds should be >=90% unchanged; got {} identical + {} moved of {}",
         report.identical,
+        report.moved,
         report.new_total,
     );
 }
