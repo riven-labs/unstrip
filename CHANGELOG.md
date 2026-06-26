@@ -7,6 +7,60 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-26
+
+### Added
+
+- `--reflect-names` recovers garble's obfuscated-to-original reflected-name
+  dictionary from the data the runtime keeps for reflection. `--degarble`
+  relabels the hashed identifiers in the function, type, and itab output
+  back to those names where they are known.
+- Parses the Go 1.26 moduledata layout. Recovery is now exercised across
+  Go 1.18 through 1.26, including PIE address rebasing and arm64 type
+  recovery.
+- Recovers itabs and reads moduledata on 32-bit and big-endian binaries.
+  Pointer size and byte order come from the container header instead of an
+  assumed 64-bit little-endian. Type-graph recovery still requires 64-bit
+  little-endian and reports a clear error rather than returning a wrong
+  answer on anything else.
+- Selects the matching slice from a Mach-O universal (fat) binary, and
+  locates moduledata through the Mach-O `go_module` section.
+- Recovers struct field tags into the type catalog.
+- Recovers the ELF load base from the program headers when an ELF has had
+  its section table stripped, so addresses still resolve.
+- Finds the pclntab structurally when its magic has been rewritten,
+  validating each candidate by layout instead of trusting the magic bytes.
+- A container probe names packed and non-Go inputs by reason, so a file
+  that is not a Go binary fails with an explanation instead of a misparse.
+- `--fingerprint` emits a stable structural hash for clustering recompiles
+  of the same source. `--behavioral` narrows it to the stdlib-interface
+  method-set vector, which stays stable under garble.
+- libfuzzer targets covering the parser entry points.
+
+### Changed
+
+- `--diff` matches functions by identity (name, then code signature)
+  instead of by address, so a rebuild that moves code still lines the two
+  binaries up.
+- The export generator records which tool produced the output, in both the
+  Ghidra metadata and the stats lines, so an export driven by another tool
+  is not labeled as unstrip.
+- `--buildinfo` degrades when the modinfo blob is stripped, reporting what
+  it can recover instead of failing.
+- `Pclntab` derives `Clone`.
+
+### Fixed
+
+- Bounds and overflow checks across the parsers for attacker-crafted
+  headers: cutab index arithmetic, moduledata section offsets, PE section
+  address arithmetic, the Mach-O fat-arch count, section file ranges, and
+  moduledata slice extents are all verified or saturated before use.
+- `--data-at` reads NOBITS sections without panicking and rejects
+  implausible string headers.
+- The pcHeader scan accepts a zero `textStart`.
+- Pre-1.18 pclntab layouts fail with an honest version error instead of a
+  partial misread.
+
 ## [1.0.0] - 2026-06-01
 
 First public release.
