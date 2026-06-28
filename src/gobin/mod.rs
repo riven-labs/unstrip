@@ -665,10 +665,88 @@ fn locate_pclntab(
     text_addr: u64,
     little_endian: bool,
 ) -> Result<(usize, usize)> {
-    match scan_for_magic(bytes, sections, little_endian) {
-        Ok(found) => Ok(found),
-        Err(_) => scan_for_pcheader(bytes, sections, text_addr, little_endian),
+    if let Ok(found) = scan_for_magic(bytes, sections, little_endian) {
+        return Ok(found);
     }
+    if let Ok(found) = scan_for_pcheader(bytes, sections, text_addr, little_endian) {
+        return Ok(found);
+    }
+    // Both scans look for the Go 1.18+ pcHeader shape. Before reporting "no
+    // pclntab" -- which an analyst reads as "not a Go binary" -- check for a
+    // pre-1.18 pclntab we recognize but do not parse. Naming the version turns a
+    // misleading container fallback into the honest "this is Go 1.16/1.17, which
+    // relift does not yet read". Consulted last, so it never downgrades a binary
+    // the real scans could parse, and a garble-rewritten (random) magic never
+    // reaches it.
+    if let Some(magic) = detect_pre118_magic(bytes, sections, little_endian) {
+        if let Some(version) = crate::pclntab::unsupported_pre118_magic(magic) {
+            return Err(Error::UnsupportedPclntabVersion { magic, version });
+        }
+    }
+    Err(Error::NoPclntab)
+}
+
+/// Pre-1.18 pclntab magics (little-endian on disk; the high byte differs from the
+/// 1.18/1.20 magics). 0xfffffffa is Go 1.16/1.17; 0xfffffffb is Go 1.2-1.15.
+const PCLNTAB_MAGIC_1_16: [u8; 4] = [0xfa, 0xff, 0xff, 0xff];
+const PCLNTAB_MAGIC_1_16_BE: [u8; 4] = [0xff, 0xff, 0xff, 0xfa];
+const PCLNTAB_MAGIC_1_2: [u8; 4] = [0xfb, 0xff, 0xff, 0xff];
+const PCLNTAB_MAGIC_1_2_BE: [u8; 4] = [0xff, 0xff, 0xff, 0xfb];
+
+/// Recognize (do not parse) a pre-1.18 pclntab and return its magic. Deliberately
+/// shallow: the pre-1.18 on-disk layout differs from 1.18+ (1.16/1.17 drop the
+/// `textStart` field; 1.2-1.15 have no climbing offset table at all), so
+/// `pcheader_at` -- which encodes the 1.18+ shape -- cannot validate them. We only
+/// need to recognize the format to choose an honest error message, so validate just
+/// the version-independent prefix every pclntab since Go 1.2 shares: the 4-byte
+/// magic, two zero pad bytes, a quantum in {1,2,4}, and a pointer size in {4,8}.
+/// The match must sit in a data-bearing section. False positives are bounded and
+/// far less harmful than the alternative: a real Go binary mislabeled "not Go".
+fn detect_pre118_magic(bytes: &[u8], sections: &[Section], little_endian: bool) -> Option<u32> {
+    let candidates: [([u8; 4], u32); 2] = if little_endian {
+        [
+            (PCLNTAB_MAGIC_1_16, 0xfffffffa),
+            (PCLNTAB_MAGIC_1_2, 0xfffffffb),
+        ]
+    } else {
+        [
+            (PCLNTAB_MAGIC_1_16_BE, 0xfffffffa),
+            (PCLNTAB_MAGIC_1_2_BE, 0xfffffffb),
+        ]
+    };
+    for s in sections {
+        match s.kind {
+            SectionKind::ReadOnlyData
+            | SectionKind::Data
+            | SectionKind::NoPtrData
+            | SectionKind::Pclntab
+            | SectionKind::Other => {}
+            SectionKind::Text | SectionKind::Bss => continue,
+        }
+        let start = s.file_offset.min(bytes.len());
+        let end = s.file_offset.saturating_add(s.file_size).min(bytes.len());
+        for (magic_bytes, magic) in &candidates {
+            let mut from = start;
+            while from < end {
+                let Some(found) = find_subslice(&bytes[from..end], magic_bytes) else {
+                    break;
+                };
+                let off = from + found;
+                // Version-independent pcHeader prefix shared by every pclntab since
+                // Go 1.2: magic(4), two zero pad bytes, quantum, pointer size.
+                if off + 8 <= bytes.len()
+                    && bytes[off + 4] == 0
+                    && bytes[off + 5] == 0
+                    && matches!(bytes[off + 6], 1 | 2 | 4)
+                    && matches!(bytes[off + 7], 4 | 8)
+                {
+                    return Some(*magic);
+                }
+                from = off + 4;
+            }
+        }
+    }
+    None
 }
 
 fn read_uint_at(bytes: &[u8], off: usize, ptr_size: usize, little_endian: bool) -> Option<u64> {
@@ -849,6 +927,62 @@ mod tests {
             addr: 0x1000,
             vmsize: 1,
         }
+    }
+
+    fn data_sec(len: usize) -> Vec<Section> {
+        vec![Section {
+            name: ".rdata".to_string(),
+            kind: SectionKind::ReadOnlyData,
+            file_offset: 0,
+            file_size: len,
+            addr: 0x1000,
+            vmsize: len as u64,
+        }]
+    }
+
+    #[test]
+    fn pre118_magic_recognized_for_honest_message() {
+        // A pre-1.18 pclntab prefix (magic, two zero pad bytes, quantum, ptr size)
+        // in a data section must be recognized so the loader reports the honest
+        // "Go 1.16/1.17 unsupported" instead of "no pclntab" (which reads as not-Go).
+        let mut bytes = vec![0u8; 256];
+        let off = 32;
+        bytes[off..off + 4].copy_from_slice(&[0xfa, 0xff, 0xff, 0xff]);
+        bytes[off + 6] = 1; // quantum (pad bytes at +4,+5 already zero)
+        bytes[off + 7] = 8; // ptr size
+        let sections = data_sec(bytes.len());
+        assert_eq!(detect_pre118_magic(&bytes, &sections, true), Some(0xfffffffa));
+        // The 1.2-1.15 magic is recognized the same way.
+        bytes[off] = 0xfb;
+        assert_eq!(detect_pre118_magic(&bytes, &sections, true), Some(0xfffffffb));
+    }
+
+    #[test]
+    fn pre118_detector_avoids_false_positives() {
+        let mut bytes = vec![0u8; 256];
+        let off = 32;
+        bytes[off..off + 4].copy_from_slice(&[0xfa, 0xff, 0xff, 0xff]);
+        bytes[off + 7] = 8;
+        // A nonzero pad byte means it is not a pcHeader prefix: reject.
+        bytes[off + 4] = 0x41;
+        assert_eq!(detect_pre118_magic(&bytes, &data_sec(bytes.len()), true), None);
+        // A valid prefix sitting in a .text section is skipped (a pclntab never
+        // lives in code), so a stray match in executable bytes is not a header.
+        bytes[off + 4] = 0;
+        bytes[off + 6] = 1;
+        let text = vec![Section {
+            name: ".text".to_string(),
+            kind: SectionKind::Text,
+            file_offset: 0,
+            file_size: bytes.len(),
+            addr: 0x1000,
+            vmsize: bytes.len() as u64,
+        }];
+        assert_eq!(detect_pre118_magic(&bytes, &text, true), None);
+        // The 1.18+ magic is not a pre-1.18 magic: this detector ignores it (the
+        // real scans handle it), so it never shadows a parseable binary.
+        bytes[off..off + 4].copy_from_slice(&[0xf1, 0xff, 0xff, 0xff]);
+        assert_eq!(detect_pre118_magic(&bytes, &data_sec(bytes.len()), true), None);
     }
 
     #[test]

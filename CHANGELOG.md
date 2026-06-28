@@ -7,6 +7,18 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
+### Changed
+
+- A pre-1.18 Go binary is named honestly instead of read as a non-Go container.
+  The pclntab locator only knew the Go 1.18 and 1.20 header shapes, so a Go 1.16
+  or 1.17 binary (magic `0xfffffffa`) or a Go 1.2 to 1.15 binary (`0xfffffffb`)
+  fell through to "no pclntab section found". A shallow recognizer, consulted
+  only after the 1.18+ magic and structural scans both fail, validates the
+  version-independent header prefix and returns `UnsupportedPclntabVersion` with
+  the named release, so a caller can report which Go built the binary rather than
+  implying it is not Go. It never shadows a binary the real parser can read, and
+  a garble-rewritten magic never reaches it.
+
 ## [1.1.0] - 2026-06-26
 
 ### Added
