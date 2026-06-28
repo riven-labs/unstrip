@@ -171,17 +171,75 @@ fn finish(
 /// Probe a binary's container without touching any Go metadata. Errors only if
 /// the bytes are not a recognized single-arch container.
 pub fn probe(bytes: &[u8]) -> Result<ContainerProbe> {
-    match Object::parse(bytes)? {
-        Object::Elf(elf) => Ok(probe_elf(bytes, elf)),
-        Object::Mach(goblin::mach::Mach::Binary(m)) => Ok(probe_mach(bytes, m)),
-        Object::Mach(goblin::mach::Mach::Fat(_)) => {
+    match Object::parse(bytes) {
+        Ok(Object::Elf(elf)) => Ok(probe_elf(bytes, elf)),
+        Ok(Object::Mach(goblin::mach::Mach::Binary(m))) => Ok(probe_mach(bytes, m)),
+        Ok(Object::Mach(goblin::mach::Mach::Fat(_))) => {
             // The fat wrapper itself carries no sections; the caller parses a
             // slice. A probe of the raw fat bytes would be meaningless.
             Err(Error::UnknownContainer)
         }
-        Object::PE(pe) => Ok(probe_pe(bytes, pe)),
-        _ => Err(Error::UnknownContainer),
+        Ok(Object::PE(pe)) => Ok(probe_pe(bytes, pe)),
+        Ok(_) => Err(Error::UnknownContainer),
+        // goblin rejected the header. Some malware damages it on purpose (a PE
+        // with a zeroed PE signature still maps at run time), so fall back to a
+        // magic-only summary rather than failing with a bare parse error.
+        Err(_) => probe_malformed(bytes).ok_or(Error::UnknownContainer),
     }
+}
+
+/// A best-effort probe for a container goblin cannot parse. Recognize the format by
+/// its leading magic and report what stays true: the format, the file size, the
+/// whole-file entropy, and the PE machine when the COFF header outlived a zeroed PE
+/// signature. Returns None when the bytes carry no container magic at all.
+fn probe_malformed(bytes: &[u8]) -> Option<ContainerProbe> {
+    let (container, arch, bits) = if bytes.starts_with(b"MZ") {
+        let (arch, bits) = pe_machine(bytes).unwrap_or(("unknown", 0));
+        ("PE (header damaged)", arch, bits)
+    } else if bytes.starts_with(&[0x7f, b'E', b'L', b'F']) {
+        let bits = if bytes.get(4) == Some(&2) { 64 } else { 32 };
+        ("ELF (header damaged)", "unknown", bits)
+    } else if matches!(
+        bytes.get(0..4),
+        Some([0xcf, 0xfa, 0xed, 0xfe])
+            | Some([0xce, 0xfa, 0xed, 0xfe])
+            | Some([0xfe, 0xed, 0xfa, 0xce])
+            | Some([0xfe, 0xed, 0xfa, 0xcf])
+    ) {
+        ("Mach-O (header damaged)", "unknown", 0)
+    } else {
+        return None;
+    };
+    Some(ContainerProbe {
+        container,
+        arch: arch.to_string(),
+        bits,
+        little_endian: true,
+        file_size: bytes.len(),
+        file_entropy: entropy(bytes),
+        sections: Vec::new(),
+        overlay_size: 0,
+        has_go_pclntab: false,
+        // Not a packer verdict: a damaged header is anti-analysis, but it is not
+        // packing, and the file entropy here is often low. The "(header damaged)"
+        // container label and the caller's error reason already say what happened.
+        packer: None,
+    })
+}
+
+/// Read the COFF machine of a PE whose PE signature was zeroed but whose COFF
+/// header survives at e_lfanew+4. Returns None when the offsets fall outside the
+/// file or the machine is unrecognized.
+fn pe_machine(bytes: &[u8]) -> Option<(&'static str, u32)> {
+    let e_lfanew = u32::from_le_bytes(bytes.get(0x3c..0x40)?.try_into().ok()?) as usize;
+    let machine = u16::from_le_bytes(bytes.get(e_lfanew + 4..e_lfanew + 6)?.try_into().ok()?);
+    Some(match machine {
+        0x8664 => ("x86-64", 64),
+        0x14c => ("i386", 32),
+        0xaa64 => ("arm64", 64),
+        0x1c0 | 0x1c4 => ("arm", 32),
+        _ => return None,
+    })
 }
 
 fn probe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> ContainerProbe {
@@ -350,5 +408,29 @@ mod tests {
             ..s[0].clone()
         }];
         assert!(packer_verdict(&s2, true, 6.0).is_none());
+    }
+
+    #[test]
+    fn malformed_pe_still_probes() {
+        // A PE whose PE signature is zeroed (an anti-analysis trick) must still
+        // yield a container summary, not a parse error. MZ stub, e_lfanew pointing
+        // at a zeroed signature, with an x86-64 COFF machine right after it.
+        let mut b = vec![0u8; 0x100];
+        b[0] = b'M';
+        b[1] = b'Z';
+        let e_lfanew = 0x80usize;
+        b[0x3c..0x40].copy_from_slice(&(e_lfanew as u32).to_le_bytes());
+        b[e_lfanew + 4..e_lfanew + 6].copy_from_slice(&0x8664u16.to_le_bytes());
+        let p = probe(&b).expect("a malformed PE should still probe");
+        assert_eq!(p.container, "PE (header damaged)");
+        assert_eq!(p.arch, "x86-64");
+        // A damaged header is not a packer verdict, so packer stays None; the
+        // container label carries the "(header damaged)" fact instead.
+        assert!(p.packer.is_none());
+    }
+
+    #[test]
+    fn random_bytes_are_not_a_container() {
+        assert!(probe(&[1, 2, 3, 4, 5, 6, 7, 8]).is_err());
     }
 }
