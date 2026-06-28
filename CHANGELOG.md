@@ -7,17 +7,32 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
+### Added
+
+- Parse the Go 1.16 and 1.17 pclntab (magic `0xfffffffa`). The header has no
+  textStart, the functab entries are pointer-sized with absolute entry PCs, and
+  the `_func` struct leads with a uintptr entry, all of which differ from Go
+  1.18+. The reader branches on the magic and recovers the function table (names,
+  entry addresses, file and line) for these releases, on ELF through the named
+  section and on PE by locating the header in the magic scan. `functions`,
+  `lookup`, and code-signature identification now work on a Go 1.16/1.17 binary
+  that before reported no functions. Type and itab recovery still need the
+  1.16/1.17 moduledata and are unchanged for now.
+
 ### Changed
 
-- A pre-1.18 Go binary is named honestly instead of read as a non-Go container.
-  The pclntab locator only knew the Go 1.18 and 1.20 header shapes, so a Go 1.16
-  or 1.17 binary (magic `0xfffffffa`) or a Go 1.2 to 1.15 binary (`0xfffffffb`)
-  fell through to "no pclntab section found". A shallow recognizer, consulted
-  only after the 1.18+ magic and structural scans both fail, validates the
-  version-independent header prefix and returns `UnsupportedPclntabVersion` with
-  the named release, so a caller can report which Go built the binary rather than
-  implying it is not Go. It never shadows a binary the real parser can read, and
-  a garble-rewritten magic never reaches it.
+- A Go 1.2 to 1.15 binary is named honestly instead of read as a non-Go
+  container. The pclntab locator knows the Go 1.16 through 1.20+ header shapes,
+  so an older binary used to fall through to "no pclntab section found". A shallow
+  recognizer, consulted only after the magic and structural scans fail, validates
+  the version-independent header prefix and returns `UnsupportedPclntabVersion`
+  with the named release, so a caller reports which Go built the binary rather
+  than implying it is not Go.
+
+- A container whose header goblin cannot parse now yields a best-effort probe
+  (format, size, whole-file entropy, and the PE machine when the COFF header
+  outlives a zeroed PE signature) instead of a bare parse error, so a sample with
+  a deliberately damaged header still gets a summary.
 
 ## [1.1.0] - 2026-06-26
 

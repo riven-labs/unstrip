@@ -8,19 +8,33 @@ pub const MAGIC_1_20: u32 = 0xfffffff1;
 /// Go 1.18 and 1.19 pclntab magic. The layout is byte-compatible with
 /// 1.20+ for the fields we care about, only the magic differs.
 pub const MAGIC_1_18: u32 = 0xfffffff0;
+/// Go 1.16 and 1.17 pclntab magic. The header has no textStart, the functab
+/// entries are pointer-sized (an absolute entry PC and a funcoff), and the `_func`
+/// struct leads with a uintptr entry. [`Layout::Pre118`] reads it.
+pub const MAGIC_1_16: u32 = 0xfffffffa;
+/// Go 1.2 to 1.15 pclntab magic. A different table shape again (a two-level
+/// functab and no offset header) that this reader does not yet implement.
+pub const MAGIC_1_2: u32 = 0xfffffffb;
 
-/// The Go release family for a known pre-1.18 pclntab magic, whose on-disk table
-/// layout differs from 1.18+ and that relift does not read. Returns None for
-/// 1.18/1.20 and for unknown magics (e.g. a garble-rewritten value), which the
-/// structural header checks handle instead. Naming the version lets the parser
-/// fail with an honest "this is Go 1.16" instead of walking the old layout with
-/// the new reader and tripping a confusing internal offset error.
+/// The Go release family for a pclntab magic this reader does not implement.
+/// Returns None for every layout we can read (1.16 through 1.20+ and a
+/// garble-rewritten magic, which keeps the 1.18+ shape). Naming the version lets a
+/// caller report "this is Go 1.2 to 1.15" instead of "not a Go binary".
 pub fn unsupported_pre118_magic(magic: u32) -> Option<&'static str> {
     match magic {
-        0xfffffffb => Some("Go 1.2 to 1.15"),
-        0xfffffffa => Some("Go 1.16 or 1.17"),
+        MAGIC_1_2 => Some("Go 1.2 to 1.15"),
         _ => None,
     }
+}
+
+/// Which pclntab table layout a binary uses. The header field positions, the
+/// functab entry width, and the `_func` struct prefix all changed in Go 1.18.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// Go 1.16 and 1.17 (magic [`MAGIC_1_16`]).
+    Pre118,
+    /// Go 1.18 and later, and garble-rewritten magics that keep the 1.18+ shape.
+    Modern,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +53,7 @@ pub struct Pclntab<'a> {
     data: &'a [u8],
     little_endian: bool,
     magic: u32,
+    layout: Layout,
     quantum: u8,
     ptrsize: u8,
     nfunc: u64,
@@ -94,22 +109,24 @@ impl<'a> Pclntab<'a> {
         }
 
         let magic = read_u32(data, 0, little_endian)?;
-        // Reject the known pre-1.18 pclntab layouts up front. Their table layout
-        // differs from 1.18+, so walking them with the 1.18 reader produces
-        // garbage -- a funcdata offset that lands in string data and trips the
-        // bounds check with a confusing internal error. Naming the version is
-        // the honest answer. garble rewrites the magic to a per-build random
-        // value that will not collide with these specific constants, so this
-        // does not regress obfuscated-binary support.
-        if let Some(version) = unsupported_pre118_magic(magic) {
-            return Err(Error::UnsupportedPclntabVersion { magic, version });
+        // Go 1.2 to 1.15 used a different table shape (a two-level functab, no
+        // offset header) that this reader does not implement; name the version
+        // honestly rather than walk it with the wrong reader.
+        if magic == MAGIC_1_2 {
+            return Err(Error::UnsupportedPclntabVersion {
+                magic,
+                version: "Go 1.2 to 1.15",
+            });
         }
-        // Garble and similar obfuscators rewrite the magic to defeat naive
-        // parsers. The rest of the header layout is unchanged, so we accept
-        // any other magic when the structural fields (zero pad, valid quantum,
-        // valid ptrsize) match. The caller can read the magic to detect
-        // tampering. We still reject obviously broken values via the
-        // structural check below.
+        // Go 1.16/1.17 and Go 1.18+ differ in the header field positions, the
+        // functab entry width, and the _func prefix. Pick the reader by magic. A
+        // garble-rewritten magic keeps the 1.18+ shape, so it reads as Modern; the
+        // structural checks below still reject a genuinely broken header.
+        let layout = if magic == MAGIC_1_16 {
+            Layout::Pre118
+        } else {
+            Layout::Modern
+        };
 
         if data[4] != 0 || data[5] != 0 {
             return Err(Error::BadPclntab {
@@ -140,13 +157,28 @@ impl<'a> Pclntab<'a> {
         let read_uptr = |off: usize| read_uintptr(data, off, ps, little_endian);
 
         let nfunc = read_uptr(8)?;
-        let _nfiles = read_uptr(8 + ps)?;
-        let text_start = read_uptr(8 + 2 * ps)?;
-        let funcname_off = read_uptr(8 + 3 * ps)? as usize;
-        let cu_off = read_uptr(8 + 4 * ps)? as usize;
-        let filetab_off = read_uptr(8 + 5 * ps)? as usize;
-        let pctab_off = read_uptr(8 + 6 * ps)? as usize;
-        let funcdata_off = read_uptr(8 + 7 * ps)? as usize;
+        // Go 1.18 inserted textStart into the header before the offset table, so on
+        // 1.16/1.17 the offsets sit one pointer earlier and there is no textStart
+        // (functab entries carry absolute PCs instead).
+        let (text_start, funcname_off, cu_off, filetab_off, pctab_off, funcdata_off) = match layout
+        {
+            Layout::Modern => (
+                read_uptr(8 + 2 * ps)?,
+                read_uptr(8 + 3 * ps)? as usize,
+                read_uptr(8 + 4 * ps)? as usize,
+                read_uptr(8 + 5 * ps)? as usize,
+                read_uptr(8 + 6 * ps)? as usize,
+                read_uptr(8 + 7 * ps)? as usize,
+            ),
+            Layout::Pre118 => (
+                0,
+                read_uptr(8 + 2 * ps)? as usize,
+                read_uptr(8 + 3 * ps)? as usize,
+                read_uptr(8 + 4 * ps)? as usize,
+                read_uptr(8 + 5 * ps)? as usize,
+                read_uptr(8 + 6 * ps)? as usize,
+            ),
+        };
 
         for (name, off) in [
             ("funcnameOffset", funcname_off),
@@ -166,10 +198,11 @@ impl<'a> Pclntab<'a> {
             }
         }
 
-        // textStart in the header is the runtime-resolved VA. If the binary
-        // sets it to zero (rare, but happens for some shared objects), fall
-        // back to the .text section address we discovered in the container.
-        let text_start = if text_start == 0 {
+        // textStart in the header is the runtime-resolved VA. If the binary sets
+        // it to zero (rare, but happens for some shared objects), fall back to the
+        // .text section address from the container. Only meaningful for Modern;
+        // Pre118 functab entries are absolute, so text_start stays 0 there.
+        let text_start = if layout == Layout::Modern && text_start == 0 {
             bin.text_addr
         } else {
             text_start
@@ -179,6 +212,7 @@ impl<'a> Pclntab<'a> {
             data,
             little_endian,
             magic,
+            layout,
             quantum,
             ptrsize,
             nfunc,
@@ -205,11 +239,57 @@ impl<'a> Pclntab<'a> {
     }
 
     pub fn magic_is_official(&self) -> bool {
-        self.magic == MAGIC_1_20 || self.magic == MAGIC_1_18
+        self.magic == MAGIC_1_20 || self.magic == MAGIC_1_18 || self.magic == MAGIC_1_16
     }
 
     pub fn nfunc(&self) -> u64 {
         self.nfunc
+    }
+
+    /// Bytes per functab entry: a u32 pair in 1.18+, a pointer pair in 1.16/1.17.
+    fn functab_stride(&self) -> usize {
+        match self.layout {
+            Layout::Modern => 8,
+            Layout::Pre118 => 2 * self.ptrsize as usize,
+        }
+    }
+
+    /// Entry PC (absolute VA) of functab index `i`. In 1.18+ the entry is a u32
+    /// offset from textStart; in 1.16/1.17 it is an absolute uintptr.
+    fn functab_addr(&self, i: usize) -> Option<u64> {
+        let off = self.funcdata_off + i * self.functab_stride();
+        match self.layout {
+            Layout::Modern => {
+                Some(self.text_start + read_u32(self.data, off, self.little_endian).ok()? as u64)
+            }
+            Layout::Pre118 => {
+                read_uintptr(self.data, off, self.ptrsize as usize, self.little_endian).ok()
+            }
+        }
+    }
+
+    /// The (entry PC, `_func` struct offset within `data`) for functab index `i`.
+    /// The funcoff is relative to the functab base in both layouts.
+    fn functab_entry(&self, i: usize) -> Option<(u64, usize)> {
+        let ps = self.ptrsize as usize;
+        let off = self.funcdata_off + i * self.functab_stride();
+        let func_off = match self.layout {
+            Layout::Modern => read_u32(self.data, off + 4, self.little_endian).ok()? as usize,
+            Layout::Pre118 => {
+                read_uintptr(self.data, off + ps, ps, self.little_endian).ok()? as usize
+            }
+        };
+        Some((self.functab_addr(i)?, self.funcdata_off + func_off))
+    }
+
+    /// Offset from a `_func` struct start to its `nameOff` field, i.e. the width of
+    /// the leading entry field: a u32 entryOff in 1.18+, a uintptr entry in
+    /// 1.16/1.17. Every later `_func` field is at a fixed offset past this.
+    fn fields_base(&self) -> usize {
+        match self.layout {
+            Layout::Modern => 4,
+            Layout::Pre118 => self.ptrsize as usize,
+        }
     }
 
     /// Raw pclntab bytes. Exposed for sibling modules (e.g. `crate::inline`)
@@ -265,25 +345,16 @@ impl<'a> Pclntab<'a> {
     /// scripts and crash-dump tooling.
     pub fn lookup(&self, pc: u64) -> Option<Function> {
         let n = self.nfunc as usize;
-        let entry_size = 8usize;
-        if pc < self.text_start {
-            return None;
-        }
-        let pc_off = (pc - self.text_start) as u32;
 
-        // Binary search: each functab entry's textOffset marks the start PC
-        // of that function. The function spans [text_off[i], text_off[i+1]).
-        let read_off = |i: usize| -> Option<u32> {
-            let entry = self.funcdata_off + i * entry_size;
-            read_u32(self.data, entry, self.little_endian).ok()
-        };
-
+        // Binary search on the functab's entry PCs. functab_addr returns an
+        // absolute VA in both layouts, so the search is layout-independent. The
+        // function spans [entry[idx], entry[idx+1]).
         let mut lo = 0usize;
         let mut hi = n;
         while lo < hi {
             let mid = (lo + hi) / 2;
-            let mid_off = read_off(mid)?;
-            if mid_off <= pc_off {
+            let mid_addr = self.functab_addr(mid)?;
+            if mid_addr <= pc {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -293,17 +364,15 @@ impl<'a> Pclntab<'a> {
             return None;
         }
         let idx = lo - 1;
-        let text_off = read_off(idx)?;
 
         // Verify pc is still within this function (before the next entry's start).
-        let next_off = read_off(idx + 1).unwrap_or(u32::MAX);
-        if pc_off >= next_off {
+        let next_addr = self.functab_addr(idx + 1).unwrap_or(u64::MAX);
+        if pc >= next_addr {
             return None;
         }
 
-        let entry = self.funcdata_off + idx * entry_size;
-        let func_off = read_u32(self.data, entry + 4, self.little_endian).ok()? as usize;
-        self.read_function(text_off, func_off).ok()
+        let (address, func_start) = self.functab_entry(idx)?;
+        self.read_function(address, func_start).ok()
     }
 
     /// Resolve a PC to the full inlined call stack, innermost frame first.
@@ -322,6 +391,14 @@ impl<'a> Pclntab<'a> {
             line: leaf.start_line,
             inlined: false,
         };
+
+        // The inline-tree walk below reads the functab and _func at their 1.18+
+        // offsets. On 1.16/1.17 those positions differ, so return the physical
+        // frame rather than decode the tree with the wrong layout.
+        if self.layout != Layout::Modern {
+            frames.push(physical_frame);
+            return frames;
+        }
 
         let Some(gofunc) = self.gofunc else {
             frames.push(physical_frame);
@@ -560,16 +637,14 @@ impl<'a> Pclntab<'a> {
     /// near the end of the table, and returning 2840 of 2841 functions is more
     /// useful than returning none.
     pub fn functions(&self) -> Result<Vec<Function>> {
-        // Functab entries are (uint32 textOffset, uint32 funcOffset) in 1.20+.
-        // Located inside the funcdata region.
-        const ENTRY_SIZE: usize = 8;
+        let stride = self.functab_stride();
         const MAX_FUNCS: u64 = 5_000_000;
 
         // Derive the structural maximum from the bytes actually available,
         // before honoring the header's claimed nfunc. A hostile pclntab can
         // claim nfunc=2^60; we must not allocate based on that.
         let available_bytes = self.data.len().saturating_sub(self.funcdata_off);
-        let max_possible = (available_bytes / ENTRY_SIZE).saturating_sub(1) as u64;
+        let max_possible = (available_bytes / stride).saturating_sub(1) as u64;
 
         let n = self.nfunc.min(MAX_FUNCS).min(max_possible) as usize;
         if (self.nfunc > MAX_FUNCS || self.nfunc > max_possible) && self.nfunc != 0 {
@@ -586,23 +661,20 @@ impl<'a> Pclntab<'a> {
 
         // Required byte range for (n+1) entries: the trailing sentinel marks
         // the end of the last function, so we always read one extra.
-        let table_bytes = n.saturating_add(1).saturating_mul(ENTRY_SIZE);
+        let table_bytes = n.saturating_add(1).saturating_mul(stride);
         if self.funcdata_off + table_bytes > self.data.len() {
             return Err(Error::BadPclntab {
                 offset: 0,
-                reason: format!("functab ({n} entries x {ENTRY_SIZE}) extends past pclntab end"),
+                reason: format!("functab ({n} entries x {stride}) extends past pclntab end"),
             });
         }
 
         let mut out = Vec::with_capacity(n);
-        let entry_size = ENTRY_SIZE;
-
         for i in 0..n {
-            let entry = self.funcdata_off + i * entry_size;
-            let text_off = read_u32(self.data, entry, self.little_endian)?;
-            let func_off = read_u32(self.data, entry + 4, self.little_endian)? as usize;
-
-            match self.read_function(text_off, func_off) {
+            let Some((address, func_start)) = self.functab_entry(i) else {
+                continue;
+            };
+            match self.read_function(address, func_start) {
                 Ok(f) => out.push(f),
                 Err(_) => continue,
             }
@@ -616,10 +688,10 @@ impl<'a> Pclntab<'a> {
     /// to decode funcdata/pcdata structures want this richer view; callers
     /// that only want names and entry PCs should use [`functions`] instead.
     pub fn functions_with_offsets(&self) -> Result<Vec<FuncEntry>> {
-        const ENTRY_SIZE: usize = 8;
+        let stride = self.functab_stride();
         const MAX_FUNCS: u64 = 5_000_000;
         let available_bytes = self.data.len().saturating_sub(self.funcdata_off);
-        let max_possible = (available_bytes / ENTRY_SIZE).saturating_sub(1) as u64;
+        let max_possible = (available_bytes / stride).saturating_sub(1) as u64;
         let n = self.nfunc.min(MAX_FUNCS).min(max_possible) as usize;
         if (self.nfunc > MAX_FUNCS || self.nfunc > max_possible) && self.nfunc != 0 {
             return Err(Error::BadPclntab {
@@ -630,64 +702,55 @@ impl<'a> Pclntab<'a> {
                 ),
             });
         }
-        let table_bytes = n.saturating_add(1).saturating_mul(ENTRY_SIZE);
+        let table_bytes = n.saturating_add(1).saturating_mul(stride);
         if self.funcdata_off + table_bytes > self.data.len() {
             return Err(Error::BadPclntab {
                 offset: 0,
                 reason: format!("functab ({n} entries) extends past pclntab end"),
             });
         }
+        let fb = self.fields_base();
         let mut out = Vec::with_capacity(n);
-        // Read text_offs and their func_offs; use the next text_off as the
-        // end-of-function PC so we can compute size without scanning further.
-        let read_entry = |i: usize| -> Result<(u32, u32)> {
-            let entry = self.funcdata_off + i * ENTRY_SIZE;
-            let t = read_u32(self.data, entry, self.little_endian)?;
-            let f = read_u32(self.data, entry + 4, self.little_endian)?;
-            Ok((t, f))
-        };
         for i in 0..n {
-            let (text_off, func_off) = match read_entry(i) {
-                Ok(v) => v,
-                Err(_) => continue,
+            let Some((address, func_start)) = self.functab_entry(i) else {
+                continue;
             };
-            let next_text_off = read_entry(i + 1).map(|(t, _)| t).unwrap_or(u32::MAX);
-            let size = next_text_off.saturating_sub(text_off) as u64;
-            let func_start = self.funcdata_off + func_off as usize;
-            if func_start + 8 > self.data.len() {
+            // The next entry's PC is the end of this function, so its size needs
+            // no further scan.
+            let next_addr = self.functab_addr(i + 1).unwrap_or(u64::MAX);
+            let size = next_addr.saturating_sub(address);
+            if func_start + fb + 4 > self.data.len() {
                 continue;
             }
-            let name_off = match read_u32(self.data, func_start + 4, self.little_endian) {
+            let name_off = match read_u32(self.data, func_start + fb, self.little_endian) {
                 Ok(v) => v as usize,
                 Err(_) => continue,
             };
             let name = self.read_name(name_off).unwrap_or_default();
             out.push(FuncEntry {
-                address: self.text_start + text_off as u64,
+                address,
                 name,
-                func_off: func_off as usize,
+                func_off: func_start - self.funcdata_off,
                 size,
             });
         }
         Ok(out)
     }
 
-    fn read_function(&self, text_off: u32, func_off: usize) -> Result<Function> {
-        let func_start = self.funcdata_off + func_off;
-        if func_start + 8 > self.data.len() {
+    fn read_function(&self, address: u64, func_start: usize) -> Result<Function> {
+        let fb = self.fields_base();
+        if func_start + fb + 4 > self.data.len() {
             return Err(Error::ShortRead {
-                wanted: 8,
+                wanted: fb + 4,
                 offset: func_start,
                 available: self.data.len().saturating_sub(func_start),
             });
         }
 
-        let name_off = read_u32(self.data, func_start + 4, self.little_endian)? as usize;
+        let name_off = read_u32(self.data, func_start + fb, self.little_endian)? as usize;
 
-        // The functab's text_off and the _func struct's entryOff field hold
-        // the same value in Go 1.20+. Use the functab one, it's already in
-        // hand and skips a redundant 4-byte read per function.
-        let address = self.text_start + text_off as u64;
+        // The functab entry already carries the function's absolute address, so
+        // there is no need to re-read the _func entry field.
         let name = self.read_name(name_off)?;
 
         let (file, start_line) = self.read_file_and_line(func_start).unwrap_or((None, None));
@@ -721,13 +784,17 @@ impl<'a> Pclntab<'a> {
     /// (that gives us the file index and line at function entry), then map
     /// file index through cutab -> filetab.
     fn read_file_and_line(&self, func_start: usize) -> Option<(Option<String>, Option<u32>)> {
-        if func_start + 36 > self.data.len() {
+        // The _func fields sit past the leading entry field (a u32 in 1.18+, a
+        // uintptr in 1.16/1.17), so offset them from fields_base: pcfile at +16,
+        // pcln at +20, cuOffset at +28.
+        let fb = self.fields_base();
+        if func_start + fb + 32 > self.data.len() {
             return None;
         }
 
-        let pcfile_off = read_u32(self.data, func_start + 20, self.little_endian).ok()? as usize;
-        let pcln_off = read_u32(self.data, func_start + 24, self.little_endian).ok()? as usize;
-        let cu_offset = read_u32(self.data, func_start + 32, self.little_endian).ok()? as usize;
+        let pcfile_off = read_u32(self.data, func_start + fb + 16, self.little_endian).ok()? as usize;
+        let pcln_off = read_u32(self.data, func_start + fb + 20, self.little_endian).ok()? as usize;
+        let cu_offset = read_u32(self.data, func_start + fb + 28, self.little_endian).ok()? as usize;
 
         let file_idx = first_pcvalue(&self.data[self.pctab_off..], pcfile_off)?;
         let line = first_pcvalue(&self.data[self.pctab_off..], pcln_off)?;
@@ -888,15 +955,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pre_118_magics_are_rejected_by_version() {
-        // The known pre-1.18 layouts are named and refused...
-        assert_eq!(
-            unsupported_pre118_magic(0xfffffffa),
-            Some("Go 1.16 or 1.17")
-        );
-        assert_eq!(unsupported_pre118_magic(0xfffffffb), Some("Go 1.2 to 1.15"));
-        // ...while the supported magics and an unknown (garble-rewritten) value
-        // pass through to the structural checks.
+    fn only_go_1_2_to_1_15_is_an_unsupported_layout() {
+        // Go 1.2 to 1.15 is the one layout this reader still does not implement, so
+        // it is named and refused.
+        assert_eq!(unsupported_pre118_magic(MAGIC_1_2), Some("Go 1.2 to 1.15"));
+        // Every layout we read passes through: Go 1.16/1.17, Go 1.18+, and an
+        // unknown (garble-rewritten) magic that keeps the 1.18+ shape.
+        assert_eq!(unsupported_pre118_magic(MAGIC_1_16), None);
         assert_eq!(unsupported_pre118_magic(MAGIC_1_18), None);
         assert_eq!(unsupported_pre118_magic(MAGIC_1_20), None);
         assert_eq!(unsupported_pre118_magic(0x1234_5678), None);
@@ -960,5 +1025,38 @@ mod tests {
                 "overflowing ({cu}, {idx}) must resolve to no file"
             );
         }
+    }
+
+    #[test]
+    fn parses_go_1_17_functab() {
+        // Go 1.16 and 1.17 use the pre-1.18 layout: magic 0xfffffffa, no textStart
+        // in the header, pointer-sized functab entries with absolute PCs, and a
+        // _func that leads with a uintptr entry. The fixture is hello.go built with
+        // go1.17; the program's own functions must recover with their names and a
+        // plausible absolute entry address.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join("hello.go117.stripped");
+        if !path.exists() {
+            return;
+        }
+        let bin = GoBinary::open(&path).expect("open go1.17 fixture");
+        let pcln = Pclntab::parse(&bin).expect("parse go1.17 pclntab");
+        assert_eq!(pcln.magic(), MAGIC_1_16);
+        let funcs = pcln.functions().expect("walk go1.17 functab");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        for required in ["main.main", "main.greet", "main.parseFlags"] {
+            assert!(
+                names.contains(&required),
+                "expected {required} among {} recovered functions",
+                names.len()
+            );
+        }
+        let main = funcs.iter().find(|f| f.name == "main.main").unwrap();
+        assert!(
+            main.address > 0x400000,
+            "main.main entry {:#x} is not a plausible absolute PC",
+            main.address
+        );
     }
 }

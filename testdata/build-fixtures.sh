@@ -69,6 +69,8 @@ build_hello_version() {
     fi
 }
 
+build_hello_version go1.16.15 hello.go116.stripped
+build_hello_version go1.17.13 hello.go117.stripped
 build_hello_version go1.18.10 hello.go118.stripped
 build_hello_version go1.19.13 hello.go119.stripped
 build_hello_version go1.20.14 hello.go120.stripped
