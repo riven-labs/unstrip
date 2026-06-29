@@ -461,26 +461,6 @@ fn read_name(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<String> {
     Ok(s.to_string())
 }
 
-
-fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
-    // A varint encoding a u64 needs at most 10 bytes. Anything longer is
-    // malformed input and we reject rather than overshift.
-    const MAX_BYTES: usize = 10;
-    let mut result: u64 = 0;
-    let mut shift = 0;
-    for (i, &b) in buf.iter().take(MAX_BYTES).enumerate() {
-        result |= ((b & 0x7f) as u64) << shift;
-        if b & 0x80 == 0 {
-            return Some((result, i + 1));
-        }
-        shift += 7;
-        if shift >= 64 {
-            return None;
-        }
-    }
-    None
-}
-
 /// Kind-specific decoding. Each kind's `_type` is followed by extra fields:
 ///   Pointer:   elem *Type
 ///   Slice:     elem *Type
