@@ -34,6 +34,14 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   outlives a zeroed PE signature) instead of a bare parse error, so a sample with
   a deliberately damaged header still gets a summary.
 
+### Fixed
+
+- The functab walk bounds every offset, so a hostile or corrupt pclntab (a huge
+  nfunc, a funcoff past the table, an out-of-range entry index) returns no entry
+  instead of overflowing a usize. A property test runs thousands of mutated
+  headers through parse, functions, and lookup for every layout, so a crafted
+  pclntab cannot crash the reader.
+
 ## [1.1.0] - 2026-06-26
 
 ### Added

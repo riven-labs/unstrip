@@ -257,11 +257,14 @@ impl<'a> Pclntab<'a> {
     /// Entry PC (absolute VA) of functab index `i`. In 1.18+ the entry is a u32
     /// offset from textStart; in 1.16/1.17 it is an absolute uintptr.
     fn functab_addr(&self, i: usize) -> Option<u64> {
-        let off = self.funcdata_off + i * self.functab_stride();
+        // Checked throughout: a hostile header can set nfunc or the offsets so that
+        // funcdata_off + i*stride overflows usize. Overflow resolves to None (no
+        // such entry), never a panic or a wrapped offset.
+        let off = self.funcdata_off.checked_add(i.checked_mul(self.functab_stride())?)?;
         match self.layout {
-            Layout::Modern => {
-                Some(self.text_start + read_u32(self.data, off, self.little_endian).ok()? as u64)
-            }
+            Layout::Modern => self
+                .text_start
+                .checked_add(read_u32(self.data, off, self.little_endian).ok()? as u64),
             Layout::Pre118 => {
                 read_uintptr(self.data, off, self.ptrsize as usize, self.little_endian).ok()
             }
@@ -272,14 +275,16 @@ impl<'a> Pclntab<'a> {
     /// The funcoff is relative to the functab base in both layouts.
     fn functab_entry(&self, i: usize) -> Option<(u64, usize)> {
         let ps = self.ptrsize as usize;
-        let off = self.funcdata_off + i * self.functab_stride();
+        let off = self.funcdata_off.checked_add(i.checked_mul(self.functab_stride())?)?;
         let func_off = match self.layout {
-            Layout::Modern => read_u32(self.data, off + 4, self.little_endian).ok()? as usize,
+            Layout::Modern => {
+                read_u32(self.data, off.checked_add(4)?, self.little_endian).ok()? as usize
+            }
             Layout::Pre118 => {
-                read_uintptr(self.data, off + ps, ps, self.little_endian).ok()? as usize
+                read_uintptr(self.data, off.checked_add(ps)?, ps, self.little_endian).ok()? as usize
             }
         };
-        Some((self.functab_addr(i)?, self.funcdata_off + func_off))
+        Some((self.functab_addr(i)?, self.funcdata_off.checked_add(func_off)?))
     }
 
     /// Offset from a `_func` struct start to its `nameOff` field, i.e. the width of
@@ -739,7 +744,10 @@ impl<'a> Pclntab<'a> {
 
     fn read_function(&self, address: u64, func_start: usize) -> Result<Function> {
         let fb = self.fields_base();
-        if func_start + fb + 4 > self.data.len() {
+        // func_start comes from a header-controlled funcoff, so the nameOff field
+        // end can overflow usize; treat overflow as out of range, not a panic.
+        let end = func_start.checked_add(fb).and_then(|x| x.checked_add(4));
+        if end.is_none_or(|e| e > self.data.len()) {
             return Err(Error::ShortRead {
                 wanted: fb + 4,
                 offset: func_start,
@@ -788,7 +796,10 @@ impl<'a> Pclntab<'a> {
         // uintptr in 1.16/1.17), so offset them from fields_base: pcfile at +16,
         // pcln at +20, cuOffset at +28.
         let fb = self.fields_base();
-        if func_start + fb + 32 > self.data.len() {
+        // cuOffset (the furthest field, at fb+28) is 4 bytes, so the struct needs
+        // fb+32 bytes. Checked: a hostile funcoff can push func_start near usize::MAX.
+        let end = func_start.checked_add(fb).and_then(|x| x.checked_add(32));
+        if end.is_none_or(|e| e > self.data.len()) {
             return None;
         }
 
@@ -1058,5 +1069,84 @@ mod tests {
             "main.main entry {:#x} is not a plausible absolute PC",
             main.address
         );
+    }
+
+    #[test]
+    fn parse_chain_never_panics_on_hostile_pclntab() {
+        // Malware crafts pclntab fields to crash naive parsers. Feed a valid header
+        // prefix for each layout (pre-1.18 and 1.18+) with hostile bodies plus
+        // deterministic byte mutations through the whole walk. Every read is
+        // bounds-checked, so the chain must return a Result, never panic.
+        use crate::gobin::{Arch, Container, Section, SectionKind};
+
+        fn make_bin(bytes: Vec<u8>) -> GoBinary {
+            let n = bytes.len();
+            GoBinary {
+                bytes,
+                container: Container::Elf,
+                arch: Arch::X86_64,
+                little_endian: true,
+                ptr_size: 8,
+                sections: vec![Section {
+                    name: ".text".to_string(),
+                    kind: SectionKind::Text,
+                    file_offset: 0,
+                    file_size: n,
+                    addr: 0x1000,
+                    vmsize: 0x100000,
+                }],
+                pclntab_offset: 0,
+                pclntab_size: n,
+                pclntab_addr: 0x1000,
+                text_addr: 0x1000,
+            }
+        }
+
+        // A syntactically valid header prefix; the body is mutated below.
+        let mut base = vec![0u8; 4096];
+        base[6] = 1; // quantum
+        base[7] = 8; // ptr size
+
+        // Deterministic PRNG (SplitMix64) so the corpus is reproducible.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut rng = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+
+        let magics: [[u8; 4]; 4] = [
+            [0xfa, 0xff, 0xff, 0xff], // 1.16/1.17
+            [0xfb, 0xff, 0xff, 0xff], // 1.2-1.15 (rejected by version)
+            [0xf0, 0xff, 0xff, 0xff], // 1.18/1.19
+            [0xf1, 0xff, 0xff, 0xff], // 1.20+
+        ];
+        for magic in magics {
+            for _ in 0..2000 {
+                let mut b = base.clone();
+                b[0..4].copy_from_slice(&magic);
+                let muts = (rng() % 80) as usize;
+                for _ in 0..muts {
+                    let idx = (rng() as usize) % b.len();
+                    b[idx] = (rng() & 0xff) as u8;
+                }
+                if rng() % 4 == 0 {
+                    let cut = (rng() as usize) % b.len();
+                    b.truncate(cut);
+                }
+                let bin = make_bin(b);
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Ok(p) = Pclntab::parse(&bin) {
+                        let _ = p.functions();
+                        let _ = p.functions_with_offsets();
+                        let _ = p.lookup(0x1234);
+                        let _ = p.lookup(0xffff_ffff_ffff_ffff);
+                    }
+                }));
+                assert!(res.is_ok(), "parse chain panicked on a hostile pclntab");
+            }
+        }
     }
 }
