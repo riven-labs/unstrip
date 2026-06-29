@@ -902,6 +902,43 @@ fn assert_recovers_featureset(fixture_name: &str, version_prefix: &str) {
     );
 }
 
+/// Type and itab recovery on the pre-1.18 moduledata layout (Go 1.16/1.17 drop
+/// the rodata/gofunc fields 1.18 added). Uses typeset.go (no generics, so it
+/// builds on 1.16+) which defines a custom interface with two implementers, so the
+/// itablinks and the program's own struct and interface types must all recover with
+/// correct names, not just a non-empty count.
+#[test]
+fn recovers_typeset_go_1_17() {
+    let Some(path) = fixture("typeset.go117.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open typeset go1.17");
+    let md = ModuleData::locate(&bin).expect("locate pre-1.18 moduledata");
+
+    let types = types::recover_all(&bin, &md).expect("recover types");
+    let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+    for required in ["main.Codec", "main.xorCodec", "main.addCodec"] {
+        assert!(
+            names.iter().any(|n| n.contains(required)),
+            "go1.17: expected {required} among {} recovered types",
+            types.len()
+        );
+    }
+
+    // The []Codec literal links two itabs (Codec/xorCodec, Codec/addCodec); both
+    // must come back from the pre-1.18 itablinks.
+    let pairs = itabs::recover_all(&bin, &md).expect("recover itabs");
+    let codec_itabs = pairs
+        .iter()
+        .filter(|p| p.interface_name.contains("main.Codec"))
+        .count();
+    assert!(
+        codec_itabs >= 2,
+        "go1.17: expected both main.Codec itabs, got {codec_itabs} of {} pairs",
+        pairs.len()
+    );
+}
+
 #[test]
 fn recovers_featureset_go_1_18() {
     assert_recovers_featureset("featureset.go118.stripped", "go1.18");

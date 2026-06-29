@@ -16,8 +16,15 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   entry addresses, file and line) for these releases, on ELF through the named
   section and on PE by locating the header in the magic scan. `functions`,
   `lookup`, and code-signature identification now work on a Go 1.16/1.17 binary
-  that before reported no functions. Type and itab recovery still need the
-  1.16/1.17 moduledata and are unchanged for now.
+  that before reported no functions.
+
+- Recover types and itabs on the Go 1.16/1.17 moduledata. Go 1.18 inserted
+  `rodata` and `gofunc` after `etypes`; the new `Layout::Pre118`, selected from
+  the pclntab magic, skips them so `types::recover_all` and `itabs::recover_all`
+  reach the right `types`, `typelinks`, and `itablinks`. go1.17 names resolve in
+  full (its name length is a varint, like 1.18+). go1.16 uses an older 2-byte
+  length for type names, so a go1.16 binary recovers its types and itabs by
+  structure with the names still pending.
 
 ### Changed
 

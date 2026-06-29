@@ -90,6 +90,10 @@ pub enum Layout {
     /// `textsectmap`). Shares the pclntab magic with V120, so the two are told
     /// apart by parsing both and keeping whichever yields valid typelinks.
     V126,
+    /// Go 1.16 and 1.17 (pclntab magic 0xfffffffa): no `covctrs` (added in 1.20)
+    /// and no `rodata`/`gofunc` (added in 1.18), so the offset table after
+    /// `etypes` sits two pointers earlier than every later layout.
+    Pre118,
 }
 
 impl ModuleData {
@@ -298,6 +302,7 @@ fn looks_like_moduledata(bin: &GoBinary, file_off: usize) -> bool {
 fn layouts_for(bin: &GoBinary) -> &'static [Layout] {
     match read_u32_e(bin.pclntab_slice(), 0, bin.little_endian) {
         Some(0xfffffff0) => &[Layout::V118],
+        Some(0xfffffffa) => &[Layout::Pre118],
         _ => &[Layout::V120, Layout::V126],
     }
 }
@@ -448,8 +453,13 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
     let gcbss = r.uptr()?;
     let types = r.uptr()?;
     let etypes = r.uptr()?;
-    let rodata = r.uptr()?;
-    let gofunc = r.uptr()?;
+    // Go 1.18 inserted `rodata` and `gofunc` after `etypes`; Go 1.16/1.17 do not
+    // have them, so the slice headers that follow sit two pointers earlier.
+    let (rodata, gofunc) = if matches!(layout, Layout::Pre118) {
+        (0, 0)
+    } else {
+        (r.uptr()?, r.uptr()?)
+    };
     // Go 1.26 inserted an `epclntab` pointer here, before textsectmap. Reading
     // it keeps the slice headers that follow aligned; older layouts skip it.
     if matches!(layout, Layout::V126) {

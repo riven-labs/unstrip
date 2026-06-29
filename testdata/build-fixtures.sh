@@ -106,6 +106,23 @@ build_featureset_version go1.24.0 featureset.go124.stripped
 build_featureset_version go1.25.0 featureset.go125.stripped
 build_featureset_version go1.26.0 featureset.go126.stripped
 
+# typeset.go is featureset's interface/itab/struct content without generics, so it
+# builds on Go 1.16 and 1.17 (which featureset cannot). It pins type and itab
+# recovery on the pre-1.18 moduledata layout. Same optional-skip contract.
+build_typeset_version() {
+    local gobin=$1
+    local out=$2
+    if command -v "$gobin" >/dev/null 2>&1; then
+        echo "building $out ($("$gobin" version | awk '{print $3}'))"
+        GOOS=linux GOARCH=amd64 "$gobin" build -ldflags='-s -w' -o "$out" typeset.go
+    else
+        echo "$gobin not installed; skipping $out"
+    fi
+}
+
+build_typeset_version go1.16.15 typeset.go116.stripped
+build_typeset_version go1.17.13 typeset.go117.stripped
+
 # A fixture with real third-party deps so we can exercise buildinfo, itabs,
 # and type recovery against something richer than `hello`.
 if [ -d depsdemo ]; then
