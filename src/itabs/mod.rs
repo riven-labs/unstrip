@@ -211,7 +211,7 @@ fn read_interface_method_names(
     for chunk in arr.chunks_exact(8) {
         let name_off = rd_u32(chunk, 0, le).unwrap_or(0) as i32;
         let name_addr = md.types.wrapping_add(name_off as i64 as u64);
-        let name = types::read_name_public(bin, name_addr).unwrap_or_else(|_| "?".into());
+        let name = types::read_name_public(bin, md, name_addr).unwrap_or_else(|_| "?".into());
         out.push(name);
     }
     Ok(out)
@@ -225,5 +225,5 @@ fn read_type_name(bin: &GoBinary, md: &ModuleData, type_addr: u64) -> Result<Str
         .ok_or_else(|| Error::ItabRecovery(format!("type header at 0x{type_addr:x} unmapped")))?;
     let str_off = rd_u32(buf, type_str_offset(ps), le).unwrap_or(0) as i32;
     let name_addr = md.types.wrapping_add(str_off as i64 as u64);
-    types::read_name_public(bin, name_addr).map_err(|e| Error::ItabRecovery(e.to_string()))
+    types::read_name_public(bin, md, name_addr).map_err(|e| Error::ItabRecovery(e.to_string()))
 }

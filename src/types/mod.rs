@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::error::Error;
 use crate::gobin::GoBinary;
-use crate::moduledata::ModuleData;
+use crate::moduledata::{read_name_len, ModuleData};
 use crate::Result;
 
 /// A recovered Go type. v1 captures the universally-present header fields
@@ -403,7 +403,7 @@ pub(crate) fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<T
     let kind = KindName::from_byte(kind_byte);
 
     let name_addr = md.types.wrapping_add(str_off as i64 as u64);
-    let mut name = read_name(bin, name_addr).unwrap_or_else(|_| format!("type@0x{addr:x}"));
+    let mut name = read_name(bin, md, name_addr).unwrap_or_else(|_| format!("type@0x{addr:x}"));
     // TFlagExtraStar: the stored name has a leading `*` that Go uses for
     // binary-size sharing between `Foo` and `*Foo`. Strip it here so the
     // type's displayed name matches the source-language name.
@@ -425,22 +425,23 @@ pub(crate) fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<T
     })
 }
 
-/// Public re-export of name resolution for other modules (itabs).
-pub fn read_name_public(bin: &GoBinary, addr: u64) -> Result<String> {
-    read_name(bin, addr)
+/// Public re-export of name resolution for other modules (itabs, funcsig). The
+/// caller passes the moduledata so the right name encoding is used.
+pub fn read_name_public(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<String> {
+    read_name(bin, md, addr)
 }
 
 /// Reads a Go runtime `Name` structure at `addr`. Format:
 ///   byte 0: flag byte (bit 0 = exported, bit 1 = has tag, bit 3 = embedded)
 ///   bytes 1..: varint length of the name
 ///   next N bytes: the name itself (UTF-8)
-fn read_name(bin: &GoBinary, addr: u64) -> Result<String> {
+fn read_name(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<String> {
     let header = bin
         .read_at_addr(addr, 1 + 10)
         .ok_or_else(|| Error::TypeRecovery(format!("name header at 0x{addr:x} unmapped")))?;
 
-    let (len, varint_bytes) = read_varint(&header[1..]).ok_or_else(|| {
-        Error::TypeRecovery(format!("varint at name 0x{addr:x} did not terminate"))
+    let (len, len_bytes) = read_name_len(&header[1..], md.name_enc).ok_or_else(|| {
+        Error::TypeRecovery(format!("name length at 0x{addr:x} did not decode"))
     })?;
 
     if len > 1 << 20 {
@@ -449,16 +450,17 @@ fn read_name(bin: &GoBinary, addr: u64) -> Result<String> {
         )));
     }
 
-    let total = 1 + varint_bytes + len as usize;
+    let total = 1 + len_bytes + len as usize;
     let body = bin.read_at_addr(addr, total).ok_or_else(|| {
         Error::TypeRecovery(format!("name body at 0x{addr:x} ({total} bytes) unmapped"))
     })?;
 
-    let start = 1 + varint_bytes;
+    let start = 1 + len_bytes;
     let s = std::str::from_utf8(&body[start..start + len as usize])
         .map_err(|_| Error::TypeRecovery("name is not valid utf-8".into()))?;
     Ok(s.to_string())
 }
+
 
 fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     // A varint encoding a u64 needs at most 10 bytes. Anything longer is
@@ -668,7 +670,7 @@ fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<Kin
         let offset = u64::from_le_bytes(buf[off + 16..off + 24].try_into().unwrap());
 
         let (name, embedded, tag) =
-            read_name_full(bin, name_ptr).unwrap_or((String::new(), false, String::new()));
+            read_name_full(bin, md, name_ptr).unwrap_or((String::new(), false, String::new()));
         fields.push(StructField {
             name,
             typ,
@@ -686,7 +688,7 @@ fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<Kin
 /// varint name length, name bytes, then (when the has-tag flag is set) varint
 /// tag length and tag bytes. Reading it recovers a field's `json:"..."` schema,
 /// which garble leaves verbatim even when the field name itself is hashed.
-fn read_name_full(bin: &GoBinary, addr: u64) -> Result<(String, bool, String)> {
+fn read_name_full(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<(String, bool, String)> {
     let header = bin
         .read_at_addr(addr, 1 + 10)
         .ok_or_else(|| Error::TypeRecovery(format!("name header at 0x{addr:x} unmapped")))?;
@@ -694,15 +696,15 @@ fn read_name_full(bin: &GoBinary, addr: u64) -> Result<(String, bool, String)> {
     let embedded = flag_byte & (1 << 3) != 0;
     let has_tag = flag_byte & (1 << 1) != 0;
 
-    let (name_len, name_vbytes) = read_varint(&header[1..]).ok_or_else(|| {
-        Error::TypeRecovery(format!("varint at name 0x{addr:x} did not terminate"))
+    let (name_len, name_len_bytes) = read_name_len(&header[1..], md.name_enc).ok_or_else(|| {
+        Error::TypeRecovery(format!("name length at 0x{addr:x} did not decode"))
     })?;
     if name_len > 1 << 20 {
         return Err(Error::TypeRecovery(format!(
             "name length {name_len} unreasonably large"
         )));
     }
-    let name_start = 1 + name_vbytes;
+    let name_start = 1 + name_len_bytes;
     let name_end = name_start + name_len as usize;
     let body = bin
         .read_at_addr(addr, name_end)
@@ -712,23 +714,23 @@ fn read_name_full(bin: &GoBinary, addr: u64) -> Result<(String, bool, String)> {
         .to_string();
 
     let tag = if has_tag {
-        read_tag(bin, addr + name_end as u64).unwrap_or_default()
+        read_tag(bin, md, addr + name_end as u64).unwrap_or_default()
     } else {
         String::new()
     };
     Ok((name, embedded, tag))
 }
 
-/// Read the tag at `addr`: a varint length followed by that many bytes. The tag
-/// follows the name in the field's `Name` encoding. A bad length or non-UTF-8
-/// body yields an empty tag rather than failing the whole struct decode.
-fn read_tag(bin: &GoBinary, addr: u64) -> Option<String> {
+/// Read the tag at `addr`: a length (per the binary's name encoding) followed by
+/// that many bytes. The tag follows the name in the field's `Name` encoding. A bad
+/// length or non-UTF-8 body yields an empty tag rather than failing the struct.
+fn read_tag(bin: &GoBinary, md: &ModuleData, addr: u64) -> Option<String> {
     let hdr = bin.read_at_addr(addr, 10)?;
-    let (len, vbytes) = read_varint(hdr)?;
+    let (len, len_bytes) = read_name_len(hdr, md.name_enc)?;
     if len == 0 || len > 1 << 16 {
         return None;
     }
-    let bytes = bin.read_at_addr(addr + vbytes as u64, len as usize)?;
+    let bytes = bin.read_at_addr(addr + len_bytes as u64, len as usize)?;
     std::str::from_utf8(bytes).ok().map(str::to_string)
 }
 
@@ -760,7 +762,7 @@ fn decode_interface(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<
         let typ_off = i32::from_le_bytes(buf[off + 4..off + 8].try_into().unwrap());
         let name_addr = md.types.wrapping_add(name_off as i64 as u64);
         let typ_addr = md.types.wrapping_add(typ_off as i64 as u64);
-        let name = read_name(bin, name_addr).unwrap_or_else(|_| format!("method{i}"));
+        let name = read_name(bin, md, name_addr).unwrap_or_else(|_| format!("method{i}"));
         methods.push(InterfaceMethod {
             name,
             typ: typ_addr,

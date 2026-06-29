@@ -68,6 +68,23 @@ pub struct ModuleData {
     pub typelinks: SliceHeader,
     /// `itablinks` is a `[]*itab` (one pointer per linked interface impl).
     pub itablinks: SliceHeader,
+
+    /// How type-name lengths are encoded in this binary. `parse` cannot tell
+    /// (Go 1.16 and 1.17 share the pclntab magic), so it defaults to `Varint`;
+    /// `types::recover_all` and friends detect the real encoding and set it.
+    pub name_enc: NameEnc,
+}
+
+/// The length encoding of a Go runtime `name` (the type/field/method name blob).
+/// Go 1.2 to 1.16 used a 2-byte big-endian length; Go 1.17 switched to a varint
+/// (the same encoding 1.18+ uses). The pclntab magic does not distinguish 1.16
+/// from 1.17, so the encoding is detected from the data, not the magic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum NameEnc {
+    /// Varint length (Go 1.17 and later).
+    Varint,
+    /// 2-byte big-endian length (Go 1.16 and earlier).
+    TwoByteBe,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -94,6 +111,103 @@ pub enum Layout {
     /// and no `rodata`/`gofunc` (added in 1.18), so the offset table after
     /// `etypes` sits two pointers earlier than every later layout.
     Pre118,
+}
+
+/// Decode a Go `name` length prefix per the binary's encoding, returning the
+/// length and the number of header bytes it spans. Go 1.17+ uses a varint; Go 1.16
+/// and earlier a 2-byte big-endian length. `buf` points at the length (for a name,
+/// the byte after the flag; for a tag, the first byte). Defined here, beside
+/// `NameEnc`, so type recovery and the detector below share one decoder.
+pub fn read_name_len(buf: &[u8], enc: NameEnc) -> Option<(u64, usize)> {
+    match enc {
+        NameEnc::Varint => {
+            // uvarint, base-128 little-endian, MSB = continuation. Capped at 10
+            // bytes (a u64's max), matching the reflect runtime's reader.
+            const MAX_BYTES: usize = 10;
+            let mut result: u64 = 0;
+            let mut shift = 0;
+            for (i, &b) in buf.iter().take(MAX_BYTES).enumerate() {
+                result |= ((b & 0x7f) as u64) << shift;
+                if b & 0x80 == 0 {
+                    return Some((result, i + 1));
+                }
+                shift += 7;
+                if shift >= 64 {
+                    return None;
+                }
+            }
+            None
+        }
+        NameEnc::TwoByteBe => {
+            let hi = *buf.first()? as u64;
+            let lo = *buf.get(1)? as u64;
+            Some(((hi << 8) | lo, 2))
+        }
+    }
+}
+
+/// Detect this binary's name encoding by probing a sample of type names with both
+/// forms and keeping the one that decodes more of them to plausible names. Go 1.16
+/// and 1.17 share the pclntab magic, so it cannot be read from the magic. Reads raw
+/// bytes only (no dependency on the type recovery), so it runs inside `locate`.
+/// Defaults to `Varint` (the modern, far more common case) unless 2-byte clearly
+/// wins, so a 1.18+ binary is never pushed onto the 2-byte path.
+fn detect_name_encoding(bin: &GoBinary, md: &ModuleData) -> NameEnc {
+    // The `str` (name offset) field sits at +40 in the 64-bit `_type` header, the
+    // layout type recovery already assumes; 32-bit type recovery is unsupported, so
+    // the probe stays 64-bit and leaves other targets on the default.
+    const STR_OFFSET: usize = 40;
+    const HEADER: usize = 48;
+    const PROBES: usize = 64;
+    let n = (md.typelinks.len as usize).min(PROBES);
+    let Some(tl_bytes) = bin.read_at_addr(md.typelinks.data, n.saturating_mul(4)) else {
+        return NameEnc::Varint;
+    };
+    let mut varint_ok = 0usize;
+    let mut twobyte_ok = 0usize;
+    for chunk in tl_bytes.chunks_exact(4) {
+        let tl_off = i32::from_le_bytes(chunk.try_into().unwrap());
+        let type_addr = md.types.wrapping_add(tl_off as i64 as u64);
+        let Some(hdr) = bin.read_at_addr(type_addr, HEADER) else {
+            continue;
+        };
+        let str_off = i32::from_le_bytes(hdr[STR_OFFSET..STR_OFFSET + 4].try_into().unwrap());
+        let name_addr = md.types.wrapping_add(str_off as i64 as u64);
+        let Some(nbytes) = bin.read_at_addr(name_addr, 1 + 2 + 1024) else {
+            continue;
+        };
+        if name_probe_valid(&nbytes, NameEnc::Varint) {
+            varint_ok += 1;
+        }
+        if name_probe_valid(&nbytes, NameEnc::TwoByteBe) {
+            twobyte_ok += 1;
+        }
+    }
+    if twobyte_ok > varint_ok {
+        NameEnc::TwoByteBe
+    } else {
+        NameEnc::Varint
+    }
+}
+
+/// Whether a name blob (flag, length, name bytes) decodes to a plausible name under
+/// `enc`: a nonempty, in-bounds run of printable ASCII. A wrong encoding reads a
+/// length that overruns the buffer or a body with control/high bytes, so it fails.
+fn name_probe_valid(bytes: &[u8], enc: NameEnc) -> bool {
+    let Some(after_flag) = bytes.get(1..) else {
+        return false;
+    };
+    let Some((len, len_bytes)) = read_name_len(after_flag, enc) else {
+        return false;
+    };
+    let start = 1 + len_bytes;
+    let len = len as usize;
+    if len == 0 || len > bytes.len().saturating_sub(start) {
+        return false;
+    }
+    bytes[start..start + len]
+        .iter()
+        .all(|&b| (0x20..=0x7e).contains(&b))
 }
 
 impl ModuleData {
@@ -143,7 +257,10 @@ impl ModuleData {
         for &layout in layouts_for(bin) {
             for kind in scan_kinds {
                 for section in bin.sections.iter().filter(|s| s.kind == kind) {
-                    if let Some(md) = scan_section(bin, section, &target_bytes, ps, layout) {
+                    if let Some(mut md) = scan_section(bin, section, &target_bytes, ps, layout) {
+                        // Resolve the name encoding now (the magic cannot tell 1.16
+                        // from 1.17), so every later name read uses the right one.
+                        md.name_enc = detect_name_encoding(bin, &md);
                         return Ok(md);
                     }
                 }
@@ -218,10 +335,13 @@ impl ModuleData {
                     if !looks_like_moduledata(bin, file_off) {
                         continue;
                     }
-                    if let Some(next_md) = layouts_for(bin)
+                    if let Some(mut next_md) = layouts_for(bin)
                         .iter()
                         .find_map(|&layout| try_parse(bin, file_off, ps, layout).ok())
                     {
+                        // Every module in one binary shares the name encoding the
+                        // first module resolved.
+                        next_md.name_enc = out[0].name_enc;
                         visited.insert(file_off);
                         out.push(next_md);
                         break; // only one next per scan
@@ -594,6 +714,9 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
         textsectmap,
         typelinks,
         itablinks,
+        // Detected from the data by the type recovery, not knowable from the
+        // pclntab magic; default to the modern varint encoding.
+        name_enc: NameEnc::Varint,
     })
 }
 
@@ -646,5 +769,28 @@ impl<'a> Reader<'a> {
         let len = self.uptr()?;
         let cap = self.uptr()?;
         Ok(SliceHeader { data, len, cap })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_name_len, NameEnc};
+
+    #[test]
+    fn name_len_decodes_both_encodings() {
+        // Varint (Go 1.17+): low 7 bits per byte, MSB continuation.
+        assert_eq!(read_name_len(&[0x05, b'h'], NameEnc::Varint), Some((5, 1)));
+        assert_eq!(read_name_len(&[0x80, 0x01], NameEnc::Varint), Some((128, 2)));
+        // 2-byte big-endian (Go 1.16 and earlier).
+        assert_eq!(read_name_len(&[0x00, 0x05], NameEnc::TwoByteBe), Some((5, 2)));
+        assert_eq!(read_name_len(&[0x01, 0x2c], NameEnc::TwoByteBe), Some((300, 2)));
+        // The same first byte means different things under each encoding: 0x05 is a
+        // length of 5 as a varint but the high byte of a 1280+ length as 2-byte BE.
+        // This is exactly why the encoding must be detected per binary, not guessed.
+        assert_eq!(read_name_len(&[0x05, 0x00], NameEnc::TwoByteBe), Some((0x0500, 2)));
+        // Truncated input yields None rather than panicking.
+        assert_eq!(read_name_len(&[0x80], NameEnc::Varint), None);
+        assert_eq!(read_name_len(&[0x00], NameEnc::TwoByteBe), None);
+        assert_eq!(read_name_len(&[], NameEnc::Varint), None);
     }
 }

@@ -21,10 +21,14 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 - Recover types and itabs on the Go 1.16/1.17 moduledata. Go 1.18 inserted
   `rodata` and `gofunc` after `etypes`; the new `Layout::Pre118`, selected from
   the pclntab magic, skips them so `types::recover_all` and `itabs::recover_all`
-  reach the right `types`, `typelinks`, and `itablinks`. go1.17 names resolve in
-  full (its name length is a varint, like 1.18+). go1.16 uses an older 2-byte
-  length for type names, so a go1.16 binary recovers its types and itabs by
-  structure with the names still pending.
+  reach the right `types`, `typelinks`, and `itablinks`.
+
+- Decode pre-1.17 type-name lengths. Go 1.17 switched the runtime `name` length
+  from a 2-byte big-endian prefix to a varint (1.18+ kept the varint), but Go
+  1.16 and 1.17 share the pclntab magic, so the encoding is detected per binary by
+  probing type names with both forms and keeping the one that decodes. With this,
+  go1.16 type, field, and itab names resolve, not just their structure; go1.17 and
+  1.18+ stay on the varint path unchanged.
 
 ### Changed
 

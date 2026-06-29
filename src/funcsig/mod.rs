@@ -273,7 +273,7 @@ pub fn methods_for_type(bin: &GoBinary, md: &ModuleData, t: &Type) -> Result<Vec
 
         let name = if name_off >= 0 {
             let name_addr = md.types.wrapping_add(name_off as i64 as u64);
-            read_name_public(bin, name_addr).unwrap_or_default()
+            read_name_public(bin, md, name_addr).unwrap_or_default()
         } else {
             String::new()
         };

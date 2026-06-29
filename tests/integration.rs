@@ -906,13 +906,14 @@ fn assert_recovers_featureset(fixture_name: &str, version_prefix: &str) {
 /// the rodata/gofunc fields 1.18 added). Uses typeset.go (no generics, so it
 /// builds on 1.16+) which defines a custom interface with two implementers, so the
 /// itablinks and the program's own struct and interface types must all recover with
-/// correct names, not just a non-empty count.
-#[test]
-fn recovers_typeset_go_1_17() {
-    let Some(path) = fixture("typeset.go117.stripped") else {
+/// correct names, not just a non-empty count. Run for both 1.16 (a 2-byte
+/// big-endian name length) and 1.17 (a varint, like 1.18+) to cover both name
+/// encodings the magic cannot distinguish.
+fn assert_recovers_typeset(fixture_name: &str, version: &str) {
+    let Some(path) = fixture(fixture_name) else {
         return;
     };
-    let bin = GoBinary::open(&path).expect("open typeset go1.17");
+    let bin = GoBinary::open(&path).expect("open typeset fixture");
     let md = ModuleData::locate(&bin).expect("locate pre-1.18 moduledata");
 
     let types = types::recover_all(&bin, &md).expect("recover types");
@@ -920,13 +921,13 @@ fn recovers_typeset_go_1_17() {
     for required in ["main.Codec", "main.xorCodec", "main.addCodec"] {
         assert!(
             names.iter().any(|n| n.contains(required)),
-            "go1.17: expected {required} among {} recovered types",
+            "{version}: expected {required} among {} recovered types (name decoding)",
             types.len()
         );
     }
 
     // The []Codec literal links two itabs (Codec/xorCodec, Codec/addCodec); both
-    // must come back from the pre-1.18 itablinks.
+    // must come back from the pre-1.18 itablinks with their interface name.
     let pairs = itabs::recover_all(&bin, &md).expect("recover itabs");
     let codec_itabs = pairs
         .iter()
@@ -934,9 +935,19 @@ fn recovers_typeset_go_1_17() {
         .count();
     assert!(
         codec_itabs >= 2,
-        "go1.17: expected both main.Codec itabs, got {codec_itabs} of {} pairs",
+        "{version}: expected both main.Codec itabs, got {codec_itabs} of {} pairs",
         pairs.len()
     );
+}
+
+#[test]
+fn recovers_typeset_go_1_16() {
+    assert_recovers_typeset("typeset.go116.stripped", "go1.16");
+}
+
+#[test]
+fn recovers_typeset_go_1_17() {
+    assert_recovers_typeset("typeset.go117.stripped", "go1.17");
 }
 
 #[test]
