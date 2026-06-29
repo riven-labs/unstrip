@@ -203,6 +203,31 @@ impl GoBinary {
         }
         Some(&self.bytes[start_off..end_off])
     }
+
+    /// The executable bytes at `addr`, up to `max` of them, clamped to the end of
+    /// the containing text section's backing bytes. None when `addr` is not inside
+    /// an executable section. Unlike [`Self::read_at_addr`], it confirms the
+    /// section is text, so an interpreter can fold its "is this address
+    /// executable" guard and its instruction fetch into one section lookup, and the
+    /// returned slice borrows the loaded image instead of copying. The fetch in an
+    /// interpreter's inner loop runs once per executed instruction, so the saved
+    /// lookups and the avoided per-instruction allocation matter.
+    pub fn text_slice_at(&self, addr: u64, max: usize) -> Option<&[u8]> {
+        let s = self.section_for_addr(addr)?;
+        if s.kind != SectionKind::Text {
+            return None;
+        }
+        let start = s.file_offset_of(addr)?;
+        let sect_end = s
+            .file_offset
+            .saturating_add(s.file_size)
+            .min(self.bytes.len());
+        let end = start.saturating_add(max).min(sect_end);
+        if end <= start {
+            return None;
+        }
+        Some(&self.bytes[start..end])
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1038,6 +1063,51 @@ mod tests {
         };
         assert_eq!(bin.read_at_addr(0x1000, 16), None);
         assert_eq!(bin.read_at_addr(0x1008, 8), None);
+    }
+
+    #[test]
+    fn text_slice_at_returns_executable_bytes_clamped_to_section() {
+        // bytes 0..32: .text maps addr 0x1000 to file [0,16), .rodata maps 0x2000
+        // to file [16,32). text_slice_at borrows the text bytes, clamps the length
+        // to the section end, and refuses a non-text or unmapped address (it folds
+        // an interpreter's executable guard into the fetch).
+        let bin = GoBinary {
+            bytes: (0..32u8).collect(),
+            container: Container::Elf,
+            arch: Arch::X86_64,
+            little_endian: true,
+            ptr_size: 8,
+            sections: vec![
+                Section {
+                    name: ".text".to_string(),
+                    kind: SectionKind::Text,
+                    file_offset: 0,
+                    file_size: 16,
+                    addr: 0x1000,
+                    vmsize: 16,
+                },
+                Section {
+                    name: ".rodata".to_string(),
+                    kind: SectionKind::ReadOnlyData,
+                    file_offset: 16,
+                    file_size: 16,
+                    addr: 0x2000,
+                    vmsize: 16,
+                },
+            ],
+            pclntab_offset: 0,
+            pclntab_size: 0,
+            pclntab_addr: 0,
+            text_addr: 0x1000,
+        };
+        // A full window inside .text borrows the loaded bytes.
+        assert_eq!(bin.text_slice_at(0x1000, 8), Some(&[0, 1, 2, 3, 4, 5, 6, 7][..]));
+        // A window at the section's tail clamps to what the section holds.
+        assert_eq!(bin.text_slice_at(0x100c, 16), Some(&[12, 13, 14, 15][..]));
+        // A non-text section is not executable, and an unmapped address has no
+        // section: both refuse, the same stop an interpreter's guard produced.
+        assert_eq!(bin.text_slice_at(0x2000, 8), None);
+        assert_eq!(bin.text_slice_at(0x9999, 8), None);
     }
 
     #[test]
