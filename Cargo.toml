@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "unstrip"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Recover symbols, types, and method signatures from stripped Go binaries. Ghidra/IDA/Binary Ninja exporters included."

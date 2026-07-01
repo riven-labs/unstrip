@@ -7,6 +7,8 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-01
+
 ### Added
 
 - Parse the Go 1.16 and 1.17 pclntab (magic `0xfffffffa`). The header has no
