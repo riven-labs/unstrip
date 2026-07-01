@@ -1,9 +1,9 @@
 name: Release
 
 # Manual release workflow. Fire it from the Actions tab against an existing
-# tag (e.g. v1.0.0). The job builds four targets in parallel, packages each
-# binary, computes SHA256SUMS, and creates a published GitHub release at the
-# given tag with every artifact attached.
+# tag (e.g. v1.0.0). It builds four targets in parallel, packages each binary,
+# computes SHA256SUMS, creates a published GitHub release at the given tag with
+# every artifact attached, and publishes the crate to crates.io.
 
 on:
   workflow_dispatch:
@@ -116,3 +116,22 @@ jobs:
               --notes "Release notes pending. The maintainer will edit this body shortly."
           fi
           gh release upload "$TAG" dist/* --clobber
+
+  crates-publish:
+    name: publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The tag's Cargo.toml version must not already be on crates.io; cargo
+      # publish verifies the crate, then uploads it. The token is a repository
+      # secret, read by cargo from CARGO_REGISTRY_TOKEN.
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
