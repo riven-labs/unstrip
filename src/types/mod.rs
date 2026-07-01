@@ -440,9 +440,8 @@ fn read_name(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<String> {
         .read_at_addr(addr, 1 + 10)
         .ok_or_else(|| Error::TypeRecovery(format!("name header at 0x{addr:x} unmapped")))?;
 
-    let (len, len_bytes) = read_name_len(&header[1..], md.name_enc).ok_or_else(|| {
-        Error::TypeRecovery(format!("name length at 0x{addr:x} did not decode"))
-    })?;
+    let (len, len_bytes) = read_name_len(&header[1..], md.name_enc)
+        .ok_or_else(|| Error::TypeRecovery(format!("name length at 0x{addr:x} did not decode")))?;
 
     if len > 1 << 20 {
         return Err(Error::TypeRecovery(format!(
@@ -676,9 +675,8 @@ fn read_name_full(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<(String,
     let embedded = flag_byte & (1 << 3) != 0;
     let has_tag = flag_byte & (1 << 1) != 0;
 
-    let (name_len, name_len_bytes) = read_name_len(&header[1..], md.name_enc).ok_or_else(|| {
-        Error::TypeRecovery(format!("name length at 0x{addr:x} did not decode"))
-    })?;
+    let (name_len, name_len_bytes) = read_name_len(&header[1..], md.name_enc)
+        .ok_or_else(|| Error::TypeRecovery(format!("name length at 0x{addr:x} did not decode")))?;
     if name_len > 1 << 20 {
         return Err(Error::TypeRecovery(format!(
             "name length {name_len} unreasonably large"

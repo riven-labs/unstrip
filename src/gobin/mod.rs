@@ -645,7 +645,11 @@ fn scan_for_magic(
     let candidates: [[u8; 4]; 3] = if little_endian {
         [PCLNTAB_MAGIC_1_20, PCLNTAB_MAGIC_1_18, PCLNTAB_MAGIC_1_16]
     } else {
-        [PCLNTAB_MAGIC_1_20_BE, PCLNTAB_MAGIC_1_18_BE, PCLNTAB_MAGIC_1_16_BE]
+        [
+            PCLNTAB_MAGIC_1_20_BE,
+            PCLNTAB_MAGIC_1_18_BE,
+            PCLNTAB_MAGIC_1_16_BE,
+        ]
     };
 
     let mut best: Option<usize> = None;
@@ -999,7 +1003,10 @@ mod tests {
         bytes[off + 6] = 1; // quantum (pad bytes at +4,+5 already zero)
         bytes[off + 7] = 8; // ptr size
         let sections = data_sec(bytes.len());
-        assert_eq!(detect_pre118_magic(&bytes, &sections, true), Some(0xfffffffb));
+        assert_eq!(
+            detect_pre118_magic(&bytes, &sections, true),
+            Some(0xfffffffb)
+        );
         // Go 1.16/1.17 (0xfffffffa) is parsed now, so the detector leaves it for
         // scan_for_magic and the parser rather than naming it unsupported.
         bytes[off] = 0xfa;
@@ -1014,7 +1021,10 @@ mod tests {
         bytes[off + 7] = 8;
         // A nonzero pad byte means it is not a pcHeader prefix: reject.
         bytes[off + 4] = 0x41;
-        assert_eq!(detect_pre118_magic(&bytes, &data_sec(bytes.len()), true), None);
+        assert_eq!(
+            detect_pre118_magic(&bytes, &data_sec(bytes.len()), true),
+            None
+        );
         // A valid prefix sitting in a .text section is skipped (a pclntab never
         // lives in code), so a stray match in executable bytes is not a header.
         bytes[off + 4] = 0;
@@ -1031,7 +1041,10 @@ mod tests {
         // The 1.18+ magic is not the 1.2 to 1.15 magic: the detector ignores it (the
         // real scans handle it), so it never shadows a parseable binary.
         bytes[off..off + 4].copy_from_slice(&[0xf1, 0xff, 0xff, 0xff]);
-        assert_eq!(detect_pre118_magic(&bytes, &data_sec(bytes.len()), true), None);
+        assert_eq!(
+            detect_pre118_magic(&bytes, &data_sec(bytes.len()), true),
+            None
+        );
     }
 
     #[test]
@@ -1101,7 +1114,10 @@ mod tests {
             text_addr: 0x1000,
         };
         // A full window inside .text borrows the loaded bytes.
-        assert_eq!(bin.text_slice_at(0x1000, 8), Some(&[0, 1, 2, 3, 4, 5, 6, 7][..]));
+        assert_eq!(
+            bin.text_slice_at(0x1000, 8),
+            Some(&[0, 1, 2, 3, 4, 5, 6, 7][..])
+        );
         // A window at the section's tail clamps to what the section holds.
         assert_eq!(bin.text_slice_at(0x100c, 16), Some(&[12, 13, 14, 15][..]));
         // A non-text section is not executable, and an unmapped address has no

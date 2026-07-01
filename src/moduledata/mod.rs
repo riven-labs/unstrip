@@ -176,10 +176,10 @@ fn detect_name_encoding(bin: &GoBinary, md: &ModuleData) -> NameEnc {
         let Some(nbytes) = bin.read_at_addr(name_addr, 1 + 2 + 1024) else {
             continue;
         };
-        if name_probe_valid(&nbytes, NameEnc::Varint) {
+        if name_probe_valid(nbytes, NameEnc::Varint) {
             varint_ok += 1;
         }
-        if name_probe_valid(&nbytes, NameEnc::TwoByteBe) {
+        if name_probe_valid(nbytes, NameEnc::TwoByteBe) {
             twobyte_ok += 1;
         }
     }
@@ -780,14 +780,26 @@ mod tests {
     fn name_len_decodes_both_encodings() {
         // Varint (Go 1.17+): low 7 bits per byte, MSB continuation.
         assert_eq!(read_name_len(&[0x05, b'h'], NameEnc::Varint), Some((5, 1)));
-        assert_eq!(read_name_len(&[0x80, 0x01], NameEnc::Varint), Some((128, 2)));
+        assert_eq!(
+            read_name_len(&[0x80, 0x01], NameEnc::Varint),
+            Some((128, 2))
+        );
         // 2-byte big-endian (Go 1.16 and earlier).
-        assert_eq!(read_name_len(&[0x00, 0x05], NameEnc::TwoByteBe), Some((5, 2)));
-        assert_eq!(read_name_len(&[0x01, 0x2c], NameEnc::TwoByteBe), Some((300, 2)));
+        assert_eq!(
+            read_name_len(&[0x00, 0x05], NameEnc::TwoByteBe),
+            Some((5, 2))
+        );
+        assert_eq!(
+            read_name_len(&[0x01, 0x2c], NameEnc::TwoByteBe),
+            Some((300, 2))
+        );
         // The same first byte means different things under each encoding: 0x05 is a
         // length of 5 as a varint but the high byte of a 1280+ length as 2-byte BE.
         // This is exactly why the encoding must be detected per binary, not guessed.
-        assert_eq!(read_name_len(&[0x05, 0x00], NameEnc::TwoByteBe), Some((0x0500, 2)));
+        assert_eq!(
+            read_name_len(&[0x05, 0x00], NameEnc::TwoByteBe),
+            Some((0x0500, 2))
+        );
         // Truncated input yields None rather than panicking.
         assert_eq!(read_name_len(&[0x80], NameEnc::Varint), None);
         assert_eq!(read_name_len(&[0x00], NameEnc::TwoByteBe), None);

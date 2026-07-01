@@ -260,7 +260,9 @@ impl<'a> Pclntab<'a> {
         // Checked throughout: a hostile header can set nfunc or the offsets so that
         // funcdata_off + i*stride overflows usize. Overflow resolves to None (no
         // such entry), never a panic or a wrapped offset.
-        let off = self.funcdata_off.checked_add(i.checked_mul(self.functab_stride())?)?;
+        let off = self
+            .funcdata_off
+            .checked_add(i.checked_mul(self.functab_stride())?)?;
         match self.layout {
             Layout::Modern => self
                 .text_start
@@ -275,7 +277,9 @@ impl<'a> Pclntab<'a> {
     /// The funcoff is relative to the functab base in both layouts.
     fn functab_entry(&self, i: usize) -> Option<(u64, usize)> {
         let ps = self.ptrsize as usize;
-        let off = self.funcdata_off.checked_add(i.checked_mul(self.functab_stride())?)?;
+        let off = self
+            .funcdata_off
+            .checked_add(i.checked_mul(self.functab_stride())?)?;
         let func_off = match self.layout {
             Layout::Modern => {
                 read_u32(self.data, off.checked_add(4)?, self.little_endian).ok()? as usize
@@ -284,7 +288,10 @@ impl<'a> Pclntab<'a> {
                 read_uintptr(self.data, off.checked_add(ps)?, ps, self.little_endian).ok()? as usize
             }
         };
-        Some((self.functab_addr(i)?, self.funcdata_off.checked_add(func_off)?))
+        Some((
+            self.functab_addr(i)?,
+            self.funcdata_off.checked_add(func_off)?,
+        ))
     }
 
     /// Offset from a `_func` struct start to its `nameOff` field, i.e. the width of
@@ -803,9 +810,11 @@ impl<'a> Pclntab<'a> {
             return None;
         }
 
-        let pcfile_off = read_u32(self.data, func_start + fb + 16, self.little_endian).ok()? as usize;
+        let pcfile_off =
+            read_u32(self.data, func_start + fb + 16, self.little_endian).ok()? as usize;
         let pcln_off = read_u32(self.data, func_start + fb + 20, self.little_endian).ok()? as usize;
-        let cu_offset = read_u32(self.data, func_start + fb + 28, self.little_endian).ok()? as usize;
+        let cu_offset =
+            read_u32(self.data, func_start + fb + 28, self.little_endian).ok()? as usize;
 
         let file_idx = first_pcvalue(&self.data[self.pctab_off..], pcfile_off)?;
         let line = first_pcvalue(&self.data[self.pctab_off..], pcln_off)?;
