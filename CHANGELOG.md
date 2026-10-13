@@ -7,6 +7,46 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
+### Added
+
+- Per-function metadata readers on `Pclntab` (`src/pclntab/funcinfo.rs`), layout-aware
+  across the Go 1.16/1.17, 1.18/1.19, and 1.20+ pclntabs:
+  - `line_table(func)` returns the per-PC source positions as `LineSpan { pc_lo,
+    pc_hi, file, line }`, increasing and merged where adjacent; PCs with no
+    resolvable file or a non-positive line are left out.
+  - `sp_delta_at(func, pc)` reads the pcsp table; `pcdata_value(func, table, pc)`
+    reads any PCDATA table.
+  - `inline_leaf(func, pc)` returns the innermost inlined call at a PC as
+    `InlineLeaf { func_name, file, line, parent_pc, start_line, func_id }`.
+  - `func_fields(func)` decodes the fixed `_func` fields (`FuncFields`;
+    `start_line` only on Go 1.20+), and `funcdata(func, idx)` the address of a
+    funcdata slot (gofunc-relative on 1.18+, absolute on 1.16/1.17).
+  - `arg_info(func)` decodes FUNCDATA_ArgInfo exactly as the runtime's
+    traceback printer walks it (`ArgComp::{Word, Agg, Ellipsis, TooLarge}`).
+  - `open_coded_defer_info(func)` decodes FUNCDATA_OpenCodedDeferInfo in all
+    three formats (Go 1.14-1.17, 1.18-1.21, 1.22+); `is_wrapper(func)` checks
+    the funcID against the binary's FuncIDWrapper. On the shared 1.20+ magic
+    the release epoch is pinned from `runtime.systemstack_switch`'s funcID.
+  - `func_entry_at(pc)` returns the `FuncEntry` these readers take;
+    `parse_arg_info` and `parse_open_defer_info` decode raw records.
+- `testdata/funcinfo.go` and its per-release builds in `build-fixtures.sh`.
+
+### Fixed
+
+- Inline frames on Go 1.16/1.17 binaries: `lookup_inline` read the inline
+  frame's pcfile, pcln, and cuOffset at the Go 1.18+ `_func` offsets, which are
+  wrong for the 1.16/1.17 layout's pointer-sized entry, and it returned only the
+  physical frame there. Positions are now read at the layout's offsets and the
+  inline tree is walked on every supported layout.
+- Inline trees on Go 1.18/1.19: `decode_inline_tree` and `lookup_inline` assumed
+  the 1.20+ `_func` header (with `startLine`) and the 16-byte `inlinedCall`; they
+  now read the 1.18/1.19 header and the 20-byte record of Go 1.16 to 1.19
+  (`InlinedCall::start_line` is 0 there, since those records do not carry it).
+- pc-value tables honor the pclntab quantum (it was assumed to be 1, wrong on
+  arm64) and a table offset of 0 means "no table", as in the runtime.
+- The inline-tree docs no longer claim parentPc is -1 for top-level entries;
+  every record carries a real call-site offset.
+
 ## [1.2.0] - 2026-07-01
 
 ### Added

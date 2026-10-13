@@ -4,6 +4,13 @@ use crate::error::Error;
 use crate::gobin::GoBinary;
 use crate::Result;
 
+mod funcinfo;
+pub use funcinfo::{
+    parse_arg_info, parse_open_defer_info, ArgComp, FuncFields, InlineLeaf, LineSpan,
+    OpenDeferFormat, OpenDeferInfo, FUNCDATA_ARG_INFO, FUNCDATA_INL_TREE,
+    FUNCDATA_OPEN_CODED_DEFER_INFO, PCDATA_INL_TREE_INDEX,
+};
+
 pub const MAGIC_1_20: u32 = 0xfffffff1;
 /// Go 1.18 and 1.19 pclntab magic. The layout is byte-compatible with
 /// 1.20+ for the fields we care about, only the magic differs.
@@ -50,6 +57,10 @@ pub struct Function {
 /// re-parsing, which is what keeps whole-program sweeps linear.
 #[derive(Clone)]
 pub struct Pclntab<'a> {
+    /// The binary the table was parsed from. Funcdata (the inline tree, ArgInfo,
+    /// OpenCodedDeferInfo) lives outside the pclntab, so the metadata readers in
+    /// [`funcinfo`] resolve it through the container's sections.
+    bin: &'a GoBinary,
     data: &'a [u8],
     little_endian: bool,
     magic: u32,
@@ -69,6 +80,13 @@ pub struct Pclntab<'a> {
     /// (the funcdata entries are offsets relative to gofunc). When None,
     /// inline-tree decoding falls back to returning the leaf frame only.
     gofunc: Option<u64>,
+
+    /// The `funcID` of `runtime.systemstack_switch`, found once on demand. The
+    /// FuncID enum grew between releases sharing the 1.20+ magic, and
+    /// systemstack_switch always sits directly before FuncIDWrapper (Go 1.17+),
+    /// so this one value pins both the wrapper ID and the toolchain epoch
+    /// (1.20/1.21 vs 1.22+) that the open-coded defer format depends on.
+    systemstack_switch_id: std::sync::OnceLock<Option<u8>>,
 }
 
 /// A richer per-function record with the raw `_func` struct offset and the
@@ -209,6 +227,7 @@ impl<'a> Pclntab<'a> {
         };
 
         Ok(Pclntab {
+            bin,
             data,
             little_endian,
             magic,
@@ -223,6 +242,7 @@ impl<'a> Pclntab<'a> {
             pctab_off,
             funcdata_off,
             gofunc: None,
+            systemstack_switch_id: std::sync::OnceLock::new(),
         })
     }
 
@@ -317,9 +337,10 @@ impl<'a> Pclntab<'a> {
         self.little_endian
     }
 
-    /// Offset of the functab inside `data()`. Each entry is two u32s:
-    /// `(text_off, func_off)`. The final sentinel entry has `text_off`
-    /// equal to the text size, terminating the array.
+    /// Offset of the functab inside `data()`. Each entry is `(entry, func_off)`:
+    /// two u32s on Go 1.18+ (entry as an offset from textStart), two uintptrs on
+    /// Go 1.16/1.17 (absolute entry). The final sentinel entry marks the end of
+    /// the last function.
     pub fn funcdata_off(&self) -> usize {
         self.funcdata_off
     }
@@ -388,227 +409,42 @@ impl<'a> Pclntab<'a> {
     }
 
     /// Resolve a PC to the full inlined call stack, innermost frame first.
-    /// Requires `with_gofunc` to have been called; otherwise returns the
-    /// single physical frame from `lookup`. Walks the FUNCDATA_InlTree array
-    /// for the containing function and follows parentPc links until the
-    /// physical function is reached.
-    pub fn lookup_inline(&self, bin: &crate::gobin::GoBinary, pc: u64) -> Vec<InlineFrame> {
-        let mut frames = Vec::new();
+    /// Reads PCDATA_InlTreeIndex at `pc`, decodes that FUNCDATA_InlTree record,
+    /// and follows each record's parentPc until the physical function is
+    /// reached; the physical frame is always last. On Go 1.18+ the inline tree
+    /// is addressed relative to gofunc, so without [`with_gofunc`] only the
+    /// physical frame comes back. On Go 1.16/1.17 funcdata pointers are
+    /// absolute and no gofunc is needed. Funcdata is read through the binary
+    /// this table was parsed from; `_bin` is kept for API compatibility.
+    ///
+    /// [`with_gofunc`]: Self::with_gofunc
+    pub fn lookup_inline(&self, _bin: &crate::gobin::GoBinary, pc: u64) -> Vec<InlineFrame> {
         let Some(leaf) = self.lookup(pc) else {
-            return frames;
+            return Vec::new();
         };
-        let physical_frame = InlineFrame {
-            name: leaf.name.clone(),
-            file: leaf.file.clone(),
+        let mut frames = Vec::new();
+        if let Some(func) = self.func_entry_at(pc) {
+            for (i, call) in self.inline_chain(&func, pc).into_iter().enumerate() {
+                let name = if call.func_name.is_empty() {
+                    format!("inlined@{i}")
+                } else {
+                    call.func_name
+                };
+                frames.push(InlineFrame {
+                    name,
+                    file: call.file,
+                    line: call.line.or(call.start_line),
+                    inlined: true,
+                });
+            }
+        }
+        frames.push(InlineFrame {
+            name: leaf.name,
+            file: leaf.file,
             line: leaf.start_line,
             inlined: false,
-        };
-
-        // The inline-tree walk below reads the functab and _func at their 1.18+
-        // offsets. On 1.16/1.17 those positions differ, so return the physical
-        // frame rather than decode the tree with the wrong layout.
-        if self.layout != Layout::Modern {
-            frames.push(physical_frame);
-            return frames;
-        }
-
-        let Some(gofunc) = self.gofunc else {
-            frames.push(physical_frame);
-            return frames;
-        };
-
-        // Re-locate the function entry to access its _func struct.
-        let n = self.nfunc as usize;
-        let pc_off = match pc.checked_sub(self.text_start) {
-            Some(v) => v as u32,
-            None => {
-                frames.push(physical_frame);
-                return frames;
-            }
-        };
-        let read_text_off =
-            |i: usize| read_u32(self.data, self.funcdata_off + i * 8, self.little_endian).ok();
-        let mut lo = 0;
-        let mut hi = n;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            match read_text_off(mid) {
-                Some(o) if o <= pc_off => lo = mid + 1,
-                _ => hi = mid,
-            }
-        }
-        if lo == 0 {
-            frames.push(physical_frame);
-            return frames;
-        }
-        let idx = lo - 1;
-        let Some(func_off) = read_u32(
-            self.data,
-            self.funcdata_off + idx * 8 + 4,
-            self.little_endian,
-        )
-        .ok() else {
-            frames.push(physical_frame);
-            return frames;
-        };
-        let func_start = self.funcdata_off + func_off as usize;
-
-        // _func header layout (Go 1.20+, 40 bytes):
-        //   off=0  entryOff   u32
-        //   off=4  nameOff    i32
-        //   off=8  args       i32
-        //   off=12 deferreturn u32
-        //   off=16 pcsp       u32
-        //   off=20 pcfile     u32
-        //   off=24 pcln       u32
-        //   off=28 npcdata    u32
-        //   off=32 cuOffset   u32
-        //   off=36 startLine  i32  (also funcID+flag+pad+nfuncdata packed at off=40)
-        // Then [npcdata]u32 then [nfuncdata]u32.
-        if func_start + 44 > self.data.len() {
-            frames.push(physical_frame);
-            return frames;
-        }
-        let npcdata = match read_u32(self.data, func_start + 28, self.little_endian) {
-            Ok(v) => v as usize,
-            Err(_) => {
-                frames.push(physical_frame);
-                return frames;
-            }
-        };
-        let nfuncdata = self.data[func_start + 43] as usize;
-
-        // The variable arrays sit right after the 44-byte fixed header.
-        let pcdata_off = func_start + 44;
-        let funcdata_arr_off = pcdata_off + npcdata * 4;
-
-        const PCDATA_INLTREE_INDEX: usize = 2;
-        const FUNCDATA_INLTREE: usize = 3;
-        if nfuncdata <= FUNCDATA_INLTREE || npcdata <= PCDATA_INLTREE_INDEX {
-            frames.push(physical_frame);
-            return frames;
-        }
-        let inltree_funcdata = match read_u32(
-            self.data,
-            funcdata_arr_off + FUNCDATA_INLTREE * 4,
-            self.little_endian,
-        ) {
-            Ok(v) => v,
-            Err(_) => {
-                frames.push(physical_frame);
-                return frames;
-            }
-        };
-        if inltree_funcdata == u32::MAX {
-            frames.push(physical_frame);
-            return frames;
-        }
-        let inltree_addr = gofunc.wrapping_add(inltree_funcdata as u64);
-
-        // PCDATA_InlTreeIndex: offset into pctab. The pc-value table is
-        // decoded with the current PC offset (relative to function entry) to
-        // produce the current inltree index, or -1 for "not inlined here".
-        let pcdata_inltree_off = match read_u32(
-            self.data,
-            pcdata_off + PCDATA_INLTREE_INDEX * 4,
-            self.little_endian,
-        ) {
-            Ok(v) => v as usize,
-            Err(_) => {
-                frames.push(physical_frame);
-                return frames;
-            }
-        };
-        let func_entry_pc = self.text_start + read_text_off(idx).unwrap_or(0) as u64;
-        let target_off = (pc - func_entry_pc) as u32;
-        let mut current_idx =
-            pcvalue_at(&self.data[self.pctab_off..], pcdata_inltree_off, target_off);
-
-        // Walk: each inlinedCall is 16 bytes (funcID+pad+nameOff+parentPc+startLine).
-        // Cap the per-PC inline depth at 32. Real call chains are rarely deeper
-        // than 5; 32 leaves room for pathological inlining without trusting a
-        // hostile inltree index to bound the loop on its own.
-        const MAX_INLINE_DEPTH: usize = 32;
-        // Cap the absolute inltree index. A real inline tree fits in a handful
-        // of KB; 65536 entries (1 MiB) is a very generous structural ceiling.
-        const MAX_INLTREE_INDEX: i64 = 65_536;
-
-        let mut current_pc_off = target_off;
-        let mut iter_guard = 0;
-        while current_idx >= 0 && iter_guard < MAX_INLINE_DEPTH {
-            if current_idx > MAX_INLTREE_INDEX {
-                break;
-            }
-            iter_guard += 1;
-            let entry_addr = inltree_addr + (current_idx as u64) * 16;
-            let Some(entry) = bin.read_at_addr(entry_addr, 16) else {
-                break;
-            };
-            let name_off = i32::from_le_bytes(entry[4..8].try_into().unwrap()) as usize;
-            let parent_pc = i32::from_le_bytes(entry[8..12].try_into().unwrap());
-            let start_line = i32::from_le_bytes(entry[12..16].try_into().unwrap());
-
-            let name = self
-                .read_name(name_off)
-                .unwrap_or_else(|_| format!("inlined@{current_idx}"));
-            let file_and_line = self.file_and_line_for_pc(func_start, current_pc_off);
-            frames.push(InlineFrame {
-                name,
-                file: file_and_line.0,
-                line: file_and_line.1.or(if start_line > 0 {
-                    Some(start_line as u32)
-                } else {
-                    None
-                }),
-                inlined: true,
-            });
-
-            // Advance to the parent: parentPc is an offset from function entry
-            // that points at the call site whose source position is recorded.
-            current_pc_off = parent_pc as u32;
-            current_idx = pcvalue_at(
-                &self.data[self.pctab_off..],
-                pcdata_inltree_off,
-                current_pc_off,
-            );
-        }
-
-        frames.push(physical_frame);
+        });
         frames
-    }
-
-    /// Decode (file, line) at a specific PC offset within a function. Uses
-    /// the function's pcfile and pcln pc-value tables, advanced to the
-    /// target offset rather than just the first entry.
-    fn file_and_line_for_pc(
-        &self,
-        func_start: usize,
-        target_off: u32,
-    ) -> (Option<String>, Option<u32>) {
-        let Ok(pcfile_off) = read_u32(self.data, func_start + 20, self.little_endian) else {
-            return (None, None);
-        };
-        let Ok(pcln_off) = read_u32(self.data, func_start + 24, self.little_endian) else {
-            return (None, None);
-        };
-        let Ok(cu_offset) = read_u32(self.data, func_start + 32, self.little_endian) else {
-            return (None, None);
-        };
-
-        let file_idx = pcvalue_at(
-            &self.data[self.pctab_off..],
-            pcfile_off as usize,
-            target_off,
-        );
-        let line = pcvalue_at(&self.data[self.pctab_off..], pcln_off as usize, target_off);
-
-        let file = if file_idx >= 0 {
-            self.resolve_file(cu_offset as usize, file_idx as usize)
-        } else {
-            None
-        };
-        let line = if line > 0 { Some(line as u32) } else { None };
-        (file, line)
     }
 
     fn resolve_file(&self, cu_offset: usize, file_idx: usize) -> Option<String> {
@@ -824,53 +660,9 @@ impl<'a> Pclntab<'a> {
     }
 }
 
-/// Walk a pc-value table until `target_off` falls inside the current run.
-/// Returns the value covering that offset, or -1 if exhausted / not present.
-///
-/// Format per `src/runtime/symtab.go`: stream of (zig-zag value delta varint,
-/// pc delta varint x quantum), terminated by a zero value-delta varint.
-/// Starting value is -1; each record advances both `value` (by zig-zagged
-/// delta) and `pc` (by pc_delta * quantum). We return `value` as soon as
-/// `target_off < pc`, meaning the current run covers the target.
-fn pcvalue_at(table: &[u8], start: usize, target_off: u32) -> i64 {
-    if start >= table.len() {
-        return -1;
-    }
-    let mut value: i64 = -1;
-    let mut pc: u32 = 0;
-    let mut pos = start;
-    // Quantum is the PC advance multiplier, 1 on amd64/arm64. We assume 1 here;
-    // big-endian / non-1 quantum callers should multiply pc deltas.
-    let quantum: u32 = 1;
-    let mut iter_guard = 0;
-    while pos < table.len() && iter_guard < 1_000_000 {
-        iter_guard += 1;
-        let (uval, n) = match read_varint(&table[pos..]) {
-            Some(v) => v,
-            None => return -1,
-        };
-        if uval == 0 && pc != 0 {
-            return -1;
-        }
-        pos += n;
-        let delta_val = zig_zag(uval);
-        value = value.wrapping_add(delta_val);
-        let (pc_delta, n2) = match read_varint(&table[pos..]) {
-            Some(v) => v,
-            None => return -1,
-        };
-        pos += n2;
-        pc = pc.wrapping_add((pc_delta as u32) * quantum);
-        if target_off < pc {
-            return value;
-        }
-    }
-    -1
-}
-
 /// Decodes the first non-trivial value from a pc-value table. Used to recover
 /// the function's entry-PC line and file index (the value at the first
-/// instruction). For lookups at arbitrary PCs, use `pcvalue_at`.
+/// instruction). For lookups at arbitrary PCs, use `Pclntab::pcvalue`.
 fn first_pcvalue(table: &[u8], start: usize) -> Option<i64> {
     if start >= table.len() {
         return None;

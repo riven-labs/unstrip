@@ -123,6 +123,30 @@ build_typeset_version() {
 build_typeset_version go1.16.15 typeset.go116.stripped
 build_typeset_version go1.17.13 typeset.go117.stripped
 
+# funcinfo.go pins the per-function metadata readers (line table, ArgInfo,
+# open-coded defers, inline tree, wrapper funcID) on each release whose layout
+# differs: 1.17 (pre-1.18 _func, Go 1.14 defer record), 1.18 (no startLine,
+# 20-byte inline records), 1.20 (1.20+ _func, Go 1.18 defer record), 1.22 (Go
+# 1.22 defer record), and the toolchain on PATH. It has no generics so it builds
+# with Go 1.17. Same optional-skip contract.
+build_funcinfo_version() {
+    local gobin=$1
+    local out=$2
+    if command -v "$gobin" >/dev/null 2>&1; then
+        echo "building $out ($("$gobin" version | awk '{print $3}'))"
+        GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GOFLAGS=-trimpath \
+            "$gobin" build -ldflags='-s -w' -o "$out" funcinfo.go
+    else
+        echo "$gobin not installed; skipping $out"
+    fi
+}
+
+build_funcinfo_version go1.17.13 funcinfo.go117.stripped
+build_funcinfo_version go1.18.10 funcinfo.go118.stripped
+build_funcinfo_version go1.20.14 funcinfo.go120.stripped
+build_funcinfo_version go1.22.12 funcinfo.go122.stripped
+build_funcinfo_version "$GO" funcinfo.go126.stripped
+
 # A fixture with real third-party deps so we can exercise buildinfo, itabs,
 # and type recovery against something richer than `hello`.
 if [ -d depsdemo ]; then
