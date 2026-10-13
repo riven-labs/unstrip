@@ -46,6 +46,15 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   arm64) and a table offset of 0 means "no table", as in the runtime.
 - The inline-tree docs no longer claim parentPc is -1 for top-level entries;
   every record carries a real call-site offset.
+- Method tables of named func types: the UncommonType was read 4 bytes after
+  the type header instead of 8 (`FuncType` is padded to pointer alignment), so
+  every named func type (Go 1.23+'s `iter.Seq[...]` in every binary) yielded
+  thousands of nameless methods with PCs outside the text, and some fabricated
+  signatures at real entries. Methods on named map types are now recovered too:
+  the pre-1.24 and swiss-table `MapType` layouts are told apart from the record
+  itself. A method table with a nameless method or an offset outside its region
+  is rejected as a whole, and text offsets go through the new
+  `ModuleData::text_addr`, which follows `textsectmap` like the runtime.
 
 ## [1.2.0] - 2026-07-01
 

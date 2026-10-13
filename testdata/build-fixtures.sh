@@ -147,6 +147,32 @@ build_funcinfo_version go1.20.14 funcinfo.go120.stripped
 build_funcinfo_version go1.22.12 funcinfo.go122.stripped
 build_funcinfo_version "$GO" funcinfo.go126.stripped
 
+# methodset.go pins method-table recovery for every kind a named type with
+# methods can have (func, map, chan, array, slice, float, string, pointer): each
+# kind puts its UncommonType at a different offset, and maps switched to the
+# swiss-table MapType in Go 1.24. Built with each release whose map or method
+# layout matters (1.17, 1.18, 1.20, 1.22 old maps; 1.24 and the toolchain on
+# PATH swiss maps). No generics so it builds with Go 1.17. Same optional-skip
+# contract.
+build_methodset_version() {
+    local gobin=$1
+    local out=$2
+    if command -v "$gobin" >/dev/null 2>&1; then
+        echo "building $out ($("$gobin" version | awk '{print $3}'))"
+        GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GOFLAGS=-trimpath \
+            "$gobin" build -ldflags='-s -w' -o "$out" methodset.go
+    else
+        echo "$gobin not installed; skipping $out"
+    fi
+}
+
+build_methodset_version go1.17.13 methodset.go117.stripped
+build_methodset_version go1.18.10 methodset.go118.stripped
+build_methodset_version go1.20.14 methodset.go120.stripped
+build_methodset_version go1.22.12 methodset.go122.stripped
+build_methodset_version go1.24.13 methodset.go124.stripped
+build_methodset_version "$GO" methodset.go126.stripped
+
 # A fixture with real third-party deps so we can exercise buildinfo, itabs,
 # and type recovery against something richer than `hello`.
 if [ -d depsdemo ]; then

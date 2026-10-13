@@ -113,6 +113,20 @@ pub enum Layout {
     Pre118,
 }
 
+/// The runtime's `textAddr` loop over a split text: `sects` is `textsectmap` as
+/// `(vaddr, end, baseaddr)`, `off` a virtual text offset. The section holding
+/// `off` (or the last one's end, which the functab includes) relocates it;
+/// an offset in no section keeps `fallback` (`text + off`), as the runtime does.
+fn text_addr_in(sects: &[(u64, u64, u64)], fallback: u64, off: u64) -> u64 {
+    for (i, &(vaddr, end, base)) in sects.iter().enumerate() {
+        let last = i + 1 == sects.len();
+        if (off >= vaddr && off < end) || (last && off == end) {
+            return base.wrapping_add(off - vaddr);
+        }
+    }
+    fallback
+}
+
 /// Decode a Go `name` length prefix per the binary's encoding, returning the
 /// length and the number of header bytes it spans. Go 1.17+ uses a varint; Go 1.16
 /// and earlier a 2-byte big-endian length. `buf` points at the length (for a name,
@@ -270,6 +284,44 @@ impl ModuleData {
         Err(Error::ModuleData(
             "no moduledata candidate found in data sections".into(),
         ))
+    }
+
+    /// Resolve a `TextOff` (a method table's Ifn/Tfn) to a PC, mirroring the
+    /// runtime's `moduledata.textAddr`. With one text section (every internally
+    /// linked binary) that is `text + off`. When the external linker split the
+    /// text (ARM, PPC64, darwin/arm64 past the trampoline limit), `textsectmap`
+    /// lists `{vaddr, end, baseaddr}` per section and the offset is a virtual
+    /// offset into that list. `None` when the map cannot be read or the result
+    /// lands past `etext`, the case the runtime throws on.
+    pub fn text_addr(&self, bin: &GoBinary, off: u32) -> Option<u64> {
+        let off = off as u64;
+        let fallback = self.text.wrapping_add(off);
+        // A few sections is normal; anything near this is a corrupt header.
+        const MAX_TEXT_SECTIONS: u64 = 4096;
+        let n = self.textsectmap.len;
+        if n <= 1 {
+            return Some(fallback);
+        }
+        if n > MAX_TEXT_SECTIONS {
+            return None;
+        }
+        let ps = bin.pointer_size();
+        let entry = 3 * ps;
+        let raw = bin.read_at_addr(self.textsectmap.data, n as usize * entry)?;
+        let word = |b: &[u8]| -> u64 {
+            match (ps, bin.little_endian) {
+                (8, true) => u64::from_le_bytes(b.try_into().unwrap()),
+                (8, false) => u64::from_be_bytes(b.try_into().unwrap()),
+                (_, true) => u32::from_le_bytes(b.try_into().unwrap()) as u64,
+                (_, false) => u32::from_be_bytes(b.try_into().unwrap()) as u64,
+            }
+        };
+        let sects: Vec<(u64, u64, u64)> = raw
+            .chunks_exact(entry)
+            .map(|s| (word(&s[..ps]), word(&s[ps..2 * ps]), word(&s[2 * ps..])))
+            .collect();
+        let pc = text_addr_in(&sects, fallback, off);
+        (pc <= self.etext).then_some(pc)
     }
 
     /// Locate every moduledata in the binary by walking the
@@ -774,7 +826,23 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_name_len, NameEnc};
+    use super::{read_name_len, text_addr_in, NameEnc};
+
+    #[test]
+    fn text_offsets_follow_split_text_sections() {
+        // Two sections: virtual [0, 0x1000) loaded at 0x10000, virtual
+        // [0x1000, 0x1800) loaded at 0x20000 (a trampoline gap between them).
+        let sects = [(0, 0x1000, 0x10000), (0x1000, 0x1800, 0x20000)];
+        let fallback = |off: u64| 0x10000 + off;
+        assert_eq!(text_addr_in(&sects, fallback(0x10), 0x10), 0x10010);
+        assert_eq!(text_addr_in(&sects, fallback(0x1010), 0x1010), 0x20010);
+        // The last section's end is included (the functab carries etext).
+        assert_eq!(text_addr_in(&sects, fallback(0x1800), 0x1800), 0x20800);
+        // No section holds it: keep text + off, as the runtime does.
+        assert_eq!(text_addr_in(&sects, fallback(0x2000), 0x2000), 0x12000);
+        // One section (or none): plain text + off.
+        assert_eq!(text_addr_in(&[], fallback(0x44), 0x44), 0x10044);
+    }
 
     #[test]
     fn name_len_decodes_both_encodings() {
