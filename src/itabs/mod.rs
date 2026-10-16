@@ -225,5 +225,14 @@ fn read_type_name(bin: &GoBinary, md: &ModuleData, type_addr: u64) -> Result<Str
         .ok_or_else(|| Error::ItabRecovery(format!("type header at 0x{type_addr:x} unmapped")))?;
     let str_off = rd_u32(buf, type_str_offset(ps), le).unwrap_or(0) as i32;
     let name_addr = md.types.wrapping_add(str_off as i64 as u64);
-    types::read_name_public(bin, md, name_addr).map_err(|e| Error::ItabRecovery(e.to_string()))
+    let mut name = types::read_name_public(bin, md, name_addr)
+        .map_err(|e| Error::ItabRecovery(e.to_string()))?;
+    // TFlagExtraStar: `T`'s name is stored as `*T` (shared with `*T`'s
+    // string) and the flag says to drop the star, as type recovery does.
+    // The flag byte follows size, ptrdata and the 4-byte hash.
+    let tflag = buf.get(2 * ps + 4).copied().unwrap_or(0);
+    if tflag & types::TFLAG_EXTRA_STAR != 0 && name.starts_with('*') {
+        name.remove(0);
+    }
+    Ok(name)
 }
