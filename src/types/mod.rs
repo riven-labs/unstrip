@@ -208,7 +208,31 @@ pub fn recover_with_mode(bin: &GoBinary, md: &ModuleData, mode: Mode) -> Result<
         let extras = linear_scan_types_region(bin, md, &seen);
         types.extend(extras);
     }
+    decode_field_offsets(&mut types);
     Ok(types)
+}
+
+/// Go 1.18 and older store a struct field's `offsetEmbed` (`offset << 1 |
+/// embedded`); Go 1.19 stores the offset and moves the embedded flag into
+/// the name. A real offset is always below the struct's size, so a stored
+/// value at or past it anywhere in the binary means the old encoding: every
+/// struct's offsets are then halved (the low bit is the embedded flag).
+fn decode_field_offsets(types: &mut [Type]) {
+    let old = types.iter().any(|t| match &t.kind_data {
+        KindData::Struct { fields } => fields.iter().any(|f| f.offset > 0 && f.offset >= t.size),
+        _ => false,
+    });
+    if !old {
+        return;
+    }
+    for t in types.iter_mut() {
+        if let KindData::Struct { fields } = &mut t.kind_data {
+            for f in fields.iter_mut() {
+                f.embedded |= f.offset & 1 == 1;
+                f.offset >>= 1;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
