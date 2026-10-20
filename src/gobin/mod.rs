@@ -316,7 +316,13 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
             name: name.clone(),
             kind,
             file_offset: sh.sh_offset as usize,
-            file_size: sh.sh_size as usize,
+            // NOBITS (.bss, .noptrbss): no bytes in the file; whatever lies at
+            // its offset belongs to another section.
+            file_size: if sh.sh_type == goblin::elf::section_header::SHT_NOBITS {
+                0
+            } else {
+                sh.sh_size as usize
+            },
             addr: sh.sh_addr,
             vmsize: sh.sh_size,
         };
@@ -460,7 +466,12 @@ fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>) -> Result<Described
                 name: format!("{segname},{sectname}"),
                 kind,
                 file_offset: sect.offset as usize,
-                file_size: sect.size as usize,
+                // Zero-fill sections (__bss, __common) have no bytes in the file.
+                file_size: if matches!(sect.flags & 0xff, 0x1 | 0xc | 0x12) {
+                    0
+                } else {
+                    sect.size as usize
+                },
                 addr: sect.addr,
                 vmsize: sect.size,
             };
