@@ -29,6 +29,51 @@ pub const FUNCDATA_INL_TREE: u8 = 3;
 pub const FUNCDATA_OPEN_CODED_DEFER_INFO: u8 = 4;
 /// FUNCDATA slot of the traceback argument layout (Go 1.17+).
 pub const FUNCDATA_ARG_INFO: u8 = 5;
+/// FUNCDATA slot of the argument pointer bitmaps (one per stack map index).
+pub const FUNCDATA_ARGS_POINTER_MAPS: u8 = 0;
+/// FUNCDATA slot of the locals pointer bitmaps.
+pub const FUNCDATA_LOCALS_POINTER_MAPS: u8 = 1;
+/// FUNCDATA slot of the stack object records (address-taken locals with
+/// pointers that stay on the stack).
+pub const FUNCDATA_STACK_OBJECTS: u8 = 2;
+/// FUNCDATA slot of the register-argument liveness record (Go 1.18+).
+pub const FUNCDATA_ARG_LIVE_INFO: u8 = 6;
+/// PCDATA table whose value at a PC is the stack map index of the pointer
+/// bitmaps that hold there.
+pub const PCDATA_STACK_MAP_INDEX: u32 = 1;
+
+/// One stack object record (`runtime.stackObjectRecord`): an address-taken
+/// local that holds pointers and stays in the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackObject {
+    /// Offset in the frame: negative from varp (entry SP - 8), else from
+    /// argp (entry SP + 8).
+    pub off: i32,
+    pub size: i32,
+    /// The bytes holding pointers, from its start.
+    pub ptr_bytes: i32,
+}
+
+/// A function's pointer bitmaps (`FUNCDATA_ArgsPointerMaps` or
+/// `FUNCDATA_LocalsPointerMaps`): `nbit` words each, one bitmap per stack
+/// map index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerMaps {
+    pub nbit: u32,
+    pub maps: Vec<Vec<u8>>,
+}
+
+impl PointerMaps {
+    /// Whether word `w` holds a pointer in bitmap `idx`.
+    pub fn bit(&self, idx: usize, w: u32) -> bool {
+        w < self.nbit
+            && self
+                .maps
+                .get(idx)
+                .and_then(|m| m.get((w / 8) as usize))
+                .is_some_and(|b| b & (1 << (w % 8)) != 0)
+    }
+}
 
 /// `abi.TraceArgsMaxLen`: (TraceArgsMaxDepth*3+2)*TraceArgsLimit + 1. An
 /// ArgInfo record longer than this is rejected by the compiler.
@@ -531,6 +576,93 @@ impl<'a> Pclntab<'a> {
     pub fn arg_info(&self, func: &FuncEntry) -> Option<Vec<ArgComp>> {
         let addr = self.funcdata(func, FUNCDATA_ARG_INFO)?;
         parse_arg_info(self.read_upto(addr, TRACE_ARGS_MAX_LEN)?)
+    }
+
+    /// The first byte of FUNCDATA_ArgLiveInfo (Go 1.18+): the frame offset
+    /// (from argp) of the first register argument's spill slot the compiler
+    /// tracks liveness for. Every register argument's slot lies at or past
+    /// the first register argument's, so arguments at lower offsets that
+    /// entry code does not store from a register came on the stack.
+    pub fn arg_live_first(&self, func: &FuncEntry) -> Option<u8> {
+        if self.layout != Layout::Modern {
+            return None;
+        }
+        let addr = self.funcdata(func, FUNCDATA_ARG_LIVE_INFO)?;
+        self.read_upto(addr, 1)?.first().copied()
+    }
+
+    /// The stack object records of `func` (Go 1.17+ layout; None for the
+    /// Go 1.16 record, which names a type instead of a size).
+    pub fn stack_objects(&self, func: &FuncEntry) -> Option<Vec<StackObject>> {
+        let addr = self.funcdata(func, FUNCDATA_STACK_OBJECTS)?;
+        let le = self.little_endian;
+        let head = self.read_upto(addr, 8)?;
+        let n = read_uintptr(head, 0, 8, le).ok()? as usize;
+        if n > 4096 {
+            return None;
+        }
+        let rs = match self.layout {
+            Layout::Modern => 16,
+            Layout::Pre118 => 24,
+        };
+        let body = self.read_upto(addr + 8, n * rs)?;
+        if body.len() < n * rs {
+            return None;
+        }
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            let r = k * rs;
+            let off = read_u32(body, r, le).ok()? as i32;
+            let size = read_u32(body, r + 4, le).ok()? as i32;
+            let ptr_bytes = read_u32(body, r + 8, le).ok()? as i32;
+            // Go 1.16's {off int64, typ *_type} reads as a size of -1 here.
+            if size <= 0 || ptr_bytes < 0 || ptr_bytes > size {
+                return None;
+            }
+            out.push(StackObject {
+                off,
+                size,
+                ptr_bytes,
+            });
+        }
+        Some(out)
+    }
+
+    /// The argument (`locals == false`) or locals pointer bitmaps of `func`.
+    pub fn pointer_maps(&self, func: &FuncEntry, locals: bool) -> Option<PointerMaps> {
+        let idx = if locals {
+            FUNCDATA_LOCALS_POINTER_MAPS
+        } else {
+            FUNCDATA_ARGS_POINTER_MAPS
+        };
+        let addr = self.funcdata(func, idx)?;
+        let le = self.little_endian;
+        let head = self.read_upto(addr, 8)?;
+        let n = read_u32(head, 0, le).ok()? as usize;
+        let nbit = read_u32(head, 4, le).ok()?;
+        if n > 1 << 16 || nbit > 1 << 20 {
+            return None;
+        }
+        let bpm = nbit.div_ceil(8) as usize;
+        let body = if n * bpm == 0 {
+            &[][..]
+        } else {
+            self.read_upto(addr + 8, n * bpm)?
+        };
+        if body.len() < n * bpm {
+            return None;
+        }
+        Some(PointerMaps {
+            nbit,
+            maps: (0..n)
+                .map(|k| body[k * bpm..(k + 1) * bpm].to_vec())
+                .collect(),
+        })
+    }
+
+    /// The stack map index (into [`Self::pointer_maps`]) at absolute `pc`.
+    pub fn stack_map_index(&self, func: &FuncEntry, pc: u64) -> Option<i32> {
+        self.pcdata_value(func, PCDATA_STACK_MAP_INDEX, pc)
     }
 
     /// The decoded FUNCDATA_OpenCodedDeferInfo of `func`, or None when it has

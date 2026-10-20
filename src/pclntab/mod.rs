@@ -7,8 +7,10 @@ use crate::Result;
 mod funcinfo;
 pub use funcinfo::{
     parse_arg_info, parse_open_defer_info, ArgComp, FuncFields, InlineLeaf, LineSpan,
-    OpenDeferFormat, OpenDeferInfo, FUNCDATA_ARG_INFO, FUNCDATA_INL_TREE,
-    FUNCDATA_OPEN_CODED_DEFER_INFO, PCDATA_INL_TREE_INDEX,
+    OpenDeferFormat, OpenDeferInfo, PointerMaps, StackObject, FUNCDATA_ARGS_POINTER_MAPS,
+    FUNCDATA_ARG_INFO, FUNCDATA_ARG_LIVE_INFO, FUNCDATA_INL_TREE, FUNCDATA_LOCALS_POINTER_MAPS,
+    FUNCDATA_OPEN_CODED_DEFER_INFO, FUNCDATA_STACK_OBJECTS, PCDATA_INL_TREE_INDEX,
+    PCDATA_STACK_MAP_INDEX,
 };
 
 pub const MAGIC_1_20: u32 = 0xfffffff1;
