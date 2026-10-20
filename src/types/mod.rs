@@ -208,19 +208,50 @@ pub fn recover_with_mode(bin: &GoBinary, md: &ModuleData, mode: Mode) -> Result<
         let extras = linear_scan_types_region(bin, md, &seen);
         types.extend(extras);
     }
-    decode_field_offsets(&mut types);
+    decode_field_offsets(&mut types, offset_embed_era(bin, md));
     Ok(types)
+}
+
+/// Whether the binary stores struct field offsets the Go 1.18 way, when its
+/// version says: the pclntab magic for Go 1.16-1.17 (old) and 1.20+ (new),
+/// the buildinfo version between them (1.18 and 1.19 share a magic). None
+/// when neither tells (a wiped buildinfo on a 1.18/1.19 magic).
+fn offset_embed_era(bin: &GoBinary, md: &ModuleData) -> Option<bool> {
+    let magic = bin
+        .read_at_addr(md.pc_header_addr, 4)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map(u32::from_le_bytes)?;
+    match magic {
+        crate::pclntab::MAGIC_1_16 => return Some(true),
+        crate::pclntab::MAGIC_1_20 => return Some(false),
+        crate::pclntab::MAGIC_1_18 => {}
+        _ => return None,
+    }
+    let v = crate::buildinfo::BuildInfo::parse(bin).ok()?.go_version;
+    let minor: u32 = v
+        .strip_prefix("go1.")?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some(minor <= 18)
 }
 
 /// Go 1.18 and older store a struct field's `offsetEmbed` (`offset << 1 |
 /// embedded`); Go 1.19 stores the offset and moves the embedded flag into
-/// the name. A real offset is always below the struct's size, so a stored
-/// value at or past it anywhere in the binary means the old encoding: every
-/// struct's offsets are then halved (the low bit is the embedded flag).
-fn decode_field_offsets(types: &mut [Type]) {
-    let old = types.iter().any(|t| match &t.kind_data {
-        KindData::Struct { fields } => fields.iter().any(|f| f.offset > 0 && f.offset >= t.size),
-        _ => false,
+/// the name (CL 412138). `old` is the encoding the version says; without
+/// one, a stored value at or past its struct's size anywhere in the binary
+/// means the old encoding (a real offset is always below the size). Under
+/// the old encoding every struct's offsets are halved (the low bit is the
+/// embedded flag).
+fn decode_field_offsets(types: &mut [Type], old: Option<bool>) {
+    let old = old.unwrap_or_else(|| {
+        types.iter().any(|t| match &t.kind_data {
+            KindData::Struct { fields } => {
+                fields.iter().any(|f| f.offset > 0 && f.offset >= t.size)
+            }
+            _ => false,
+        })
     });
     if !old {
         return;

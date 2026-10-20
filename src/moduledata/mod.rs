@@ -225,6 +225,28 @@ fn name_probe_valid(bytes: &[u8], enc: NameEnc) -> bool {
 }
 
 impl ModuleData {
+    /// Whether the package-variable word at `addr` holds a pointer, from the
+    /// GC pointer masks of the data and bss sections (`gcdata`, `gcbss`:
+    /// GC programs the runtime expands with `progToPointerMask`, one bit
+    /// per word). None outside both sections or on a malformed program.
+    pub fn is_pointer_word(&self, bin: &GoBinary, addr: u64) -> Option<bool> {
+        let ps = bin.pointer_size() as u64;
+        let (start, end, prog) = if (self.data..self.edata).contains(&addr) {
+            (self.data, self.edata, self.gcdata)
+        } else if (self.bss..self.ebss).contains(&addr) {
+            (self.bss, self.ebss, self.gcbss)
+        } else {
+            return None;
+        };
+        if (addr - start) % ps != 0 {
+            return None;
+        }
+        let words = usize::try_from((end - start) / ps).ok()?;
+        let mask = run_gc_prog(bin, prog, words)?;
+        mask.get(usize::try_from((addr - start) / ps).ok()?)
+            .copied()
+    }
+
     /// Locate and parse `runtime.firstmoduledata` by scanning the data
     /// sections for a pointer that matches the pclntab's runtime address -
     /// that pointer is the first field of moduledata (`pcHeader *pcHeader`).
@@ -824,9 +846,77 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Expand the GC program at `prog` (runtime `runGCProg`) into at most
+/// `words` bits: literal runs (`0nnnnnnn` then the bits, LSB first) and
+/// repeats (`1nnnnnnn` or `10000000 varint(n)`, then `varint(c)`: the last
+/// `n` bits `c` more times), ending at a zero byte.
+fn run_gc_prog(bin: &GoBinary, prog: u64, words: usize) -> Option<Vec<bool>> {
+    // The program runs to the end of its section's file bytes at most.
+    let s = bin.section_for_addr(prog)?;
+    let in_file = usize::try_from(prog - s.addr).ok()?;
+    let p = bin.read_at_addr(prog, s.file_size.checked_sub(in_file)?.min(1 << 20))?;
+    expand_gc_prog(p, words)
+}
+
+/// [`run_gc_prog`] over the program bytes.
+fn expand_gc_prog(p: &[u8], words: usize) -> Option<Vec<bool>> {
+    let mut i = 0usize;
+    let mut next = || -> Option<u8> {
+        let b = *p.get(i)?;
+        i += 1;
+        Some(b)
+    };
+    let mut out: Vec<bool> = Vec::new();
+    loop {
+        let inst = next()?;
+        let mut n = usize::from(inst & 0x7f);
+        if inst & 0x80 == 0 {
+            if n == 0 {
+                break;
+            }
+            let mut bits = 0usize;
+            while bits < n {
+                let b = next()?;
+                for k in 0..8.min(n - bits) {
+                    out.push(b >> k & 1 == 1);
+                }
+                bits += 8;
+            }
+        } else {
+            let varint = |next: &mut dyn FnMut() -> Option<u8>| -> Option<usize> {
+                let mut x = 0usize;
+                for off in (0..64).step_by(7) {
+                    let b = next()?;
+                    x |= usize::from(b & 0x7f).checked_shl(off)?;
+                    if b & 0x80 == 0 {
+                        return Some(x);
+                    }
+                }
+                None
+            };
+            if n == 0 {
+                n = varint(&mut next)?;
+            }
+            let c = varint(&mut next)?;
+            if n == 0 || n > out.len() || n.checked_mul(c)? > words.saturating_sub(out.len()) + n {
+                return None;
+            }
+            let pat: Vec<bool> = out[out.len() - n..].to_vec();
+            for _ in 0..c {
+                out.extend_from_slice(&pat);
+            }
+        }
+        if out.len() > words + 64 {
+            return None;
+        }
+    }
+    out.truncate(words);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{read_name_len, text_addr_in, NameEnc};
+    use super::{expand_gc_prog, read_name_len, text_addr_in, NameEnc};
 
     #[test]
     fn text_offsets_follow_split_text_sections() {
@@ -872,5 +962,21 @@ mod tests {
         assert_eq!(read_name_len(&[0x80], NameEnc::Varint), None);
         assert_eq!(read_name_len(&[0x00], NameEnc::TwoByteBe), None);
         assert_eq!(read_name_len(&[], NameEnc::Varint), None);
+    }
+
+    /// A literal `1 0 1` (pointer, scalar, pointer), then the last 2 bits
+    /// twice more, then the end: 7 words.
+    #[test]
+    fn gc_programs_expand_to_pointer_masks() {
+        let prog = [0x03, 0b101, 0x82, 0x02, 0x00];
+        let mask = expand_gc_prog(&prog, 7).unwrap();
+        assert_eq!(mask, [true, false, true, false, true, false, true]);
+        // A repeat with a varint count and a long literal.
+        let prog = [0x09, 0xff, 0x01, 0x80, 0x01, 0x03, 0x00];
+        let mask = expand_gc_prog(&prog, 12).unwrap();
+        assert_eq!(mask.iter().filter(|b| **b).count(), 12);
+        // Truncated and malformed programs say nothing.
+        assert_eq!(expand_gc_prog(&[0x03], 3), None);
+        assert_eq!(expand_gc_prog(&[0x81, 0x05, 0x00], 5), None);
     }
 }
