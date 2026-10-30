@@ -52,6 +52,11 @@ pub struct StackObject {
     pub size: i32,
     /// The bytes holding pointers, from its start.
     pub ptr_bytes: i32,
+    /// Where the pointer mask of the object's type is (`runtime.gcbits.*`,
+    /// one bit per word over `ptr_bytes`): an offset from moduledata's
+    /// `rodata` (Go 1.18+, `gcdataoff`), else (Go 1.17) its address.
+    /// [`Pclntab::stack_object_mask`] reads it.
+    pub gcdata: u64,
 }
 
 /// A function's pointer bitmaps (`FUNCDATA_ArgsPointerMaps` or
@@ -615,6 +620,10 @@ impl<'a> Pclntab<'a> {
             let off = read_u32(body, r, le).ok()? as i32;
             let size = read_u32(body, r + 4, le).ok()? as i32;
             let ptr_bytes = read_u32(body, r + 8, le).ok()? as i32;
+            let gcdata = match self.layout {
+                Layout::Modern => u64::from(read_u32(body, r + 12, le).ok()?),
+                Layout::Pre118 => read_uintptr(body, r + 16, 8, le).ok()?,
+            };
             // Go 1.16's {off int64, typ *_type} reads as a size of -1 here.
             if size <= 0 || ptr_bytes < 0 || ptr_bytes > size {
                 return None;
@@ -623,9 +632,29 @@ impl<'a> Pclntab<'a> {
                 off,
                 size,
                 ptr_bytes,
+                gcdata,
             });
         }
         Some(out)
+    }
+
+    /// The pointer mask of stack object `o`'s type: one bit per word of its
+    /// first `ptr_bytes` bytes, low bit first (the `runtime.gcbits.*` bytes a
+    /// type descriptor of that type also points at). Go 1.18+ records an
+    /// offset from moduledata's `rodata`, which `rodata` must give; Go 1.17
+    /// records the address. None when the bytes are not in the image.
+    pub fn stack_object_mask(&self, o: &StackObject, rodata: Option<u64>) -> Option<Vec<u8>> {
+        let addr = match self.layout {
+            Layout::Modern => rodata?.checked_add(o.gcdata)?,
+            Layout::Pre118 => o.gcdata,
+        };
+        let words = usize::try_from(o.ptr_bytes).ok()?.div_ceil(8);
+        let n = words.div_ceil(8);
+        if n == 0 {
+            return Some(Vec::new());
+        }
+        let b = self.read_upto(addr, n)?;
+        (b.len() == n).then(|| b.to_vec())
     }
 
     /// The argument (`locals == false`) or locals pointer bitmaps of `func`.
