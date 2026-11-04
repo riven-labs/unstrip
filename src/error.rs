@@ -21,7 +21,7 @@ pub enum Error {
     BadPclntab { offset: usize, reason: String },
 
     #[error(
-        "pclntab magic 0x{magic:08x} is a pre-1.18 Go layout ({version}); relift recovers Go 1.18 and later"
+        "pclntab magic 0x{magic:08x} is a Go layout older than 1.16 ({version}); Go 1.16 and later are read"
     )]
     UnsupportedPclntabVersion { magic: u32, version: &'static str },
 

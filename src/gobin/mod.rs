@@ -6,6 +6,8 @@ use goblin::Object;
 use crate::error::Error;
 use crate::Result;
 
+pub(crate) mod segments;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Container {
     Elf,
@@ -284,7 +286,14 @@ fn fat_slice(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn describe(bytes: &[u8]) -> Result<Described> {
-    let object = Object::parse(bytes)?;
+    let object = match Object::parse(bytes) {
+        Ok(object) => object,
+        // goblin walks the section header table as part of its parse, so an ELF
+        // whose table points outside the file (damaged on purpose, or cut short)
+        // fails here although the loader maps it from its program headers. Read
+        // it the loader's way before giving up.
+        Err(e) => return describe_elf_segments(bytes).unwrap_or(Err(Error::Goblin(e))),
+    };
     match object {
         Object::Elf(elf) => describe_elf(bytes, elf),
         Object::Mach(mach) => describe_mach(bytes, mach),
@@ -293,14 +302,48 @@ fn describe(bytes: &[u8]) -> Result<Described> {
     }
 }
 
-fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
-    let arch = match elf.header.e_machine {
+fn elf_arch(e_machine: u16) -> Arch {
+    match e_machine {
         goblin::elf::header::EM_X86_64 => Arch::X86_64,
         goblin::elf::header::EM_AARCH64 => Arch::Aarch64,
         goblin::elf::header::EM_386 => Arch::X86,
         goblin::elf::header::EM_ARM => Arch::Arm,
         _ => Arch::Other,
-    };
+    }
+}
+
+/// Describe an ELF goblin could not parse from its program headers alone (see
+/// [`segments`]): the PT_LOAD segments are the section map, as on a binary
+/// whose section table was stripped, and the pclntab is searched for in their
+/// bytes. None when the bytes are not an ELF with readable program headers.
+fn describe_elf_segments(bytes: &[u8]) -> Option<Result<Described>> {
+    let seg = segments::read(bytes)?;
+    let (sections, text_addr) = segments::sections_from_loads(&seg.loads);
+    if sections.is_empty() {
+        return None;
+    }
+    let little_endian = seg.little_endian;
+    Some(
+        locate_pclntab(bytes, &sections, text_addr, little_endian).map(|(off, size)| {
+            let addr = addr_for_offset(&sections, off).unwrap_or(0);
+            Described {
+                container: Container::Elf,
+                arch: elf_arch(seg.e_machine),
+                little_endian,
+                ptr_size: if seg.is_64 { 8 } else { 4 },
+                sections,
+                pclntab_offset: off,
+                pclntab_size: size,
+                pclntab_addr: addr,
+                text_addr,
+                stripped_sections: true,
+            }
+        }),
+    )
+}
+
+fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
+    let arch = elf_arch(elf.header.e_machine);
     let little_endian = elf.little_endian;
     let ptr_size = if elf.is_64 { 8 } else { 4 };
 
@@ -345,30 +388,11 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
     // becomes correct; the executable segment's base is the text address the
     // pclntab's `textStart` is taken relative to when the header stores zero.
     if sections.is_empty() {
-        use goblin::elf::program_header::{PF_W, PF_X, PT_LOAD};
         stripped_sections = true;
-        for ph in elf.program_headers.iter() {
-            if ph.p_type != PT_LOAD {
-                continue;
-            }
-            let (name, kind) = if ph.p_flags & PF_X != 0 {
-                (".text", SectionKind::Text)
-            } else if ph.p_flags & PF_W != 0 {
-                (".data", SectionKind::Data)
-            } else {
-                (".rodata", SectionKind::ReadOnlyData)
-            };
-            if kind == SectionKind::Text && text_addr == 0 {
-                text_addr = ph.p_vaddr;
-            }
-            sections.push(Section {
-                name: name.to_string(),
-                kind,
-                file_offset: ph.p_offset as usize,
-                file_size: ph.p_filesz as usize,
-                addr: ph.p_vaddr,
-                vmsize: ph.p_memsz,
-            });
+        let (loads, base) = segments::sections_from_loads(elf.program_headers.iter());
+        sections = loads;
+        if text_addr == 0 {
+            text_addr = base;
         }
     }
 
@@ -1001,6 +1025,43 @@ mod tests {
             addr: 0x1000,
             vmsize: len as u64,
         }]
+    }
+
+    #[test]
+    fn an_elf_whose_section_table_is_outside_the_file_opens_from_its_segments() {
+        // goblin's full parse fails on the bogus e_shoff; the loader's view (one
+        // PT_LOAD segment) still finds a Go 1.20 pcHeader in the mapped bytes.
+        let mut b = segments::tests::elf64_bogus_shoff(4096);
+        assert!(Object::parse(&b).is_err());
+        let off = 0x200;
+        b[off..off + 4].copy_from_slice(&PCLNTAB_MAGIC_1_20);
+        b[off + 6] = 1; // quantum
+        b[off + 7] = 8; // pointer size
+                        // nfunc, nfiles, textStart (0: resolved from moduledata), then the five
+                        // table offsets, strictly climbing and inside the file.
+        let fields: [u64; 8] = [1, 1, 0, 0x60, 0x80, 0xa0, 0xc0, 0xe0];
+        for (i, v) in fields.iter().enumerate() {
+            let at = off + 8 + i * 8;
+            b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        let bin = GoBinary::parse(b).expect("opens through the program headers");
+        assert_eq!(bin.container, Container::Elf);
+        assert_eq!(bin.arch, Arch::X86_64);
+        assert_eq!(bin.ptr_size, 8);
+        assert_eq!(bin.pclntab_offset, off);
+        assert_eq!(bin.pclntab_addr, 0x400000 + off as u64);
+    }
+
+    #[test]
+    fn an_elf_with_unreadable_headers_keeps_the_parse_error() {
+        // No pclntab in the mapped bytes: the segment read succeeds and the
+        // answer is the honest "no pclntab", not goblin's offset error.
+        let b = segments::tests::elf64_bogus_shoff(4096);
+        assert!(matches!(GoBinary::parse(b), Err(Error::NoPclntab)));
+        // Program headers out of the file too: goblin's error stands.
+        let mut b = segments::tests::elf64_bogus_shoff(4096);
+        b[32..40].copy_from_slice(&0x10_0000u64.to_le_bytes());
+        assert!(matches!(GoBinary::parse(b), Err(Error::Goblin(_))));
     }
 
     #[test]

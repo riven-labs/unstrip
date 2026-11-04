@@ -45,6 +45,16 @@ pub struct ContainerProbe {
     pub has_go_pclntab: bool,
     /// A short verdict when the layout looks packed/obfuscated, else None.
     pub packer: Option<String>,
+    /// The furthest file offset the container's headers describe: the end of
+    /// the last section's or segment's file bytes and of the header tables.
+    /// Larger than `file_size` when the file is truncated. 0 when the headers
+    /// were too damaged to read.
+    pub declared_size: usize,
+    /// The number of functions a PE's import table names (None for ELF and
+    /// Mach-O, or when the import table did not parse). A packed PE imports a
+    /// handful (its unpacker's LoadLibrary and GetProcAddress); a Go PE about a
+    /// hundred.
+    pub import_count: Option<usize>,
 }
 
 /// Shannon entropy in bits per byte over a byte slice.
@@ -141,6 +151,7 @@ fn is_go_pclntab_name(name: &str) -> bool {
     matches!(name, ".gopclntab" | "__gopclntab" | "gopclntab")
 }
 
+#[allow(clippy::too_many_arguments)] // the probe's facts, gathered per container
 fn finish(
     container: &'static str,
     arch: String,
@@ -149,6 +160,8 @@ fn finish(
     bytes: &[u8],
     sections: Vec<SectionInfo>,
     max_file_end: usize,
+    declared_size: usize,
+    import_count: Option<usize>,
 ) -> ContainerProbe {
     let file_entropy = entropy(bytes);
     let has_go_pclntab = sections.iter().any(|s| is_go_pclntab_name(&s.name));
@@ -165,6 +178,8 @@ fn finish(
         overlay_size,
         has_go_pclntab,
         packer,
+        declared_size: declared_size.max(max_file_end),
+        import_count,
     }
 }
 
@@ -182,9 +197,14 @@ pub fn probe(bytes: &[u8]) -> Result<ContainerProbe> {
         Ok(Object::PE(pe)) => Ok(probe_pe(bytes, pe)),
         Ok(_) => Err(Error::UnknownContainer),
         // goblin rejected the header. Some malware damages it on purpose (a PE
-        // with a zeroed PE signature still maps at run time), so fall back to a
-        // magic-only summary rather than failing with a bare parse error.
-        Err(_) => probe_malformed(bytes).ok_or(Error::UnknownContainer),
+        // with a zeroed PE signature still maps at run time, an ELF section
+        // table pointing outside the file still loads from its program headers),
+        // and a truncated download fails the same way. Read an ELF the loader's
+        // way first, then fall back to a magic-only summary rather than failing
+        // with a bare parse error.
+        Err(_) => probe_elf_segments(bytes)
+            .or_else(|| probe_malformed(bytes))
+            .ok_or(Error::UnknownContainer),
     }
 }
 
@@ -224,7 +244,75 @@ fn probe_malformed(bytes: &[u8]) -> Option<ContainerProbe> {
         // packing, and the file entropy here is often low. The "(header damaged)"
         // container label and the caller's error reason already say what happened.
         packer: None,
+        declared_size: 0,
+        import_count: None,
     })
+}
+
+/// The probe of an ELF goblin could not parse, read from its program headers
+/// (see [`crate::gobin::segments`]): the architecture, each PT_LOAD segment as a
+/// section (`LOAD0 r-x`), and the size the headers describe, which says whether
+/// the file was cut short. The container label names what was unreadable.
+fn probe_elf_segments(bytes: &[u8]) -> Option<ContainerProbe> {
+    use goblin::elf::program_header::{PF_R, PF_W, PF_X};
+    let seg = crate::gobin::segments::read(bytes)?;
+    let mut sections = Vec::new();
+    let mut max_file_end = 0usize;
+    for (i, ph) in seg.loads.iter().enumerate() {
+        let off = ph.p_offset as usize;
+        let size = ph.p_filesz as usize;
+        let data = slice(bytes, off, size);
+        max_file_end = max_file_end.max(off.saturating_add(size));
+        let flag = |bit: u32, c: char| if ph.p_flags & bit != 0 { c } else { '-' };
+        sections.push(SectionInfo {
+            name: format!(
+                "LOAD{i} {}{}{}",
+                flag(PF_R, 'r'),
+                flag(PF_W, 'w'),
+                flag(PF_X, 'x')
+            ),
+            vaddr: ph.p_vaddr,
+            vsize: ph.p_memsz,
+            file_size: data.len(),
+            entropy: entropy(data),
+            executable: ph.p_flags & PF_X != 0,
+        });
+    }
+    let container = if seg
+        .section_table_end
+        .is_some_and(|end| end > bytes.len() as u64)
+    {
+        "ELF (section table outside the file)"
+    } else {
+        "ELF (section table unreadable)"
+    };
+    Some(finish(
+        container,
+        elf_arch_name(seg.e_machine).to_string(),
+        if seg.is_64 { 64 } else { 32 },
+        seg.little_endian,
+        bytes,
+        sections,
+        max_file_end.min(bytes.len()),
+        usize::try_from(seg.declared_end).unwrap_or(usize::MAX),
+        None,
+    ))
+}
+
+fn elf_arch_name(e_machine: u16) -> &'static str {
+    use goblin::elf::header::*;
+    match e_machine {
+        EM_X86_64 => "x86-64",
+        EM_AARCH64 => "aarch64",
+        EM_386 => "i386",
+        EM_ARM => "arm",
+        EM_S390 => "s390x",
+        EM_PPC64 => "ppc64",
+        EM_MIPS => "mips",
+        EM_RISCV => "riscv",
+        0x102 => "loongarch", // EM_LOONGARCH, not in this goblin's constants
+        _ => "unknown",
+    }
 }
 
 /// Read the COFF machine of a PE whose PE signature was zeroed but whose COFF
@@ -243,21 +331,8 @@ fn pe_machine(bytes: &[u8]) -> Option<(&'static str, u32)> {
 }
 
 fn probe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> ContainerProbe {
-    use goblin::elf::header::*;
     use goblin::elf::section_header::SHF_EXECINSTR;
-    let arch = match elf.header.e_machine {
-        EM_X86_64 => "x86-64",
-        EM_AARCH64 => "aarch64",
-        EM_386 => "i386",
-        EM_ARM => "arm",
-        EM_S390 => "s390x",
-        EM_PPC64 => "ppc64",
-        EM_MIPS => "mips",
-        EM_RISCV => "riscv",
-        0x102 => "loongarch", // EM_LOONGARCH, not in this goblin's constants
-        _ => "unknown",
-    }
-    .to_string();
+    let arch = elf_arch_name(elf.header.e_machine).to_string();
     let bits = if elf.is_64 { 64 } else { 32 };
     let mut sections = Vec::new();
     let mut max_file_end = 0usize;
@@ -283,6 +358,21 @@ fn probe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> ContainerProbe {
             executable: (sh.sh_flags & SHF_EXECINSTR as u64) != 0,
         });
     }
+    let h = &elf.header;
+    let ph_end = h
+        .e_phoff
+        .saturating_add(h.e_phnum as u64 * h.e_phentsize as u64);
+    let sh_end = h
+        .e_shoff
+        .saturating_add(h.e_shnum as u64 * h.e_shentsize as u64);
+    let seg_end = elf
+        .program_headers
+        .iter()
+        .filter(|p| p.p_type == goblin::elf::program_header::PT_LOAD)
+        .map(|p| p.p_offset.saturating_add(p.p_filesz))
+        .max()
+        .unwrap_or(0);
+    let declared = ph_end.max(sh_end).max(seg_end);
     finish(
         "ELF",
         arch,
@@ -291,6 +381,8 @@ fn probe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> ContainerProbe {
         bytes,
         sections,
         max_file_end,
+        usize::try_from(declared).unwrap_or(usize::MAX),
+        None,
     )
 }
 
@@ -337,6 +429,8 @@ fn probe_mach(bytes: &[u8], macho: goblin::mach::MachO<'_>) -> ContainerProbe {
         bytes,
         sections,
         max_file_end,
+        max_file_end,
+        None,
     )
 }
 
@@ -368,7 +462,18 @@ fn probe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> ContainerProbe {
             executable: s.characteristics & IMAGE_SCN_MEM_EXECUTE != 0,
         });
     }
-    finish("PE", arch, bits, true, bytes, sections, max_file_end)
+    let imports = Some(pe.imports.len());
+    finish(
+        "PE",
+        arch,
+        bits,
+        true,
+        bytes,
+        sections,
+        max_file_end,
+        max_file_end,
+        imports,
+    )
 }
 
 #[cfg(test)]
@@ -427,6 +532,23 @@ mod tests {
         // A damaged header is not a packer verdict, so packer stays None; the
         // container label carries the "(header damaged)" fact instead.
         assert!(p.packer.is_none());
+    }
+
+    #[test]
+    fn an_elf_with_its_section_table_outside_the_file_probes_from_its_segments() {
+        // goblin refuses this file (the section header table lies past the end),
+        // but its program headers map it: the probe names the architecture and
+        // the segment, and the size the headers describe exceeds the file.
+        let b = crate::gobin::segments::tests::elf64_bogus_shoff(4096);
+        let p = probe(&b).expect("an ELF with intact program headers probes");
+        assert_eq!(p.container, "ELF (section table outside the file)");
+        assert_eq!(p.arch, "x86-64");
+        assert_eq!(p.bits, 64);
+        assert_eq!(p.sections.len(), 1);
+        assert_eq!(p.sections[0].name, "LOAD0 r-x");
+        assert!(p.sections[0].executable);
+        assert!(p.declared_size > p.file_size);
+        assert_eq!(p.overlay_size, 0);
     }
 
     #[test]
