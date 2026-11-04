@@ -23,10 +23,9 @@ pub(crate) struct Segments {
     /// Where the section header table ends according to the file header, when it
     /// names one (`e_shoff + e_shnum * e_shentsize`).
     pub section_table_end: Option<u64>,
-    /// The furthest file offset any header describes: the program header table,
-    /// the end of every PT_LOAD segment's file bytes, and the section header
-    /// table. Larger than the file length when the file is truncated.
-    pub declared_end: u64,
+    /// The end of the furthest PT_LOAD segment's file bytes. Larger than the
+    /// file length when the file is truncated: the loader could not map it.
+    pub load_end: u64,
 }
 
 /// Read an ELF's file header and program headers, or None when the bytes are not
@@ -55,14 +54,13 @@ pub(crate) fn read(bytes: &[u8]) -> Option<Segments> {
         .map(|p| p.p_offset.saturating_add(p.p_filesz))
         .max()
         .unwrap_or(0);
-    let declared_end = ph_end.max(load_end).max(section_table_end.unwrap_or(0));
     Some(Segments {
         e_machine: header.e_machine,
         is_64: ctx.container.is_big(),
         little_endian: ctx.le.is_little(),
         loads,
         section_table_end,
-        declared_end,
+        load_end: load_end.max(ph_end),
     })
 }
 
@@ -152,7 +150,7 @@ pub(crate) mod tests {
         assert!(s.is_64 && s.little_endian);
         assert_eq!(s.loads.len(), 1);
         assert_eq!(s.section_table_end, Some(30_302_232 + 35 * 64));
-        assert_eq!(s.declared_end, 30_302_232 + 35 * 64);
+        assert_eq!(s.load_end, 4096);
         let (sections, text) = sections_from_loads(&s.loads);
         assert_eq!(text, 0x400000);
         assert_eq!(sections.len(), 1);

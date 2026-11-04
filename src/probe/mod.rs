@@ -45,10 +45,10 @@ pub struct ContainerProbe {
     pub has_go_pclntab: bool,
     /// A short verdict when the layout looks packed/obfuscated, else None.
     pub packer: Option<String>,
-    /// The furthest file offset the container's headers describe: the end of
-    /// the last section's or segment's file bytes and of the header tables.
-    /// Larger than `file_size` when the file is truncated. 0 when the headers
-    /// were too damaged to read.
+    /// The end of the furthest section or segment data the container's headers
+    /// declare (not counting the header tables themselves). Larger than
+    /// `file_size` when the file is truncated. 0 when the headers were too
+    /// damaged to read.
     pub declared_size: usize,
     /// The number of functions a PE's import table names (None for ELF and
     /// Mach-O, or when the import table did not parse). A packed PE imports a
@@ -294,7 +294,7 @@ fn probe_elf_segments(bytes: &[u8]) -> Option<ContainerProbe> {
         bytes,
         sections,
         max_file_end.min(bytes.len()),
-        usize::try_from(seg.declared_end).unwrap_or(usize::MAX),
+        usize::try_from(seg.load_end).unwrap_or(usize::MAX),
         None,
     ))
 }
@@ -358,13 +358,6 @@ fn probe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> ContainerProbe {
             executable: (sh.sh_flags & SHF_EXECINSTR as u64) != 0,
         });
     }
-    let h = &elf.header;
-    let ph_end = h
-        .e_phoff
-        .saturating_add(h.e_phnum as u64 * h.e_phentsize as u64);
-    let sh_end = h
-        .e_shoff
-        .saturating_add(h.e_shnum as u64 * h.e_shentsize as u64);
     let seg_end = elf
         .program_headers
         .iter()
@@ -372,7 +365,6 @@ fn probe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> ContainerProbe {
         .map(|p| p.p_offset.saturating_add(p.p_filesz))
         .max()
         .unwrap_or(0);
-    let declared = ph_end.max(sh_end).max(seg_end);
     finish(
         "ELF",
         arch,
@@ -381,7 +373,7 @@ fn probe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> ContainerProbe {
         bytes,
         sections,
         max_file_end,
-        usize::try_from(declared).unwrap_or(usize::MAX),
+        usize::try_from(seg_end).unwrap_or(usize::MAX),
         None,
     )
 }
@@ -547,7 +539,8 @@ mod tests {
         assert_eq!(p.sections.len(), 1);
         assert_eq!(p.sections[0].name, "LOAD0 r-x");
         assert!(p.sections[0].executable);
-        assert!(p.declared_size > p.file_size);
+        // The fixture's one segment covers the file exactly: not truncated.
+        assert_eq!(p.declared_size, p.file_size);
         assert_eq!(p.overlay_size, 0);
     }
 
