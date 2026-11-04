@@ -69,30 +69,11 @@ fn type_str_offset(ps: usize) -> usize {
 }
 
 pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Itab>> {
-    let ps = bin.pointer_size();
-    let le = bin.little_endian;
-
-    const MAX_ITABS: u64 = 5_000_000;
-    if md.itablinks.len > MAX_ITABS {
-        return Err(Error::ItabRecovery(format!(
-            "itablinks length {} exceeds sanity cap {}",
-            md.itablinks.len, MAX_ITABS
-        )));
-    }
-    let n = md.itablinks.len as usize;
-    let table_bytes = bin.read_at_addr(md.itablinks.data, n * ps).ok_or_else(|| {
-        Error::ItabRecovery(format!(
-            "itablinks at 0x{:x} (len {}) unmapped",
-            md.itablinks.data, md.itablinks.len
-        ))
-    })?;
-
-    let mut out = Vec::with_capacity(n);
-    for chunk in table_bytes.chunks_exact(ps) {
-        let itab_addr = rd_ptr(chunk, 0, ps, le).unwrap_or(0);
-        if itab_addr == 0 {
-            continue;
-        }
+    // `itablinks`, or from Go 1.27 the itabs walked in place
+    // ([`ModuleData::itab_addrs`]).
+    let addrs = md.itab_addrs(bin)?;
+    let mut out = Vec::with_capacity(addrs.len());
+    for itab_addr in addrs {
         match parse_itab(bin, md, itab_addr) {
             Ok(it) => out.push(it),
             Err(_) => continue,

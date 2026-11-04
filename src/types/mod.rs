@@ -348,35 +348,16 @@ fn recover_focused(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
         )));
     }
 
-    const MAX_TYPELINKS: u64 = 5_000_000;
-    if md.typelinks.len > MAX_TYPELINKS {
-        return Err(Error::TypeRecovery(format!(
-            "typelinks length {} exceeds sanity cap {}",
-            md.typelinks.len, MAX_TYPELINKS
-        )));
-    }
-
     // Structural cap on total reachable types: the types region itself is
     // bounded, and each type takes at least one header (48 bytes on 64-bit),
     // so this is a hard ceiling regardless of what typelinks claims.
     let types_region = md.etypes.saturating_sub(md.types) as usize;
     let max_types = types_region / TYPE_HEADER_SIZE_64;
 
-    let typelinks_bytes = bin
-        .read_at_addr(md.typelinks.data, (md.typelinks.len as usize) * 4)
-        .ok_or_else(|| {
-            Error::TypeRecovery(format!(
-                "typelinks at 0x{:x} (len {}) is unmapped",
-                md.typelinks.data, md.typelinks.len
-            ))
-        })?;
-
+    // The linked types: `typelinks`, or from Go 1.27 the descriptors walked
+    // in place ([`ModuleData::type_addrs`]).
+    let mut queue: Vec<u64> = md.type_addrs(bin)?;
     let mut seen: std::collections::BTreeMap<u64, Type> = std::collections::BTreeMap::new();
-    let mut queue: Vec<u64> = Vec::with_capacity(md.typelinks.len as usize);
-    for chunk in typelinks_bytes.chunks_exact(4) {
-        let off = i32::from_le_bytes(chunk.try_into().unwrap());
-        queue.push(md.types.wrapping_add(off as i64 as u64));
-    }
 
     while let Some(addr) = queue.pop() {
         if seen.len() >= max_types {

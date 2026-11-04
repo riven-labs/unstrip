@@ -58,15 +58,26 @@ pub struct ModuleData {
     /// Types region. Every Go type's `_type` header lives in [types, etypes).
     pub types: u64,
     pub etypes: u64,
+    /// Go 1.27+: the bytes of type descriptors at the start of the types
+    /// region, laid out back to back (the runtime walks them, there is no
+    /// `typelinks`). Zero on older layouts.
+    pub typedesclen: u64,
+    /// Go 1.27+: where the linked itabs sit in the types region (offset from
+    /// `types`) and their total bytes, back to back (there is no
+    /// `itablinks`). Zero on older layouts.
+    pub itaboffset: u64,
+    pub itabsize: u64,
 
     pub rodata: u64,
     pub gofunc: u64,
 
     /// Slices of further metadata.
     pub textsectmap: SliceHeader,
-    /// `typelinks` is a `[]int32` of offsets relative to `types`.
+    /// `typelinks` is a `[]int32` of offsets relative to `types` (empty from
+    /// Go 1.27, which dropped it: see [`ModuleData::type_addrs`]).
     pub typelinks: SliceHeader,
-    /// `itablinks` is a `[]*itab` (one pointer per linked interface impl).
+    /// `itablinks` is a `[]*itab` (one pointer per linked interface impl;
+    /// empty from Go 1.27: see [`ModuleData::itab_addrs`]).
     pub itablinks: SliceHeader,
 
     /// How type-name lengths are encoded in this binary. `parse` cannot tell
@@ -107,6 +118,10 @@ pub enum Layout {
     /// `textsectmap`). Shares the pclntab magic with V120, so the two are told
     /// apart by parsing both and keeping whichever yields valid typelinks.
     V126,
+    /// Go 1.27: `typelinks` and `itablinks` are gone; `typedesclen` follows
+    /// `types` and `itaboffset`, `itabsize` follow `etypes`. Same pclntab
+    /// magic again: told apart from V126 by which parse validates.
+    V127,
     /// Go 1.16 and 1.17 (pclntab magic 0xfffffffa): no `covctrs` (added in 1.20)
     /// and no `rodata`/`gofunc` (added in 1.18), so the offset table after
     /// `etypes` sits two pointers earlier than every later layout.
@@ -173,15 +188,12 @@ fn detect_name_encoding(bin: &GoBinary, md: &ModuleData) -> NameEnc {
     const STR_OFFSET: usize = 40;
     const HEADER: usize = 48;
     const PROBES: usize = 64;
-    let n = (md.typelinks.len as usize).min(PROBES);
-    let Some(tl_bytes) = bin.read_at_addr(md.typelinks.data, n.saturating_mul(4)) else {
+    let Ok(addrs) = md.type_addrs(bin) else {
         return NameEnc::Varint;
     };
     let mut varint_ok = 0usize;
     let mut twobyte_ok = 0usize;
-    for chunk in tl_bytes.chunks_exact(4) {
-        let tl_off = i32::from_le_bytes(chunk.try_into().unwrap());
-        let type_addr = md.types.wrapping_add(tl_off as i64 as u64);
+    for type_addr in addrs.into_iter().take(PROBES) {
         let Some(hdr) = bin.read_at_addr(type_addr, HEADER) else {
             continue;
         };
@@ -225,6 +237,103 @@ fn name_probe_valid(bytes: &[u8], enc: NameEnc) -> bool {
 }
 
 impl ModuleData {
+    /// The address of every type descriptor the linker listed: `typelinks`
+    /// resolved against `types` (Go 1.26 and older), or, from Go 1.27, which
+    /// dropped `typelinks`, the descriptors walked back to back from the
+    /// start of the types region for `typedesclen` bytes, as the runtime's
+    /// `moduleTypelinks` does (one pointer in, each descriptor aligned to a
+    /// pointer and as long as its `DescriptorSize`). A walk that meets a
+    /// descriptor it cannot size stops there with what it has.
+    pub fn type_addrs(&self, bin: &GoBinary) -> Result<Vec<u64>> {
+        if self.typedesclen == 0 {
+            const MAX_TYPELINKS: u64 = 5_000_000;
+            if self.typelinks.len > MAX_TYPELINKS {
+                return Err(Error::TypeRecovery(format!(
+                    "typelinks length {} exceeds sanity cap {}",
+                    self.typelinks.len, MAX_TYPELINKS
+                )));
+            }
+            let bytes = bin
+                .read_at_addr(self.typelinks.data, (self.typelinks.len as usize) * 4)
+                .ok_or_else(|| {
+                    Error::TypeRecovery(format!(
+                        "typelinks at 0x{:x} (len {}) is unmapped",
+                        self.typelinks.data, self.typelinks.len
+                    ))
+                })?;
+            return Ok(bytes
+                .chunks_exact(4)
+                .map(|c| {
+                    let off = if bin.little_endian {
+                        i32::from_le_bytes(c.try_into().unwrap())
+                    } else {
+                        i32::from_be_bytes(c.try_into().unwrap())
+                    };
+                    self.types.wrapping_add(off as i64 as u64)
+                })
+                .collect());
+        }
+        let ps = bin.pointer_size() as u64;
+        let end = self.types.saturating_add(self.typedesclen);
+        let mut out = Vec::new();
+        let mut td = self.types.saturating_add(ps);
+        while td < end {
+            td = td.div_ceil(ps) * ps;
+            if td >= end {
+                break;
+            }
+            let Some(size) = descriptor_size(bin, td) else {
+                break;
+            };
+            out.push(td);
+            td = td.saturating_add(size);
+        }
+        Ok(out)
+    }
+
+    /// The address of every itab the linker emitted: `itablinks` (Go 1.26 and
+    /// older), or, from Go 1.27, which dropped it, the itabs walked back to
+    /// back over `itabsize` bytes at `types + itaboffset`, as the runtime's
+    /// `addModuleItabs` does (each as long as its `Size`).
+    pub fn itab_addrs(&self, bin: &GoBinary) -> Result<Vec<u64>> {
+        let ps = bin.pointer_size();
+        if self.itabsize == 0 && self.typedesclen == 0 {
+            const MAX_ITABS: u64 = 5_000_000;
+            if self.itablinks.len > MAX_ITABS {
+                return Err(Error::ItabRecovery(format!(
+                    "itablinks length {} exceeds sanity cap {}",
+                    self.itablinks.len, MAX_ITABS
+                )));
+            }
+            let n = self.itablinks.len as usize;
+            let bytes = bin
+                .read_at_addr(self.itablinks.data, n * ps)
+                .ok_or_else(|| {
+                    Error::ItabRecovery(format!(
+                        "itablinks at 0x{:x} (len {}) unmapped",
+                        self.itablinks.data, self.itablinks.len
+                    ))
+                })?;
+            return Ok(bytes
+                .chunks_exact(ps)
+                .filter_map(|c| read_ptr(c, 0, ps, bin.little_endian))
+                .filter(|&a| a != 0)
+                .collect());
+        }
+        let ps = ps as u64;
+        let mut p = self.types.saturating_add(self.itaboffset);
+        let end = p.saturating_add(self.itabsize);
+        let mut out = Vec::new();
+        while p < end {
+            let Some(size) = itab_size(bin, p) else {
+                break;
+            };
+            out.push(p);
+            p = p.saturating_add(size.max(ps));
+        }
+        Ok(out)
+    }
+
     /// Whether the package-variable word at `addr` holds a pointer, from the
     /// GC pointer masks of the data and bss sections (`gcdata`, `gcbss`:
     /// GC programs the runtime expands with `progToPointerMask`, one bit
@@ -497,7 +606,7 @@ fn layouts_for(bin: &GoBinary) -> &'static [Layout] {
     match read_u32_e(bin.pclntab_slice(), 0, bin.little_endian) {
         Some(0xfffffff0) => &[Layout::V118],
         Some(0xfffffffa) => &[Layout::Pre118],
-        _ => &[Layout::V120, Layout::V126],
+        _ => &[Layout::V120, Layout::V126, Layout::V127],
     }
 }
 
@@ -637,7 +746,7 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
     // covctrs/ecovctrs were added in Go 1.20 and are present in every layout
     // since. The pre-1.20 layout skips straight from enoptrbss to
     // end/gcdata/gcbss.
-    let (covctrs, ecovctrs) = if matches!(layout, Layout::V120 | Layout::V126) {
+    let (covctrs, ecovctrs) = if matches!(layout, Layout::V120 | Layout::V126 | Layout::V127) {
         (r.uptr()?, r.uptr()?)
     } else {
         (0, 0)
@@ -646,7 +755,17 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
     let gcdata = r.uptr()?;
     let gcbss = r.uptr()?;
     let types = r.uptr()?;
+    let typedesclen = if matches!(layout, Layout::V127) {
+        r.uptr()?
+    } else {
+        0
+    };
     let etypes = r.uptr()?;
+    let (itaboffset, itabsize) = if matches!(layout, Layout::V127) {
+        (r.uptr()?, r.uptr()?)
+    } else {
+        (0, 0)
+    };
     // Go 1.18 inserted `rodata` and `gofunc` after `etypes`; Go 1.16/1.17 do not
     // have them, so the slice headers that follow sit two pointers earlier.
     let (rodata, gofunc) = if matches!(layout, Layout::Pre118) {
@@ -656,13 +775,22 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
     };
     // Go 1.26 inserted an `epclntab` pointer here, before textsectmap. Reading
     // it keeps the slice headers that follow aligned; older layouts skip it.
-    if matches!(layout, Layout::V126) {
+    if matches!(layout, Layout::V126 | Layout::V127) {
         let _epclntab = r.uptr()?;
     }
 
     let textsectmap = r.slice_header()?;
-    let typelinks = r.slice_header()?;
-    let itablinks = r.slice_header()?;
+    // Go 1.27 dropped both: its types and itabs are walked in place.
+    let empty = SliceHeader {
+        data: 0,
+        len: 0,
+        cap: 0,
+    };
+    let (typelinks, itablinks) = if matches!(layout, Layout::V127) {
+        (empty, empty)
+    } else {
+        (r.slice_header()?, r.slice_header()?)
+    };
 
     // Post-decode sanity. If pclntab magic and moduledata layout disagree
     // (custom linker, hand-patched binary, sniff wrong) we'd return a
@@ -672,6 +800,28 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
         return Err(Error::ModuleData(format!(
             "implausible types region: [0x{types:x}, 0x{etypes:x})"
         )));
+    }
+    // Go 1.27: the descriptors and the itabs lie inside the types region,
+    // and the text sections map is a plausible slice. A V126 read of a 1.27
+    // moduledata fails the region check above (`typedesclen` read as
+    // `etypes`); a V127 read of an older one fails here.
+    if matches!(layout, Layout::V127) {
+        let region = etypes - types;
+        if typedesclen == 0
+            || typedesclen > region
+            || itaboffset.saturating_add(itabsize) > region
+            || (itabsize != 0 && itaboffset < typedesclen)
+        {
+            return Err(Error::ModuleData(format!(
+                "implausible Go 1.27 type layout: typedesclen {typedesclen}, itabs {itaboffset}+{itabsize}, region {region}"
+            )));
+        }
+        if textsectmap.len > 4096 || textsectmap.len != textsectmap.cap {
+            return Err(Error::ModuleData(format!(
+                "implausible textsectmap length {}",
+                textsectmap.len
+            )));
+        }
     }
     if text == 0 || etext < text {
         return Err(Error::ModuleData(format!(
@@ -782,7 +932,10 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
         gcdata,
         gcbss,
         types,
+        typedesclen,
         etypes,
+        itaboffset,
+        itabsize,
         rodata,
         gofunc,
         textsectmap,
@@ -979,4 +1132,91 @@ mod tests {
         assert_eq!(expand_gc_prog(&[0x03], 3), None);
         assert_eq!(expand_gc_prog(&[0x81, 0x05, 0x00], 5), None);
     }
+}
+
+/// A pointer-sized word at `addr`.
+fn word_at(bin: &GoBinary, addr: u64) -> Option<u64> {
+    let ps = bin.pointer_size();
+    read_ptr(bin.read_at_addr(addr, ps)?, 0, ps, bin.little_endian)
+}
+
+/// The bytes of the Go 1.27 type descriptor at `addr`, as
+/// `internal/abi.(*Type).DescriptorSize` computes them: the kind's struct,
+/// its uncommon part when flagged, the data the kind keeps inline (a
+/// function's parameter and result types, an interface's methods, a
+/// struct's fields), then the method table. None for a kind it does not
+/// know (the walk stops there).
+fn descriptor_size(bin: &GoBinary, addr: u64) -> Option<u64> {
+    let ps = bin.pointer_size() as u64;
+    let le = bin.little_endian;
+    let hdr = 4 * ps + 16;
+    let head = bin.read_at_addr(addr, hdr as usize)?;
+    let tflag = head[(2 * ps + 4) as usize];
+    let kind = head[(2 * ps + 7) as usize] & 0x1f;
+    let align = |n: u64| n.div_ceil(ps) * ps;
+    let u16_at = |a: u64| -> Option<u64> {
+        let b: [u8; 2] = bin.read_at_addr(a, 2)?.try_into().ok()?;
+        Some(if le {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        } as u64)
+    };
+    let (base, add) = match kind {
+        // Bool through Complex128, String, UnsafePointer: the header alone.
+        1..=16 | 24 | 26 => (hdr, 0),
+        17 => (hdr + 3 * ps, 0), // Array: Elem, Slice, Len
+        18 => (hdr + 2 * ps, 0), // Chan: Elem, Dir
+        19 => {
+            // Func: InCount, OutCount (top bit: variadic), then the types.
+            let n_in = u16_at(addr + hdr)?;
+            let n_out = u16_at(addr + hdr + 2)? & 0x7fff;
+            (align(hdr + 4), (n_in + n_out) * ps)
+        }
+        20 => {
+            // Interface: PkgPath, Methods (8-byte Imethods).
+            let n = word_at(bin, addr + hdr + 2 * ps)?;
+            (hdr + 4 * ps, n.checked_mul(8)?)
+        }
+        21 => (align(hdr + 10 * ps + 4), 0), // Map (Go 1.27 MapType)
+        22 | 23 => (hdr + ps, 0),            // Pointer, Slice: Elem
+        25 => {
+            // Struct: PkgPath, Fields (Name, Typ, Offset each).
+            let n = word_at(bin, addr + hdr + 2 * ps)?;
+            (hdr + 4 * ps, n.checked_mul(3 * ps)?)
+        }
+        _ => return None,
+    };
+    let mut size = base;
+    if tflag & 1 != 0 {
+        // UncommonType: PkgPath, Mcount, Xcount, Moff, unused.
+        let mcount = u16_at(addr + base + 4)?;
+        size = size
+            .checked_add(16)?
+            .checked_add(add)?
+            .checked_add(mcount * 16)?;
+    } else {
+        size = size.checked_add(add)?;
+    }
+    Some(size)
+}
+
+/// The bytes of the itab at `addr`, as `internal/abi.(*ITab).Size` computes
+/// them: the header and one method word, plus one word per further method
+/// of its interface, unless the itab is the empty "does not implement" one.
+fn itab_size(bin: &GoBinary, addr: u64) -> Option<u64> {
+    let ps = bin.pointer_size() as u64;
+    let inter = word_at(bin, addr)?;
+    let fun0 = word_at(bin, addr + 2 * ps + if ps == 8 { 8 } else { 4 })?;
+    let header = 2 * ps + if ps == 8 { 8 } else { 4 };
+    let size = header + ps;
+    if fun0 == 0 || inter == 0 {
+        return Some(size);
+    }
+    let hdr = 4 * ps + 16;
+    let methods = word_at(bin, inter + hdr + 2 * ps)?;
+    if methods == 0 || methods > 1 << 20 {
+        return Some(size);
+    }
+    Some(size + (methods - 1) * ps)
 }
