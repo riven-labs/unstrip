@@ -55,6 +55,26 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   itself. A method table with a nameless method or an offset outside its region
   is rejected as a whole, and text offsets go through the new
   `ModuleData::text_addr`, which follows `textsectmap` like the runtime.
+- GOARCH=386 (32-bit pointers), checked on Go 1.17 to 1.27 linux and windows
+  builds:
+  - `BuildInfo::parse` decodes the pre-Go-1.18 pointer format (two pointers to
+    the version and modinfo string headers); Go 1.17 binaries of every arch
+    used to fail.
+  - The name-encoding probe read the 64-bit `_type` str offset and could pick
+    the 2-byte length encoding on 32-bit, garbling every itab and type name.
+  - Itab slots: Go 1.23 dropped the 4-byte pad after `hash`, so on 32-bit
+    `fun[0]` is at 12, not 16 (`ModuleData::itab_fun_offset`).
+  - `stack_objects` reads the pointer-sized record count (and Go 1.17's
+    `gcdata` pointer) at the pointer size; `stack_object_mask` has one bit per
+    pointer-sized word.
+  - Type-graph recovery (`types::recover_all`), the uncommon method tables and
+    the map extension sizes work at pointer size 4; big-endian is still
+    refused.
+  - garble's reflected-name table and the `--data-at` `ptrs`, `ifaces`,
+    `slice-header` and `string` views read pointer-sized words.
+- Methods of named map types on Go 1.27: its `MapType` is ten words plus
+  flags (88 bytes on 64-bit), not the swiss 64; the uncommon block was read
+  24 bytes early.
 
 ## [1.2.0] - 2026-07-01
 

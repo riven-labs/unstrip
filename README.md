@@ -415,7 +415,7 @@ Every Go binary built since 1.2 carries a `pclntab`, a self-describing table tha
 2. **Walk the function table.** For each function entry, resolve the name through the funcnametab, the file through the cutab -> filetab indirection, and the start line through the pcln pc-value table.
 3. **Find the moduledata.** Scan `.noptrdata` / `.data` for a pointer to the pclntab, that's the first field of `runtime.firstmoduledata`. Verify by checking that the next five slice headers all point inside the pclntab (the corroborating-references trick that defeats false positives).
 4. **Walk the type graph.** Start from `typelinks` (the linker's list of every type the program references), parse each `_type` header, resolve its name through the names blob relative to `moduledata.types`, decode kind-specific extra data (pointer.elem, slice.elem, struct fields, ...), and follow the references to pull in types `typelinks` itself missed. Same trick for `itablinks`.
-5. **Parse buildinfo.** Locate the `\xff Go buildinf:` marker, decode the inline string format introduced in Go 1.18, strip the 16-byte sentinel framing, parse the tab-separated `path`/`mod`/`dep`/`build` records.
+5. **Parse buildinfo.** Locate the `\xff Go buildinf:` marker, decode the inline string format introduced in Go 1.18 (or, before 1.18, the two pointers to the version and modinfo string headers), strip the 16-byte sentinel framing, parse the tab-separated `path`/`mod`/`dep`/`build` records.
 
 No relocations. No rewriting. Read-only output. Pipe it into IDA, Ghidra, gdb, or a script.
 
@@ -458,7 +458,7 @@ Pre-Go-1.18 pclntab parsing. The Go 1.13 through 1.17 layouts are different enou
 
 Free-function signature recovery. Methods ship today (we walk `_type.uncommon().methods` and the itab method tables). Free top-level functions do not appear in either table, so their signatures are absent from a stripped binary unless the compiler emitted a `funcType` for reflection or interface storage. Closing that gap means either reading DWARF when present or recognizing reflective uses and back-resolving.
 
-i386 and 32-bit arm. The pclntab layout drifts on 32-bit targets. No demand yet; the day a 32-bit IoT Go binary becomes a real corpus problem, this jumps to the top.
+32-bit arm, and the instruction scanners on i386. The table readers (pclntab, moduledata, buildinfo, types, itabs, method tables, funcdata) handle i386 on Go 1.17 to 1.27; the call, goroutine and data-reference scanners decode amd64 and arm64 code only, and 32-bit arm is untested.
 
 `--symbols-as` for Mach-O. ELF and PE write today. The Mach-O equivalent (`LC_SYMTAB` patching) ships once we have a tested fixture; we do not currently have one we can publish.
 
