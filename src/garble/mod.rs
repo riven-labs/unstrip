@@ -501,9 +501,12 @@ const MIN_NAME_PAIRS: usize = 8;
 /// binary carries one. Returns None on a non-garbled binary (no such table) or
 /// when the table can't be located.
 pub fn recover_reflect_names(bin: &GoBinary) -> Option<ReflectNames> {
-    if bin.pointer_size() != 8 {
-        return None; // 64-bit string headers only for now
+    let ps = bin.pointer_size();
+    if !matches!(ps, 4 | 8) || !bin.little_endian {
+        return None; // little-endian string headers only for now
     }
+    // A string header is two words: 16 bytes on 64-bit, 8 on 32-bit.
+    let hdr = 2 * ps;
     let mut best: Option<ReflectNames> = None;
     for section in &bin.sections {
         // The table lives in writable or read-only data, never in code or bss.
@@ -517,27 +520,27 @@ pub fn recover_reflect_names(bin: &GoBinary) -> Option<ReflectNames> {
             .saturating_add(section.file_size)
             .min(bin.bytes.len());
         let mut off = start;
-        while off + 16 <= end {
-            // A run is consecutive 16-byte string headers that each resolve to
-            // a short printable string.
-            if string_header(bin, off).is_some() {
+        while off + hdr <= end {
+            // A run is consecutive string headers that each resolve to a
+            // short printable string.
+            if string_header(bin, off, ps).is_some() {
                 let mut run = Vec::new();
                 let mut p = off;
-                while p + 16 <= end {
-                    match string_header(bin, p) {
+                while p + hdr <= end {
+                    match string_header(bin, p, ps) {
                         Some(s) => run.push(s),
                         None => break,
                     }
-                    p += 16;
+                    p += hdr;
                 }
                 if let Some(map) = pairs_from_run(&run) {
                     if best.as_ref().is_none_or(|b| map.len() > b.len()) {
                         best = Some(map);
                     }
                 }
-                off = p.max(off + 16);
+                off = p.max(off + hdr);
             } else {
-                off += 8;
+                off += ps;
             }
         }
     }
@@ -546,9 +549,17 @@ pub fn recover_reflect_names(bin: &GoBinary) -> Option<ReflectNames> {
 
 /// Read a Go string header (`{data *byte; len int}`) at file offset `off` and
 /// return the pointed-to string when it is a short printable run.
-fn string_header(bin: &GoBinary, off: usize) -> Option<String> {
-    let ptr = u64::from_le_bytes(bin.bytes.get(off..off + 8)?.try_into().ok()?);
-    let len = u64::from_le_bytes(bin.bytes.get(off + 8..off + 16)?.try_into().ok()?);
+fn string_header(bin: &GoBinary, off: usize, ps: usize) -> Option<String> {
+    let word = |at: usize| -> Option<u64> {
+        let b = bin.bytes.get(at..at + ps)?;
+        Some(if ps == 8 {
+            u64::from_le_bytes(b.try_into().ok()?)
+        } else {
+            u32::from_le_bytes(b.try_into().ok()?) as u64
+        })
+    };
+    let ptr = word(off)?;
+    let len = word(off + ps)?;
     if len == 0 || len > 128 {
         return None;
     }
