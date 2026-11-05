@@ -187,7 +187,21 @@ pub struct StructField {
     pub tag: String,
 }
 
-pub(crate) const TYPE_HEADER_SIZE_64: usize = 48;
+/// Bytes of the `_type` header at pointer size `ps`: size, ptrdata (uintptrs),
+/// hash, tflag, align, fieldAlign, kind, equal, gcdata (pointers), str and
+/// ptrToThis (int32 offsets). 48 on 64-bit, 32 on 32-bit.
+pub(crate) fn type_header_size(ps: usize) -> usize {
+    4 * ps + 16
+}
+
+/// A little-endian word of `ps` bytes (4 or 8) at `off`.
+fn le_word(buf: &[u8], off: usize, ps: usize) -> u64 {
+    if ps == 8 {
+        u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
+    } else {
+        u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as u64
+    }
+}
 
 /// Recover types using the `Mode::Focused` strategy: typelinks-driven walk
 /// plus child reference following. Skips primitive-leaf entries and other
@@ -293,14 +307,16 @@ fn linear_scan_types_region(
         return out;
     };
 
-    // Walk 8-byte-aligned offsets and try to parse a type header at each.
-    // Real types are aligned at uintptr boundaries; trying every 8 bytes
+    // Walk pointer-aligned offsets and try to parse a type header at each.
+    // Real types are aligned at uintptr boundaries; trying every pointer
     // catches them all without false-positive thrashing.
+    let ps = bin.pointer_size();
+    let hdr = type_header_size(ps);
     let mut offset = 0usize;
-    while offset + TYPE_HEADER_SIZE_64 <= bytes.len() {
+    while offset + hdr <= bytes.len() {
         let addr = md.types + offset as u64;
         if already_seen.contains(&addr) {
-            offset += 8;
+            offset += ps;
             continue;
         }
         if let Ok(t) = parse_type(bin, md, addr) {
@@ -315,7 +331,7 @@ fn linear_scan_types_region(
                 out.push(t);
             }
         }
-        offset += 8;
+        offset += ps;
     }
     out
 }
@@ -332,27 +348,28 @@ fn linear_scan_types_region(
 /// address; bounded by the [types, etypes) region.
 fn recover_focused(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
     let ps = bin.pointer_size();
-    if ps != 8 || !bin.little_endian {
+    if !matches!(ps, 4 | 8) || !bin.little_endian {
         // The kind-specific readers below (struct fields, map buckets, func
-        // params) still assume 64-bit little-endian field offsets. Function
-        // names, moduledata, and itab/interface recovery already handle 32-bit
-        // and big-endian; the type graph does not yet, so refuse rather than
-        // return field offsets and names read at the wrong width or byte order.
+        // params) read little-endian words of the binary's pointer size.
+        // Function names, moduledata, and itab/interface recovery already
+        // handle big-endian; the type graph does not yet, so refuse rather than
+        // return field offsets and names read in the wrong byte order.
         let order = if bin.little_endian {
             "little-endian"
         } else {
             "big-endian"
         };
         return Err(Error::TypeRecovery(format!(
-            "type-graph recovery needs 64-bit little-endian (got pointer size {ps}, {order})"
+            "type-graph recovery needs a little-endian 32- or 64-bit binary (got pointer size {ps}, {order})"
         )));
     }
 
     // Structural cap on total reachable types: the types region itself is
-    // bounded, and each type takes at least one header (48 bytes on 64-bit),
+    // bounded, and each type takes at least one header (48 bytes on 64-bit,
+    // 32 on 32-bit),
     // so this is a hard ceiling regardless of what typelinks claims.
     let types_region = md.etypes.saturating_sub(md.types) as usize;
-    let max_types = types_region / TYPE_HEADER_SIZE_64;
+    let max_types = types_region / type_header_size(ps);
 
     // The linked types: `typelinks`, or from Go 1.27 the descriptors walked
     // in place ([`ModuleData::type_addrs`]).
@@ -425,16 +442,19 @@ fn child_addrs(kd: &KindData) -> Vec<u64> {
 }
 
 pub(crate) fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Type> {
+    let ps = bin.pointer_size();
     let buf = bin
-        .read_at_addr(addr, TYPE_HEADER_SIZE_64)
+        .read_at_addr(addr, type_header_size(ps))
         .ok_or_else(|| Error::TypeRecovery(format!("type header at 0x{addr:x} unmapped")))?;
 
-    let size = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-    let ptr_bytes = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-    let hash = u32::from_le_bytes(buf[16..20].try_into().unwrap());
-    let tflag = buf[20];
-    let kind_byte = buf[23];
-    let str_off = i32::from_le_bytes(buf[40..44].try_into().unwrap());
+    let size = le_word(buf, 0, ps);
+    let ptr_bytes = le_word(buf, ps, ps);
+    let h = 2 * ps;
+    let hash = u32::from_le_bytes(buf[h..h + 4].try_into().unwrap());
+    let tflag = buf[h + 4];
+    let kind_byte = buf[h + 7];
+    let s = 4 * ps + 8;
+    let str_off = i32::from_le_bytes(buf[s..s + 4].try_into().unwrap());
 
     let kind = KindName::from_byte(kind_byte);
 
@@ -512,7 +532,8 @@ fn decode_kind(
     kind: KindName,
     tflag: u8,
 ) -> Result<KindData> {
-    let extra_addr = type_addr + TYPE_HEADER_SIZE_64 as u64;
+    let ps = bin.pointer_size() as u64;
+    let extra_addr = type_addr + type_header_size(ps as usize) as u64;
     match kind {
         KindName::Pointer => {
             let elem = read_uptr(bin, extra_addr)?;
@@ -524,13 +545,13 @@ fn decode_kind(
         }
         KindName::Array => {
             let elem = read_uptr(bin, extra_addr)?;
-            let _slice = read_uptr(bin, extra_addr + 8)?;
-            let len = read_uptr(bin, extra_addr + 16)?;
+            let _slice = read_uptr(bin, extra_addr + ps)?;
+            let len = read_uptr(bin, extra_addr + 2 * ps)?;
             Ok(KindData::Array { elem, len })
         }
         KindName::Chan => {
             let elem = read_uptr(bin, extra_addr)?;
-            let dir = read_uptr(bin, extra_addr + 8)?;
+            let dir = read_uptr(bin, extra_addr + ps)?;
             Ok(KindData::Chan { elem, dir })
         }
         KindName::Map => decode_map(bin, extra_addr),
@@ -544,7 +565,7 @@ fn decode_kind(
 /// FuncType extra layout (Go 1.18+, 64-bit):
 ///   offset  0  InCount  (u16)
 ///   offset  2  OutCount (u16, top bit = variadic)
-///   offset  4..  if TFlag bit 0 (TFlagUncommon) set: UncommonType (16 bytes)
+///   offset  8 (4 on 32-bit): if TFlag bit 0 (TFlagUncommon) set, UncommonType (16 bytes)
 ///   then       [InCount + OutCount] *Type
 ///
 /// The parameter type pointers are the key piece. Without them, struct
@@ -596,14 +617,16 @@ fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
 
     // The parameter pointer array starts after the FuncType (which embeds the
     // 48-byte Type header plus 4 bytes of in/out counts, padded to 8-byte
-    // alignment = 8 bytes of extension), optionally offset by UncommonType
+    // alignment = 8 bytes of extension; on 32-bit the 32-byte header needs no
+    // padding, so 4), optionally offset by UncommonType
     // (16 bytes) if TFlagUncommon is set. The Go runtime computes this with
     // `unsafe.Sizeof(*t)` which includes the alignment padding; we have to
     // bake the same 8 bytes in by hand here. Getting this wrong by 4 bytes
     // produces in_types/out_types pointers that look "almost right" (the low
     // bytes are sane) but actually contain half of one pointer plus part of
     // the next, which silently corrupts every consumer downstream.
-    let params_offset = 8usize
+    let ps = bin.pointer_size();
+    let params_offset = 4usize.next_multiple_of(ps)
         + if tflag & TFLAG_UNCOMMON != 0 {
             UNCOMMON_TYPE_SIZE
         } else {
@@ -611,20 +634,16 @@ fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
         };
     let params_addr = extra_addr + params_offset as u64;
     let params_bytes = bin
-        .read_at_addr(params_addr, total_params * 8)
+        .read_at_addr(params_addr, total_params * ps)
         .ok_or_else(|| Error::TypeRecovery("func params array unmapped".into()))?;
 
     let mut in_types = Vec::with_capacity(in_count as usize);
     for i in 0..in_count as usize {
-        let off = i * 8;
-        let ptr = u64::from_le_bytes(params_bytes[off..off + 8].try_into().unwrap());
-        in_types.push(ptr);
+        in_types.push(le_word(params_bytes, i * ps, ps));
     }
     let mut out_types = Vec::with_capacity(out_count as usize);
     for i in 0..out_count as usize {
-        let off = (in_count as usize + i) * 8;
-        let ptr = u64::from_le_bytes(params_bytes[off..off + 8].try_into().unwrap());
-        out_types.push(ptr);
+        out_types.push(le_word(params_bytes, (in_count as usize + i) * ps, ps));
     }
 
     Ok(KindData::Func {
@@ -646,12 +665,13 @@ fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
 /// types region holding the hash/key/value/overflow layout the runtime
 /// uses for map storage.
 fn decode_map(bin: &GoBinary, extra_addr: u64) -> Result<KindData> {
+    let ps = bin.pointer_size() as u64;
     let key = read_uptr(bin, extra_addr)?;
-    let elem = read_uptr(bin, extra_addr + 8)?;
+    let elem = read_uptr(bin, extra_addr + ps)?;
     // The bucket pointer is the third *Type; if reading it fails (truncated
     // or unmapped), fall back to None for bucket without failing the whole
     // decode.
-    let bucket = read_uptr(bin, extra_addr + 16).ok();
+    let bucket = read_uptr(bin, extra_addr + 2 * ps).ok();
     Ok(KindData::Map { key, elem, bucket })
 }
 
@@ -660,17 +680,19 @@ fn decode_map(bin: &GoBinary, extra_addr: u64) -> Result<KindData> {
 ///   fields  slice header (data, len, cap)
 ///   then each structField: { name Name, typ *Type, offset uintptr } = 24 bytes on 64-bit
 fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<KindData> {
+    let ps = bin.pointer_size();
     let _pkg_path = read_uptr(bin, extra_addr)?;
-    let fields_data = read_uptr(bin, extra_addr + 8)?;
-    let fields_len = read_uptr(bin, extra_addr + 16)?;
+    let fields_data = read_uptr(bin, extra_addr + ps as u64)?;
+    let fields_len = read_uptr(bin, extra_addr + 2 * ps as u64)?;
     if fields_len > 1024 {
         return Err(Error::TypeRecovery(format!(
             "struct field count {fields_len} unreasonably large"
         )));
     }
 
-    const FIELD_SIZE: usize = 24;
-    let total = fields_len as usize * FIELD_SIZE;
+    // name, typ, offset: three words.
+    let field_size = 3 * ps;
+    let total = fields_len as usize * field_size;
     let buf = bin.read_at_addr(fields_data, total).ok_or_else(|| {
         Error::TypeRecovery(format!(
             "struct fields array at 0x{fields_data:x} ({total} bytes) unmapped"
@@ -679,10 +701,10 @@ fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<Kin
 
     let mut fields = Vec::with_capacity(fields_len as usize);
     for i in 0..fields_len as usize {
-        let off = i * FIELD_SIZE;
-        let name_ptr = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-        let typ = u64::from_le_bytes(buf[off + 8..off + 16].try_into().unwrap());
-        let offset = u64::from_le_bytes(buf[off + 16..off + 24].try_into().unwrap());
+        let off = i * field_size;
+        let name_ptr = le_word(buf, off, ps);
+        let typ = le_word(buf, off + ps, ps);
+        let offset = le_word(buf, off + 2 * ps, ps);
 
         let (name, embedded, tag) =
             read_name_full(bin, md, name_ptr).unwrap_or((String::new(), false, String::new()));
@@ -753,9 +775,10 @@ fn read_tag(bin: &GoBinary, md: &ModuleData, addr: u64) -> Option<String> {
 ///   methods slice header (data, len, cap = 24 bytes)
 /// Then [len]Imethod, each = (NameOff i32, TypeOff i32) = 8 bytes.
 fn decode_interface(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<KindData> {
+    let ps = bin.pointer_size() as u64;
     let _pkg_path = read_uptr(bin, extra_addr)?;
-    let methods_data = read_uptr(bin, extra_addr + 8)?;
-    let methods_len = read_uptr(bin, extra_addr + 16)?;
+    let methods_data = read_uptr(bin, extra_addr + ps)?;
+    let methods_len = read_uptr(bin, extra_addr + 2 * ps)?;
     if methods_len > 1024 {
         return Err(Error::TypeRecovery(format!(
             "interface method count {methods_len} unreasonably large"
@@ -786,8 +809,9 @@ fn decode_interface(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<
 }
 
 fn read_uptr(bin: &GoBinary, addr: u64) -> Result<u64> {
+    let ps = bin.pointer_size();
     let buf = bin
-        .read_at_addr(addr, 8)
+        .read_at_addr(addr, ps)
         .ok_or_else(|| Error::TypeRecovery(format!("uintptr at 0x{addr:x} unmapped")))?;
-    Ok(u64::from_le_bytes(buf.try_into().unwrap()))
+    Ok(le_word(buf, 0, ps))
 }

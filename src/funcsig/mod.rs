@@ -63,7 +63,7 @@ use crate::error::Error;
 use crate::gobin::GoBinary;
 use crate::moduledata::ModuleData;
 use crate::types::{
-    parse_type, read_name_public, KindData, KindName, Type, TFLAG_UNCOMMON, TYPE_HEADER_SIZE_64,
+    parse_type, read_name_public, type_header_size, KindData, KindName, Type, TFLAG_UNCOMMON,
 };
 use crate::Result;
 
@@ -222,9 +222,10 @@ pub fn methods_for_type(bin: &GoBinary, md: &ModuleData, t: &Type) -> Result<Vec
         return Ok(Vec::new());
     }
 
+    let ps = bin.pointer_size();
     let extra_size = match t.kind {
         KindName::Map => map_extension_size(bin, md, t.addr),
-        kind => kind_extension_size(kind),
+        kind => kind_extension_size(kind, ps),
     }
     .ok_or_else(|| {
         Error::TypeRecovery(format!(
@@ -233,7 +234,7 @@ pub fn methods_for_type(bin: &GoBinary, md: &ModuleData, t: &Type) -> Result<Vec
         ))
     })?;
 
-    let uncommon_addr = t.addr + TYPE_HEADER_SIZE_64 as u64 + extra_size as u64;
+    let uncommon_addr = t.addr + type_header_size(ps) as u64 + extra_size as u64;
 
     let header = bin
         .read_at_addr(uncommon_addr, UNCOMMON_TYPE_SIZE)
@@ -333,7 +334,7 @@ pub fn methods_for_type(bin: &GoBinary, md: &ModuleData, t: &Type) -> Result<Vec
 }
 
 /// Size in bytes of the kind-specific extension that sits between the
-/// `_type` header and the UncommonType block, on 64-bit.
+/// `_type` header and the UncommonType block, for pointer size `ps`.
 ///
 /// Returns None for Map (its layout is decided per record by
 /// `map_extension_size`) and for unknown kinds. A None here means we cannot
@@ -343,10 +344,10 @@ pub fn methods_for_type(bin: &GoBinary, md: &ModuleData, t: &Type) -> Result<Vec
 /// The values come from the Go struct definitions in `internal/abi/type.go`
 /// (and `runtime/type.go` before 1.21; the shapes are identical back to
 /// 1.17). Each is `unsafe.Sizeof(XxxType{}) - unsafe.Sizeof(Type{})`, so the
-/// trailing alignment padding counts. Slice headers are 24 bytes (data, len,
-/// cap); `Name` is a one-pointer wrapper around a byte slice in the names
-/// blob.
-fn kind_extension_size(kind: KindName) -> Option<usize> {
+/// trailing alignment padding counts. Slice headers are three words (data,
+/// len, cap); `Name` is a one-pointer wrapper around a byte slice in the
+/// names blob. The 64-bit sizes are given below; 32-bit halves the words.
+fn kind_extension_size(kind: KindName, ps: usize) -> Option<usize> {
     match kind {
         // Primitives have no extension; UncommonType sits directly after
         // the type header.
@@ -370,13 +371,13 @@ fn kind_extension_size(kind: KindName) -> Option<usize> {
         | KindName::UnsafePointer => Some(0),
 
         // Pointer / Slice: one *Type element pointer.
-        KindName::Pointer | KindName::Slice => Some(8),
+        KindName::Pointer | KindName::Slice => Some(ps),
 
         // Array: elem *Type + slice *Type + len uintptr.
-        KindName::Array => Some(24),
+        KindName::Array => Some(3 * ps),
 
         // Chan: elem *Type + dir uintptr.
-        KindName::Chan => Some(16),
+        KindName::Chan => Some(2 * ps),
 
         // Func: InCount u16 + OutCount u16 = 4 bytes, but FuncType embeds
         // the pointer-aligned Type header, so Sizeof(FuncType) rounds 52 up
@@ -385,14 +386,15 @@ fn kind_extension_size(kind: KindName) -> Option<usize> {
         // and the real Mcount/Xcount as Moff: thousands of junk methods per
         // binary once Go 1.23's `iter.Seq[...]` named func types appear.)
         // The parameter array is laid out AFTER the UncommonType, so it does
-        // not contribute here; `types::decode_func` uses the same 8.
-        KindName::Func => Some(8),
+        // not contribute here; `types::decode_func` uses the same 8. On
+        // 32-bit the 32-byte header plus 4 needs no padding: 4.
+        KindName::Func => Some(4usize.next_multiple_of(ps)),
 
         // Struct: PkgPath Name (8) + Fields slice header (24).
-        KindName::Struct => Some(32),
+        KindName::Struct => Some(4 * ps),
 
         // Interface: PkgPath Name (8) + Methods slice header (24).
-        KindName::Interface => Some(32),
+        KindName::Interface => Some(4 * ps),
 
         // Map: the layout depends on the map implementation the binary was
         // built with, which only the type data itself can tell; see
@@ -406,12 +408,17 @@ fn kind_extension_size(kind: KindName) -> Option<usize> {
 
 /// `MapType` extension size before Go 1.24 (and under 1.24/1.25's
 /// `GOEXPERIMENT=noswissmap`): Key, Elem, Bucket, Hasher (4 pointers), then
-/// KeySize u8, ValueSize u8, BucketSize u16, Flags u32.
-const OLD_MAP_EXTENSION_SIZE: usize = 40;
+/// KeySize u8, ValueSize u8, BucketSize u16, Flags u32: 40 on 64-bit, 24 on
+/// 32-bit.
+fn old_map_extension_size(ps: usize) -> usize {
+    (4 * ps + 8).next_multiple_of(ps)
+}
 /// Swiss-table `MapType` extension size (Go 1.24+ default, the only map in
 /// 1.26): Key, Elem, Group, Hasher (4 pointers), GroupSize, SlotSize, ElemOff
-/// (3 uintptrs), Flags u32, padded to 8 = 64.
-const SWISS_MAP_EXTENSION_SIZE: usize = 64;
+/// (3 uintptrs), Flags u32, padded to the pointer: 64 on 64-bit, 32 on 32-bit.
+fn swiss_map_extension_size(ps: usize) -> usize {
+    (7 * ps + 4).next_multiple_of(ps)
+}
 
 /// Extension size of the `MapType` at `type_addr`, decided from the record
 /// itself rather than from a version guess. Both layouts keep the bucket/group
@@ -420,31 +427,43 @@ const SWISS_MAP_EXTENSION_SIZE: usize = 64;
 /// `BucketSize uint16` at +34. The two checks are mutually exclusive for any
 /// real map (a non-zero `BucketSize` at +34 makes the u64 at +32 at least
 /// 65536, larger than any bucket; a group under 64 KiB has zero bytes at +34),
-/// so exactly one of them matches. `None` when neither does.
+/// so exactly one of them matches. `None` when neither does. On 32-bit the
+/// same holds a word in: group at +8, `GroupSize` at +16, `BucketSize` at +18.
 fn map_extension_size(bin: &GoBinary, md: &ModuleData, type_addr: u64) -> Option<usize> {
-    let ext = bin.read_at_addr(type_addr + TYPE_HEADER_SIZE_64 as u64, 40)?;
-    let group = u64::from_le_bytes(ext[16..24].try_into().ok()?);
+    let ps = bin.pointer_size();
+    let ext = bin.read_at_addr(type_addr + type_header_size(ps) as u64, 5 * ps)?;
+    let group = word(&ext[2 * ps..], ps)?;
     if group < md.types || group >= md.etypes {
         return None;
     }
-    let group_size = u64::from_le_bytes(bin.read_at_addr(group, 8)?.try_into().ok()?);
-    map_extension_size_from(ext, group_size)
+    let group_size = word(bin.read_at_addr(group, ps)?, ps)?;
+    map_extension_size_from(ext, group_size, ps)
 }
 
-/// Pure part of `map_extension_size`: classify the first 40 bytes of a
+/// A little-endian word of `ps` bytes at the start of `b`.
+fn word(b: &[u8], ps: usize) -> Option<u64> {
+    Some(match ps {
+        8 => u64::from_le_bytes(b.get(..8)?.try_into().ok()?),
+        4 => u32::from_le_bytes(b.get(..4)?.try_into().ok()?) as u64,
+        _ => return None,
+    })
+}
+
+/// Pure part of `map_extension_size`: classify the first five words of a
 /// `MapType` extension against the size of its bucket/group type.
-fn map_extension_size_from(ext: &[u8], group_size: u64) -> Option<usize> {
-    if group_size == 0 || ext.len() < 40 {
+fn map_extension_size_from(ext: &[u8], group_size: u64, ps: usize) -> Option<usize> {
+    if group_size == 0 || ext.len() < 5 * ps {
         return None;
     }
-    let swiss_group_size = u64::from_le_bytes(ext[32..40].try_into().ok()?);
-    let old_bucket_size = u16::from_le_bytes(ext[34..36].try_into().ok()?) as u64;
+    let swiss_group_size = word(&ext[4 * ps..], ps)?;
+    let b = 4 * ps + 2;
+    let old_bucket_size = u16::from_le_bytes(ext[b..b + 2].try_into().ok()?) as u64;
     match (
         swiss_group_size == group_size,
         old_bucket_size == group_size,
     ) {
-        (true, false) => Some(SWISS_MAP_EXTENSION_SIZE),
-        (false, true) => Some(OLD_MAP_EXTENSION_SIZE),
+        (true, false) => Some(swiss_map_extension_size(ps)),
+        (false, true) => Some(old_map_extension_size(ps)),
         _ => None,
     }
 }
@@ -623,11 +642,12 @@ fn render_type_name(addr: u64, cache: &mut TypeCache<'_>) -> String {
 mod tests {
     use super::*;
 
-    /// `unsafe.Sizeof(XxxType{}) - unsafe.Sizeof(Type{})` on 64-bit: the
-    /// kind fields after the 48-byte header, with the struct rounded up to
-    /// its 8-byte alignment (it embeds pointers via `Type`).
-    fn go_extension(field_bytes: usize) -> usize {
-        (TYPE_HEADER_SIZE_64 + field_bytes).next_multiple_of(8) - TYPE_HEADER_SIZE_64
+    /// `unsafe.Sizeof(XxxType{}) - unsafe.Sizeof(Type{})` at pointer size
+    /// `ps`: the kind fields after the header, with the struct rounded up to
+    /// its pointer alignment (it embeds pointers via `Type`).
+    fn go_extension(field_bytes: usize, ps: usize) -> usize {
+        let hdr = type_header_size(ps);
+        (hdr + field_bytes).next_multiple_of(ps) - hdr
     }
 
     #[test]
@@ -635,26 +655,27 @@ mod tests {
         // Each value is derived from the Go struct, not restated: a kind
         // whose layout changes upstream should fail here rather than
         // silently miscompute uncommon block addresses.
-        assert_eq!(
-            kind_extension_size(KindName::Pointer),
-            Some(go_extension(8))
-        );
-        assert_eq!(kind_extension_size(KindName::Slice), Some(go_extension(8)));
-        assert_eq!(kind_extension_size(KindName::Array), Some(go_extension(24)));
-        assert_eq!(kind_extension_size(KindName::Chan), Some(go_extension(16)));
-        assert_eq!(
-            kind_extension_size(KindName::Struct),
-            Some(go_extension(32))
-        );
-        assert_eq!(
-            kind_extension_size(KindName::Interface),
-            Some(go_extension(32))
-        );
-        assert_eq!(kind_extension_size(KindName::Map), None);
-        assert_eq!(kind_extension_size(KindName::Bool), Some(0));
-        assert_eq!(kind_extension_size(KindName::String), Some(0));
-        assert_eq!(OLD_MAP_EXTENSION_SIZE, go_extension(4 * 8 + 1 + 1 + 2 + 4));
-        assert_eq!(SWISS_MAP_EXTENSION_SIZE, go_extension(7 * 8 + 4));
+        for ps in [8, 4] {
+            let ext = |kind| kind_extension_size(kind, ps);
+            assert_eq!(ext(KindName::Pointer), Some(go_extension(ps, ps)));
+            assert_eq!(ext(KindName::Slice), Some(go_extension(ps, ps)));
+            assert_eq!(ext(KindName::Array), Some(go_extension(3 * ps, ps)));
+            assert_eq!(ext(KindName::Chan), Some(go_extension(2 * ps, ps)));
+            assert_eq!(ext(KindName::Struct), Some(go_extension(4 * ps, ps)));
+            assert_eq!(ext(KindName::Interface), Some(go_extension(4 * ps, ps)));
+            assert_eq!(ext(KindName::Map), None);
+            assert_eq!(ext(KindName::Bool), Some(0));
+            assert_eq!(ext(KindName::String), Some(0));
+            assert_eq!(
+                old_map_extension_size(ps),
+                go_extension(4 * ps + 1 + 1 + 2 + 4, ps)
+            );
+            assert_eq!(swiss_map_extension_size(ps), go_extension(7 * ps + 4, ps));
+        }
+        // The 64-bit values the layout comments state.
+        assert_eq!(old_map_extension_size(8), 40);
+        assert_eq!(swiss_map_extension_size(8), 64);
+        assert_eq!(kind_extension_size(KindName::Struct, 8), Some(32));
     }
 
     #[test]
@@ -664,8 +685,13 @@ mod tests {
         // not 4. Reading at +4 was the Go 1.23+ regression: the real PkgPath
         // NameOff was decoded as Mcount/Xcount, yielding thousands of
         // nameless methods with wild PCs on every `iter.Seq[...]` type.
-        assert_eq!(kind_extension_size(KindName::Func), Some(go_extension(4)));
-        assert_eq!(kind_extension_size(KindName::Func), Some(8));
+        assert_eq!(
+            kind_extension_size(KindName::Func, 8),
+            Some(go_extension(4, 8))
+        );
+        assert_eq!(kind_extension_size(KindName::Func, 8), Some(8));
+        // On 32-bit, 32 + 4 = 36 is already 4-aligned.
+        assert_eq!(kind_extension_size(KindName::Func, 4), Some(4));
     }
 
     /// First 40 bytes of a MapType extension: Key, Elem, Group/Bucket,
@@ -684,8 +710,8 @@ mod tests {
         // Swiss (Go 1.24+): GroupSize uintptr at +32 repeats the group type's size.
         let swiss = map_ext(200u64.to_le_bytes());
         assert_eq!(
-            map_extension_size_from(&swiss, 200),
-            Some(SWISS_MAP_EXTENSION_SIZE)
+            map_extension_size_from(&swiss, 200, 8),
+            Some(swiss_map_extension_size(8))
         );
         // Old hmap (<= 1.23): KeySize 16, ValueSize 8, BucketSize 208, Flags 0.
         let mut tail = [0u8; 8];
@@ -694,13 +720,28 @@ mod tests {
         tail[2..4].copy_from_slice(&208u16.to_le_bytes());
         let old = map_ext(tail);
         assert_eq!(
-            map_extension_size_from(&old, 208),
-            Some(OLD_MAP_EXTENSION_SIZE)
+            map_extension_size_from(&old, 208, 8),
+            Some(old_map_extension_size(8))
         );
         // Neither matches: refuse rather than guess.
-        assert_eq!(map_extension_size_from(&swiss, 208), None);
-        assert_eq!(map_extension_size_from(&old, 200), None);
-        assert_eq!(map_extension_size_from(&swiss, 0), None);
-        assert_eq!(map_extension_size_from(&swiss[..32], 200), None);
+        assert_eq!(map_extension_size_from(&swiss, 208, 8), None);
+        assert_eq!(map_extension_size_from(&old, 200, 8), None);
+        assert_eq!(map_extension_size_from(&swiss, 0, 8), None);
+        assert_eq!(map_extension_size_from(&swiss[..32], 200, 8), None);
+        // 32-bit: the same tail a word in (GroupSize at +16, BucketSize at +18).
+        let mut swiss32: Vec<u8> = [0x1000u32, 0x2000, 0x3000, 0x4000, 200]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        assert_eq!(
+            map_extension_size_from(&swiss32, 200, 4),
+            Some(swiss_map_extension_size(4))
+        );
+        swiss32[16..20].copy_from_slice(&[8, 4, 96, 0]);
+        assert_eq!(
+            map_extension_size_from(&swiss32, 96, 4),
+            Some(old_map_extension_size(4))
+        );
+        assert_eq!(map_extension_size_from(&swiss32, 200, 4), None);
     }
 }
