@@ -183,21 +183,31 @@ pub fn read_name_len(buf: &[u8], enc: NameEnc) -> Option<(u64, usize)> {
 /// wins, so a 1.18+ binary is never pushed onto the 2-byte path.
 fn detect_name_encoding(bin: &GoBinary, md: &ModuleData) -> NameEnc {
     // The `str` (name offset) field sits at +40 in the 64-bit `_type` header, the
-    // layout type recovery already assumes; 32-bit type recovery is unsupported, so
-    // the probe stays 64-bit and leaves other targets on the default.
-    const STR_OFFSET: usize = 40;
-    const HEADER: usize = 48;
+    // layout type recovery assumes; on 32-bit (size, ptrdata, equal and gcdata
+    // are 4 bytes) it sits at +24 of a 32-byte header. Reading +40 there lands in
+    // the next descriptor and can tip the vote to the 2-byte encoding, which then
+    // garbles every name the binary's itabs and types resolve.
+    let ps = bin.pointer_size();
+    let str_offset = 4 * ps + 8;
+    let header = 4 * ps + 16;
     const PROBES: usize = 64;
+    // A Go 1.18+ magic settles it: only 1.16 and 1.17 share a magic.
+    if matches!(
+        read_u32_e(bin.pclntab_slice(), 0, bin.little_endian),
+        Some(crate::pclntab::MAGIC_1_18 | crate::pclntab::MAGIC_1_20)
+    ) {
+        return NameEnc::Varint;
+    }
     let Ok(addrs) = md.type_addrs(bin) else {
         return NameEnc::Varint;
     };
     let mut varint_ok = 0usize;
     let mut twobyte_ok = 0usize;
     for type_addr in addrs.into_iter().take(PROBES) {
-        let Some(hdr) = bin.read_at_addr(type_addr, HEADER) else {
+        let Some(hdr) = bin.read_at_addr(type_addr, header) else {
             continue;
         };
-        let str_off = i32::from_le_bytes(hdr[STR_OFFSET..STR_OFFSET + 4].try_into().unwrap());
+        let str_off = i32::from_le_bytes(hdr[str_offset..str_offset + 4].try_into().unwrap());
         let name_addr = md.types.wrapping_add(str_off as i64 as u64);
         let Some(nbytes) = bin.read_at_addr(name_addr, 1 + 2 + 1024) else {
             continue;
@@ -332,6 +342,35 @@ impl ModuleData {
             p = p.saturating_add(size.max(ps));
         }
         Ok(out)
+    }
+
+    /// Byte offset of `fun[0]` in this binary's itabs. Up to Go 1.22 the
+    /// runtime's `itab` is `{inter, _type, hash uint32, _ [4]byte, fun}`; Go
+    /// 1.23 moved it to `internal/abi.ITab` and dropped the pad. On 64-bit
+    /// `fun` is pointer-aligned either way (24); on 32-bit it moved from 16
+    /// to 12. Go 1.27 (walked itabs) is always the new layout. Before that the
+    /// version is read from the itabs themselves: the old pad is always zero,
+    /// while the new layout's word at 12 is the first method of a linked itab,
+    /// a text address.
+    pub fn itab_fun_offset(&self, bin: &GoBinary) -> u64 {
+        let ps = bin.pointer_size() as u64;
+        if ps == 8 {
+            return 24;
+        }
+        if self.typedesclen != 0 {
+            return 2 * ps + 4;
+        }
+        let Ok(addrs) = self.itab_addrs(bin) else {
+            return 2 * ps + 8;
+        };
+        let new_layout = addrs.iter().any(|&a| {
+            word_at(bin, a + 2 * ps + 4).is_some_and(|w| w >= self.text && w < self.etext)
+        });
+        if new_layout {
+            2 * ps + 4
+        } else {
+            2 * ps + 8
+        }
     }
 
     /// Whether the package-variable word at `addr` holds a pointer, from the

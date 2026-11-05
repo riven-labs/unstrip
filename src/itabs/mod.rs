@@ -72,9 +72,10 @@ pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Itab>> {
     // `itablinks`, or from Go 1.27 the itabs walked in place
     // ([`ModuleData::itab_addrs`]).
     let addrs = md.itab_addrs(bin)?;
+    let fun_off = md.itab_fun_offset(bin);
     let mut out = Vec::with_capacity(addrs.len());
     for itab_addr in addrs {
-        match parse_itab(bin, md, itab_addr) {
+        match parse_itab(bin, md, itab_addr, fun_off) {
             Ok(it) => out.push(it),
             Err(_) => continue,
         }
@@ -82,12 +83,13 @@ pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Itab>> {
     Ok(out)
 }
 
-fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Itab> {
+fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64, fun_off: u64) -> Result<Itab> {
     let ps = bin.pointer_size();
     let le = bin.little_endian;
-    // itab header: inter *interfacetype, _type *_type, hash uint32, then a
-    // 4-byte pad before the fun[] array.
-    let header_size = 2 * ps + 8;
+    // itab header: inter *interfacetype, _type *_type, hash uint32, then (up
+    // to Go 1.22) a 4-byte pad before the fun[] array. Where fun starts is
+    // `fun_off` ([`ModuleData::itab_fun_offset`]).
+    let header_size = fun_off as usize;
     let buf = bin
         .read_at_addr(addr, header_size)
         .ok_or_else(|| Error::ItabRecovery(format!("itab at 0x{addr:x} unmapped")))?;
@@ -110,7 +112,7 @@ fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<Itab> {
     // function pointer. A zero entry marks an incomplete itab.
     let mut populated_methods = Vec::new();
     let mut incomplete = false;
-    let fun_base = addr + header_size as u64;
+    let fun_base = addr + fun_off;
     for (i, name) in methods.iter().enumerate() {
         let slot_addr = fun_base + (i as u64) * ps as u64;
         let concrete_fn = match bin.read_at_addr(slot_addr, ps) {
