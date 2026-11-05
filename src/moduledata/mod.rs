@@ -1106,73 +1106,6 @@ fn expand_gc_prog(p: &[u8], words: usize) -> Option<Vec<bool>> {
     Some(out)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{expand_gc_prog, read_name_len, text_addr_in, NameEnc};
-
-    #[test]
-    fn text_offsets_follow_split_text_sections() {
-        // Two sections: virtual [0, 0x1000) loaded at 0x10000, virtual
-        // [0x1000, 0x1800) loaded at 0x20000 (a trampoline gap between them).
-        let sects = [(0, 0x1000, 0x10000), (0x1000, 0x1800, 0x20000)];
-        let fallback = |off: u64| 0x10000 + off;
-        assert_eq!(text_addr_in(&sects, fallback(0x10), 0x10), 0x10010);
-        assert_eq!(text_addr_in(&sects, fallback(0x1010), 0x1010), 0x20010);
-        // The last section's end is included (the functab carries etext).
-        assert_eq!(text_addr_in(&sects, fallback(0x1800), 0x1800), 0x20800);
-        // No section holds it: keep text + off, as the runtime does.
-        assert_eq!(text_addr_in(&sects, fallback(0x2000), 0x2000), 0x12000);
-        // One section (or none): plain text + off.
-        assert_eq!(text_addr_in(&[], fallback(0x44), 0x44), 0x10044);
-    }
-
-    #[test]
-    fn name_len_decodes_both_encodings() {
-        // Varint (Go 1.17+): low 7 bits per byte, MSB continuation.
-        assert_eq!(read_name_len(&[0x05, b'h'], NameEnc::Varint), Some((5, 1)));
-        assert_eq!(
-            read_name_len(&[0x80, 0x01], NameEnc::Varint),
-            Some((128, 2))
-        );
-        // 2-byte big-endian (Go 1.16 and earlier).
-        assert_eq!(
-            read_name_len(&[0x00, 0x05], NameEnc::TwoByteBe),
-            Some((5, 2))
-        );
-        assert_eq!(
-            read_name_len(&[0x01, 0x2c], NameEnc::TwoByteBe),
-            Some((300, 2))
-        );
-        // The same first byte means different things under each encoding: 0x05 is a
-        // length of 5 as a varint but the high byte of a 1280+ length as 2-byte BE.
-        // This is exactly why the encoding must be detected per binary, not guessed.
-        assert_eq!(
-            read_name_len(&[0x05, 0x00], NameEnc::TwoByteBe),
-            Some((0x0500, 2))
-        );
-        // Truncated input yields None rather than panicking.
-        assert_eq!(read_name_len(&[0x80], NameEnc::Varint), None);
-        assert_eq!(read_name_len(&[0x00], NameEnc::TwoByteBe), None);
-        assert_eq!(read_name_len(&[], NameEnc::Varint), None);
-    }
-
-    /// A literal `1 0 1` (pointer, scalar, pointer), then the last 2 bits
-    /// twice more, then the end: 7 words.
-    #[test]
-    fn gc_programs_expand_to_pointer_masks() {
-        let prog = [0x03, 0b101, 0x82, 0x02, 0x00];
-        let mask = expand_gc_prog(&prog, 7).unwrap();
-        assert_eq!(mask, [true, false, true, false, true, false, true]);
-        // A repeat with a varint count and a long literal.
-        let prog = [0x09, 0xff, 0x01, 0x80, 0x01, 0x03, 0x00];
-        let mask = expand_gc_prog(&prog, 12).unwrap();
-        assert_eq!(mask.iter().filter(|b| **b).count(), 12);
-        // Truncated and malformed programs say nothing.
-        assert_eq!(expand_gc_prog(&[0x03], 3), None);
-        assert_eq!(expand_gc_prog(&[0x81, 0x05, 0x00], 5), None);
-    }
-}
-
 /// A pointer-sized word at `addr`.
 fn word_at(bin: &GoBinary, addr: u64) -> Option<u64> {
     let ps = bin.pointer_size();
@@ -1258,4 +1191,71 @@ fn itab_size(bin: &GoBinary, addr: u64) -> Option<u64> {
         return Some(size);
     }
     Some(size + (methods - 1) * ps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expand_gc_prog, read_name_len, text_addr_in, NameEnc};
+
+    #[test]
+    fn text_offsets_follow_split_text_sections() {
+        // Two sections: virtual [0, 0x1000) loaded at 0x10000, virtual
+        // [0x1000, 0x1800) loaded at 0x20000 (a trampoline gap between them).
+        let sects = [(0, 0x1000, 0x10000), (0x1000, 0x1800, 0x20000)];
+        let fallback = |off: u64| 0x10000 + off;
+        assert_eq!(text_addr_in(&sects, fallback(0x10), 0x10), 0x10010);
+        assert_eq!(text_addr_in(&sects, fallback(0x1010), 0x1010), 0x20010);
+        // The last section's end is included (the functab carries etext).
+        assert_eq!(text_addr_in(&sects, fallback(0x1800), 0x1800), 0x20800);
+        // No section holds it: keep text + off, as the runtime does.
+        assert_eq!(text_addr_in(&sects, fallback(0x2000), 0x2000), 0x12000);
+        // One section (or none): plain text + off.
+        assert_eq!(text_addr_in(&[], fallback(0x44), 0x44), 0x10044);
+    }
+
+    #[test]
+    fn name_len_decodes_both_encodings() {
+        // Varint (Go 1.17+): low 7 bits per byte, MSB continuation.
+        assert_eq!(read_name_len(&[0x05, b'h'], NameEnc::Varint), Some((5, 1)));
+        assert_eq!(
+            read_name_len(&[0x80, 0x01], NameEnc::Varint),
+            Some((128, 2))
+        );
+        // 2-byte big-endian (Go 1.16 and earlier).
+        assert_eq!(
+            read_name_len(&[0x00, 0x05], NameEnc::TwoByteBe),
+            Some((5, 2))
+        );
+        assert_eq!(
+            read_name_len(&[0x01, 0x2c], NameEnc::TwoByteBe),
+            Some((300, 2))
+        );
+        // The same first byte means different things under each encoding: 0x05 is a
+        // length of 5 as a varint but the high byte of a 1280+ length as 2-byte BE.
+        // This is exactly why the encoding must be detected per binary, not guessed.
+        assert_eq!(
+            read_name_len(&[0x05, 0x00], NameEnc::TwoByteBe),
+            Some((0x0500, 2))
+        );
+        // Truncated input yields None rather than panicking.
+        assert_eq!(read_name_len(&[0x80], NameEnc::Varint), None);
+        assert_eq!(read_name_len(&[0x00], NameEnc::TwoByteBe), None);
+        assert_eq!(read_name_len(&[], NameEnc::Varint), None);
+    }
+
+    /// A literal `1 0 1` (pointer, scalar, pointer), then the last 2 bits
+    /// twice more, then the end: 7 words.
+    #[test]
+    fn gc_programs_expand_to_pointer_masks() {
+        let prog = [0x03, 0b101, 0x82, 0x02, 0x00];
+        let mask = expand_gc_prog(&prog, 7).unwrap();
+        assert_eq!(mask, [true, false, true, false, true, false, true]);
+        // A repeat with a varint count and a long literal.
+        let prog = [0x09, 0xff, 0x01, 0x80, 0x01, 0x03, 0x00];
+        let mask = expand_gc_prog(&prog, 12).unwrap();
+        assert_eq!(mask.iter().filter(|b| **b).count(), 12);
+        // Truncated and malformed programs say nothing.
+        assert_eq!(expand_gc_prog(&[0x03], 3), None);
+        assert_eq!(expand_gc_prog(&[0x81, 0x05, 0x00], 5), None);
+    }
 }
