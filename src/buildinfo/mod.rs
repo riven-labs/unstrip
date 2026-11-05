@@ -39,6 +39,7 @@ pub struct Setting {
 
 const MAGIC: &[u8] = b"\xff Go buildinf:";
 const FLAG_VARINT_STRINGS: u8 = 2;
+const FLAG_BIG_ENDIAN: u8 = 1;
 
 impl BuildInfo {
     pub fn parse(bin: &GoBinary) -> Result<Self> {
@@ -98,22 +99,82 @@ fn find_buildinfo(bytes: &[u8]) -> Option<usize> {
 
 fn decode(bin: &GoBinary, header_offset: usize) -> Result<BuildInfo> {
     let bytes = &bin.bytes;
-    let _ptrsize = bytes[header_offset + MAGIC.len()] as usize;
+    let ptrsize = bytes[header_offset + MAGIC.len()] as usize;
     let flags = bytes[header_offset + MAGIC.len() + 1];
 
     if flags & FLAG_VARINT_STRINGS != 0 {
         return decode_inline(bytes, header_offset + 32);
     }
+    decode_pointers(bin, header_offset, ptrsize, flags & FLAG_BIG_ENDIAN != 0)
+}
 
-    // The pre-1.18 pointer-indirected format used vers_ptr/mod_ptr after the
-    // header. We don't support it: we'd need pclntab parsing to reach this
-    // code path on a pre-1.18 binary, and pclntab parsing requires the 1.20+
-    // layout. When 1.18/1.19 pclntab support lands, the pointer-format
-    // decoder lands with it (under fixture coverage).
-    Err(Error::BuildInfo(
-        "pre-Go-1.18 pointer-indirected buildinfo format is not supported (need Go 1.18+ binary)"
-            .into(),
-    ))
+/// The pre-Go-1.18 format: the 16-byte header (magic, pointer size, flags)
+/// is followed by the addresses of two Go string headers,
+/// `runtime.buildVersion` and `runtime.modinfo`, each `ptrsize` bytes in the
+/// byte order the flags give (bit 0 set: big-endian). A string header is a
+/// data pointer then a length, both pointer-sized.
+fn decode_pointers(
+    bin: &GoBinary,
+    header_offset: usize,
+    ptrsize: usize,
+    big_endian: bool,
+) -> Result<BuildInfo> {
+    let read_ptr = |b: &[u8]| -> Option<u64> {
+        let b = b.get(..ptrsize)?;
+        Some(match (ptrsize, big_endian) {
+            (8, false) => u64::from_le_bytes(b.try_into().ok()?),
+            (8, true) => u64::from_be_bytes(b.try_into().ok()?),
+            (4, false) => u32::from_le_bytes(b.try_into().ok()?) as u64,
+            (4, true) => u32::from_be_bytes(b.try_into().ok()?) as u64,
+            _ => return None,
+        })
+    };
+    let ptrs = bin
+        .bytes
+        .get(header_offset + 16..header_offset + 16 + 2 * ptrsize)
+        .ok_or_else(|| Error::BuildInfo("buildinfo header truncated".into()))?;
+    let vers_addr = read_ptr(ptrs)
+        .ok_or_else(|| Error::BuildInfo(format!("bad buildinfo pointer size {ptrsize}")))?;
+    let mod_addr = read_ptr(&ptrs[ptrsize..])
+        .ok_or_else(|| Error::BuildInfo(format!("bad buildinfo pointer size {ptrsize}")))?;
+    // A Go string header, resolved through the binary's address map. The
+    // modinfo blob is a few KiB; the cap only stops a corrupt length.
+    const MAX_STRING: u64 = 16 << 20;
+    let read_string = |addr: u64| -> Result<&[u8]> {
+        let hdr = bin.read_at_addr(addr, 2 * ptrsize).ok_or_else(|| {
+            Error::BuildInfo(format!("buildinfo string header at 0x{addr:x} unmapped"))
+        })?;
+        let data = read_ptr(hdr).unwrap_or(0);
+        let len = read_ptr(&hdr[ptrsize..]).unwrap_or(0);
+        if len == 0 {
+            return Ok(&[]);
+        }
+        if len > MAX_STRING {
+            return Err(Error::BuildInfo(format!(
+                "buildinfo string length {len} unreasonably large"
+            )));
+        }
+        bin.read_at_addr(data, len as usize).ok_or_else(|| {
+            Error::BuildInfo(format!(
+                "buildinfo string data at 0x{data:x} ({len} bytes) unmapped"
+            ))
+        })
+    };
+    let go_version = std::str::from_utf8(read_string(vers_addr)?)
+        .map_err(|_| Error::BuildInfo("go version string is not valid utf-8".into()))?
+        .to_string();
+    if go_version.is_empty() {
+        return Err(Error::BuildInfo("go version string is empty".into()));
+    }
+    // A binary built outside module mode has an empty modinfo: version only.
+    let modinfo = read_string(mod_addr)?;
+    let mut info = if modinfo.len() < 32 {
+        parse_modinfo("")
+    } else {
+        parse_modinfo(trim_modinfo_framing(modinfo)?)
+    };
+    info.go_version = go_version;
+    Ok(info)
 }
 
 fn decode_inline(bytes: &[u8], mut pos: usize) -> Result<BuildInfo> {
@@ -284,6 +345,84 @@ mod tests {
         assert_eq!(info.deps[0].version, "v1.8.0");
         assert_eq!(info.deps[0].sum.as_deref(), Some("h1:abc"));
         assert_eq!(info.settings.len(), 2);
+    }
+
+    /// A one-section image at 0x1000 holding a pre-Go-1.18 buildinfo header
+    /// (pointer format) at file offset 0, the two string headers it points
+    /// at, and their bytes.
+    fn pointer_format_image(ps: usize, big_endian: bool, modinfo: &str) -> GoBinary {
+        use crate::gobin::{Arch, Container, Section, SectionKind};
+        let base = 0x1000u64;
+        let put = |b: &mut Vec<u8>, v: u64| {
+            let w = match (ps, big_endian) {
+                (8, false) => v.to_le_bytes().to_vec(),
+                (8, true) => v.to_be_bytes().to_vec(),
+                (_, false) => (v as u32).to_le_bytes().to_vec(),
+                (_, true) => (v as u32).to_be_bytes().to_vec(),
+            };
+            b.extend_from_slice(&w);
+        };
+        let vers = b"go1.17.13";
+        // Layout: header (32), vers string header @32, mod header @32+2ps,
+        // vers bytes @64, modinfo bytes after.
+        let vers_hdr = 32u64;
+        let mod_hdr = 32 + 2 * ps as u64;
+        let vers_data = 64u64;
+        let mod_data = vers_data + vers.len() as u64;
+        let mut b = MAGIC.to_vec();
+        b.push(ps as u8);
+        b.push(u8::from(big_endian));
+        put(&mut b, base + vers_hdr);
+        put(&mut b, base + mod_hdr);
+        b.resize(32, 0);
+        put(&mut b, base + vers_data);
+        put(&mut b, vers.len() as u64);
+        put(&mut b, base + mod_data);
+        put(&mut b, modinfo.len() as u64);
+        b.resize(64, 0);
+        b.extend_from_slice(vers);
+        b.extend_from_slice(modinfo.as_bytes());
+        let len = b.len();
+        GoBinary {
+            bytes: b,
+            container: Container::Elf,
+            arch: if ps == 4 { Arch::X86 } else { Arch::X86_64 },
+            little_endian: !big_endian,
+            ptr_size: ps,
+            sections: vec![Section {
+                name: ".go.buildinfo".to_string(),
+                kind: SectionKind::Data,
+                file_offset: 0,
+                file_size: len,
+                addr: base,
+                vmsize: len as u64,
+            }],
+            pclntab_offset: 0,
+            pclntab_size: 0,
+            pclntab_addr: 0,
+            text_addr: 0,
+        }
+    }
+
+    #[test]
+    fn parses_pre_118_pointer_format_at_both_widths_and_orders() {
+        // The 16-byte sentinels frame the modinfo body, which ends in a newline.
+        let modinfo = format!(
+            "{}path\texample.com/x\nmod\texample.com/x\t(devel)\t\n{}",
+            "0123456789abcdef", "fedcba9876543210"
+        );
+        for (ps, be) in [(4, false), (8, false), (4, true), (8, true)] {
+            let bin = pointer_format_image(ps, be, &modinfo);
+            let info =
+                BuildInfo::parse(&bin).unwrap_or_else(|e| panic!("ps {ps} big-endian {be}: {e}"));
+            assert_eq!(info.go_version, "go1.17.13", "ps {ps} be {be}");
+            assert_eq!(info.path.as_deref(), Some("example.com/x"));
+            assert_eq!(info.main.as_ref().unwrap().version, "(devel)");
+        }
+        // Outside module mode modinfo is empty: the version alone.
+        let info = BuildInfo::parse(&pointer_format_image(4, false, "")).unwrap();
+        assert_eq!(info.go_version, "go1.17.13");
+        assert!(info.main.is_none());
     }
 
     #[test]
