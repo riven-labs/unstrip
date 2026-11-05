@@ -420,6 +420,14 @@ fn swiss_map_extension_size(ps: usize) -> usize {
     (7 * ps + 4).next_multiple_of(ps)
 }
 
+/// Go 1.27 `MapType` extension size: Key, Elem, Group, Hasher, GroupSize, then
+/// KeysOff, KeyStride, ElemsOff, ElemStride, ElemOff (uintptrs), Flags u32,
+/// padded to the pointer: 88 on 64-bit, 44 on 32-bit. `GroupSize` stays at
+/// +32 (+16), so the record reads as swiss; the version tells them apart.
+fn go127_map_extension_size(ps: usize) -> usize {
+    (10 * ps + 4).next_multiple_of(ps)
+}
+
 /// Extension size of the `MapType` at `type_addr`, decided from the record
 /// itself rather than from a version guess. Both layouts keep the bucket/group
 /// `*Type` at +16 and the hasher at +24, and both repeat that type's size right
@@ -437,7 +445,12 @@ fn map_extension_size(bin: &GoBinary, md: &ModuleData, type_addr: u64) -> Option
         return None;
     }
     let group_size = word(bin.read_at_addr(group, ps)?, ps)?;
-    map_extension_size_from(ext, group_size, ps)
+    let size = map_extension_size_from(ext, group_size, ps)?;
+    // Go 1.27 (the only release with `typedesclen`) grew the swiss record.
+    if size == swiss_map_extension_size(ps) && md.typedesclen != 0 {
+        return Some(go127_map_extension_size(ps));
+    }
+    Some(size)
 }
 
 /// A little-endian word of `ps` bytes at the start of `b`.
@@ -675,6 +688,9 @@ mod tests {
         // The 64-bit values the layout comments state.
         assert_eq!(old_map_extension_size(8), 40);
         assert_eq!(swiss_map_extension_size(8), 64);
+        assert_eq!(go127_map_extension_size(8), go_extension(10 * 8 + 4, 8));
+        assert_eq!(go127_map_extension_size(8), 88);
+        assert_eq!(go127_map_extension_size(4), 44);
         assert_eq!(kind_extension_size(KindName::Struct, 8), Some(32));
     }
 
