@@ -258,3 +258,121 @@ fn stack_objects_use_4_byte_words_on_386() {
         eprintln!("skipping: no 386 fixture found");
     }
 }
+
+#[test]
+fn garble_reflected_names_on_386() {
+    // garble v0.16 keeps a sorted [obf, orig, ...] []string table; on 386
+    // each string header is two 4-byte words.
+    for prog in ["secrets", "ifaces"] {
+        let Some(path) = fixture(&format!("garble/{prog}/bin386")) else {
+            continue;
+        };
+        let bin = GoBinary::open(&path).expect("open");
+        let names = unstrip::garble::recover_reflect_names(&bin)
+            .unwrap_or_else(|| panic!("{}: no reflected-name table", path.display()));
+        let originals: Vec<&str> = names.iter().map(|(_, orig)| orig).collect();
+        for want in ["SelectCase", "rtype", "structType"] {
+            assert!(
+                originals.contains(&want),
+                "{}: {want} in {originals:?}",
+                path.display()
+            );
+        }
+        if prog == "secrets" {
+            assert!(
+                originals.contains(&"Account"),
+                "{}: {originals:?}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn types_and_methods_on_386() {
+    use std::collections::HashMap;
+    use unstrip::types::{KindData, KindName, Type};
+    // io/fs.PathError{Op, Path string; Err error} is 24 bytes on 386, its
+    // pointer carries Error, Timeout and Unwrap, and `error` is an
+    // interface whose one method is a func() string.
+    for (minor, path) in builds() {
+        let bin = GoBinary::open(&path).expect("open");
+        let md = ModuleData::locate(&bin).expect("moduledata");
+        let pcln = Pclntab::parse(&bin).expect("pclntab");
+        let ts = unstrip::types::recover_all(&bin, &md)
+            .unwrap_or_else(|e| panic!("{}: types: {e}", path.display()));
+        let by_addr: HashMap<u64, &Type> = ts.iter().map(|t| (t.addr, t)).collect();
+        let name_of = |a: &u64| by_addr.get(a).map_or("?".to_string(), |t| t.name.clone());
+        let find = |n: &str| {
+            ts.iter()
+                .find(|t| t.name == n)
+                .unwrap_or_else(|| panic!("{}: go1.{minor}: no {n}", path.display()))
+        };
+
+        let pe = find("fs.PathError");
+        assert_eq!((pe.kind, pe.size, pe.ptr_bytes), (KindName::Struct, 24, 24));
+        let KindData::Struct { fields } = &pe.kind_data else {
+            panic!("{}: fs.PathError not decoded", path.display());
+        };
+        let got: Vec<(&str, u64, String)> = fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.offset, name_of(&f.typ)))
+            .collect();
+        let want = [
+            ("Op", 0, "string"),
+            ("Path", 8, "string"),
+            ("Err", 16, "error"),
+        ];
+        assert_eq!(
+            got,
+            want.map(|(n, o, t)| (n, o, t.to_string())),
+            "{}",
+            path.display()
+        );
+
+        let err = find("error");
+        let KindData::Interface { methods } = &err.kind_data else {
+            panic!("{}: error not an interface", path.display());
+        };
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].name, "Error");
+        let sig = by_addr.get(&methods[0].typ).expect("Error's func type");
+        let KindData::Func {
+            in_types,
+            out_types,
+            variadic,
+            ..
+        } = &sig.kind_data
+        else {
+            panic!("{}: {} not a func", path.display(), sig.name);
+        };
+        assert!(in_types.is_empty() && !variadic);
+        assert_eq!(
+            out_types.iter().map(name_of).collect::<Vec<_>>(),
+            ["string"]
+        );
+
+        // The uncommon method table of *fs.PathError (Timeout's body may be
+        // dead-code eliminated: tfn 0).
+        let methods = unstrip::funcsig::recover_methods_from_types(&bin, &md, &ts);
+        let mut names: Vec<&str> = methods
+            .iter()
+            .filter(|m| m.receiver == "*fs.PathError")
+            .map(|m| m.name.as_str())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Error", "Timeout", "Unwrap"], "{}", path.display());
+        for m in methods
+            .iter()
+            .filter(|m| m.receiver == "*fs.PathError" && m.tfn_pc != 0)
+        {
+            let f = pcln.lookup(m.tfn_pc).expect("method body in text");
+            assert_eq!(
+                f.name,
+                format!("io/fs.(*PathError).{}", m.name),
+                "{}",
+                path.display()
+            );
+        }
+    }
+}
