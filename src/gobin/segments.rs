@@ -1,8 +1,8 @@
 //! An ELF read through its file header and program headers alone: the view the
 //! kernel loader takes. goblin's full parse also walks the section header table
 //! (and the dynamic segment), so a file whose section table points outside the
-//! file -- damaged on purpose as an anti-analysis move, or cut short by a
-//! truncated download -- fails to parse at all, although the loader would map it.
+//! file (damaged on purpose as an anti-analysis move, or cut short by a
+//! truncated download) fails to parse at all, although the loader would map it.
 //! Go's own tools and `readelf -l` read such a file from its segments; this does
 //! the same, so the pclntab can still be searched for in the loadable bytes and
 //! the probe can still name the architecture and the segments.

@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn an_elf_with_unreadable_headers_keeps_the_parse_error() {
         // No pclntab in the mapped bytes: the segment read succeeds and the
-        // answer is the honest "no pclntab", not goblin's offset error.
+        // answer is "no pclntab", not goblin's offset error.
         let b = segments::tests::elf64_bogus_shoff(4096);
         assert!(matches!(GoBinary::parse(b), Err(Error::NoPclntab)));
         // Program headers out of the file too: goblin's error stands.
