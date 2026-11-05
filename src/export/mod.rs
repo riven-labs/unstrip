@@ -600,6 +600,10 @@ fn c_type_for_field(
         KindName::Int32 | KindName::Uint32 | KindName::Float32 => {
             ("unsigned int".into(), String::new())
         }
+        // int, uint and uintptr are the pointer width: 4 bytes on 386.
+        KindName::Int | KindName::Uint | KindName::Uintptr if t.size == 4 => {
+            ("unsigned int".into(), String::new())
+        }
         KindName::Int64
         | KindName::Uint64
         | KindName::Float64
