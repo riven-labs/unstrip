@@ -46,8 +46,9 @@ pub const PCDATA_STACK_MAP_INDEX: u32 = 1;
 /// local that holds pointers and stays in the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StackObject {
-    /// Offset in the frame: negative from varp (entry SP - 8), else from
-    /// argp (entry SP + 8).
+    /// Offset in the frame: negative from varp (entry SP - 8 on amd64, which
+    /// saves a frame pointer; entry SP on 386), else from argp (entry SP plus
+    /// the pointer size).
     pub off: i32,
     pub size: i32,
     /// The bytes holding pointers, from its start.
@@ -598,19 +599,31 @@ impl<'a> Pclntab<'a> {
 
     /// The stack object records of `func` (Go 1.17+ layout; None for the
     /// Go 1.16 record, which names a type instead of a size).
+    ///
+    /// The record list is a pointer-sized count, then the records: Go 1.18+
+    /// `{off, size, ptrBytes int32; gcdataoff uint32}` (16 bytes on every
+    /// arch), Go 1.17 `{off, size, _ptrdata int32; gcdata *byte}` (24 bytes on
+    /// 64-bit, the pointer 8-aligned; 16 on 32-bit).
     pub fn stack_objects(&self, func: &FuncEntry) -> Option<Vec<StackObject>> {
         let addr = self.funcdata(func, FUNCDATA_STACK_OBJECTS)?;
         let le = self.little_endian;
-        let head = self.read_upto(addr, 8)?;
-        let n = read_uintptr(head, 0, 8, le).ok()? as usize;
+        let ps = self.ptrsize as usize;
+        if !matches!(ps, 4 | 8) {
+            return None;
+        }
+        let head = self.read_upto(addr, ps)?;
+        let n = read_uintptr(head, 0, ps, le).ok()? as usize;
         if n > 4096 {
             return None;
         }
+        // Go 1.17: where the gcdata pointer sits (the three int32s, padded
+        // to the pointer's alignment).
+        let gcdata_at = 12usize.next_multiple_of(ps);
         let rs = match self.layout {
             Layout::Modern => 16,
-            Layout::Pre118 => 24,
+            Layout::Pre118 => gcdata_at + ps,
         };
-        let body = self.read_upto(addr + 8, n * rs)?;
+        let body = self.read_upto(addr + ps as u64, n * rs)?;
         if body.len() < n * rs {
             return None;
         }
@@ -622,7 +635,7 @@ impl<'a> Pclntab<'a> {
             let ptr_bytes = read_u32(body, r + 8, le).ok()? as i32;
             let gcdata = match self.layout {
                 Layout::Modern => u64::from(read_u32(body, r + 12, le).ok()?),
-                Layout::Pre118 => read_uintptr(body, r + 16, 8, le).ok()?,
+                Layout::Pre118 => read_uintptr(body, r + gcdata_at, ps, le).ok()?,
             };
             // Go 1.16's {off int64, typ *_type} reads as a size of -1 here.
             if size <= 0 || ptr_bytes < 0 || ptr_bytes > size {
@@ -648,7 +661,9 @@ impl<'a> Pclntab<'a> {
             Layout::Modern => rodata?.checked_add(o.gcdata)?,
             Layout::Pre118 => o.gcdata,
         };
-        let words = usize::try_from(o.ptr_bytes).ok()?.div_ceil(8);
+        let words = usize::try_from(o.ptr_bytes)
+            .ok()?
+            .div_ceil(self.ptrsize.max(1) as usize);
         let n = words.div_ceil(8);
         if n == 0 {
             return Some(Vec::new());
