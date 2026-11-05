@@ -376,3 +376,46 @@ fn types_and_methods_on_386() {
         }
     }
 }
+
+#[test]
+fn data_views_read_4_byte_words_on_386() {
+    use unstrip::dataview::{inspect, As};
+    for (_, path) in builds() {
+        let bin = GoBinary::open(&path).expect("open");
+        let md = ModuleData::locate(&bin).expect("moduledata");
+        let pcln = Pclntab::parse(&bin).expect("pclntab");
+        let functions = pcln.functions().expect("functions");
+        let pairs = itabs::recover_all(&bin, &md).expect("itabs");
+        let it = pairs
+            .iter()
+            .find(|p| p.interface_name == "io.Writer" && p.concrete_name == "*os.File")
+            .expect("io.Writer => *os.File");
+        // An itab read as pointers: inter, _type, then (past hash and any
+        // pad) the Write slot, one 4-byte word per row.
+        let fun = md.itab_fun_offset(&bin);
+        let rows = inspect(
+            &bin,
+            &pcln,
+            &pairs,
+            &functions,
+            it.addr,
+            fun as usize + 4,
+            As::Ptrs,
+        )
+        .expect("inspect");
+        assert_eq!(rows.len() as u64, fun / 4 + 1, "{}", path.display());
+        assert_eq!(rows[1].addr, it.addr + 4);
+        let last = rows.last().unwrap();
+        assert!(
+            last.rendering.contains(".(*File).Write"),
+            "{}: {}",
+            path.display(),
+            last.rendering
+        );
+        // Read as an interface header: (itab, data) is two words.
+        let rows =
+            inspect(&bin, &pcln, &pairs, &functions, it.addr, 16, As::Ifaces).expect("inspect");
+        assert_eq!(rows.len(), 2, "{}", path.display());
+        assert_eq!(rows[0].bytes.len(), 8);
+    }
+}

@@ -66,12 +66,12 @@ Inspects bytes at a data address. The interpretation is set by `--data-as`:
 
 - `bytes` (default): hex+ASCII dump.
 - `qwords`: 8-byte little-endian values.
-- `ptrs`: same as `qwords` but each value is resolved against the recovered function table, itab table, and section map.
-- `ifaces`: 16-byte Go interface headers, with the itab resolved to a concrete type and the dispatched method body address inline.
-- `slice-header`: 24-byte slice headers (`ptr + len + cap`).
+- `ptrs`: pointer-sized values (8 bytes, 4 on a 32-bit binary), each resolved against the recovered function table, itab table, and section map.
+- `ifaces`: Go interface headers (16 bytes; 8 on 32-bit), with the itab resolved to a concrete type and the dispatched method body address inline.
+- `slice-header`: slice headers (`ptr + len + cap`; 24 bytes, 12 on 32-bit).
 - `string`: Go string headers (`ptr + len`) with a printable preview of the pointed-to bytes.
 
-Length is controlled by `--data-len` (bytes) or `--data-count` (records); the two are mutually exclusive. Defaults: 64 for `bytes`/`qwords`/`ptrs`, 16 for `ifaces`/`string`, 24 for `slice-header`.
+Length is controlled by `--data-len` (bytes) or `--data-count` (records); the two are mutually exclusive. Defaults: 64 for `bytes`/`qwords`/`ptrs`, one record for `ifaces`/`string`/`slice-header` (16, 16 and 24 bytes on 64-bit).
 
 ### `--addr <PC>`
 

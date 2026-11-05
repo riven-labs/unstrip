@@ -283,23 +283,26 @@ impl DataAs {
         }
     }
 
-    fn default_len(self) -> usize {
+    /// `ps` is the binary's pointer size: the Go-structure views read
+    /// pointer-sized words (`qwords` stays 8 bytes).
+    fn default_len(self, ps: usize) -> usize {
         match self {
             DataAs::Bytes | DataAs::Qwords | DataAs::Ptrs => 64,
-            DataAs::Ifaces | DataAs::String => 16,
-            DataAs::SliceHeader => 24,
+            DataAs::Ifaces | DataAs::String => 2 * ps,
+            DataAs::SliceHeader => 3 * ps,
         }
     }
 
     /// Byte size of one record under this presentation. Drives the
     /// `--data-count N` conversion to a byte length so an operator
     /// can ask for "7 ifaces" without computing 16 * 7 themselves.
-    fn record_size(self) -> usize {
+    fn record_size(self, ps: usize) -> usize {
         match self {
             DataAs::Bytes => 16,
-            DataAs::Qwords | DataAs::Ptrs => 8,
-            DataAs::Ifaces | DataAs::String => 16,
-            DataAs::SliceHeader => 24,
+            DataAs::Qwords => 8,
+            DataAs::Ptrs => ps,
+            DataAs::Ifaces | DataAs::String => 2 * ps,
+            DataAs::SliceHeader => 3 * ps,
         }
     }
 }
@@ -773,10 +776,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         // one is set. Records-mode multiplies by the per-mode record
         // size so 7 ifaces = 7 * 16 = 112 bytes without the operator
         // doing the math.
+        let ps = if bin.pointer_size() == 4 { 4 } else { 8 };
         let len = match (args.data_count, args.data_len) {
-            (Some(n), _) => n.saturating_mul(args.data_as.record_size()),
+            (Some(n), _) => n.saturating_mul(args.data_as.record_size(ps)),
             (None, Some(n)) => n,
-            (None, None) => args.data_as.default_len(),
+            (None, None) => args.data_as.default_len(ps),
         };
         let mode = args.data_as.to_module();
         // Lazily pull itabs + functions for symbolization. Failures

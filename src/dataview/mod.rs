@@ -15,18 +15,19 @@ pub enum As {
     Bytes,
     /// Little-endian u64 per 8-byte aligned slot.
     Qwords,
-    /// u64 per slot, but every value passes through the symbolizer:
+    /// One pointer-sized word per slot (8 bytes on 64-bit, 4 on 32-bit), and
+    /// every value passes through the symbolizer:
     /// known functions become `name @ off`, known itabs become
     /// `itab(iface=concrete)`, known section addresses become
     /// `<section>+0xN`, unknown stays as hex.
     Ptrs,
-    /// 16-byte Go interface header per slot: (itab_ptr, data_ptr).
+    /// Go interface header per slot: (itab_ptr, data_ptr), two words.
     /// Resolves itab_ptr against the recovered itab table to print
     /// the concrete type symbolically.
     Ifaces,
-    /// 24-byte Go slice header per slot: (data_ptr, len, cap).
+    /// Go slice header per slot: (data_ptr, len, cap), three words.
     SliceHeader,
-    /// 16-byte Go string header per slot: (data_ptr, len). When the
+    /// Go string header per slot: (data_ptr, len), two words. When the
     /// data_ptr resolves to a known section and the len is sane, the
     /// pointed-to bytes are printed as a quoted string.
     String,
@@ -150,14 +151,19 @@ pub fn inspect(
     let bytes = &bin.bytes[file_off..file_off + bounded_len];
 
     let ctx = SymCtx::new(bin, pcln, itabs_v, functions);
+    // The Go-structure views read the binary's words; `Qwords` stays 8 bytes.
+    let ps = match bin.pointer_size() {
+        4 => 4,
+        _ => 8,
+    };
 
     match mode {
         As::Bytes => Ok(rows_bytes(addr, bytes)),
-        As::Qwords => Ok(rows_qwords(addr, bytes, None)),
-        As::Ptrs => Ok(rows_qwords(addr, bytes, Some(&ctx))),
-        As::Ifaces => Ok(rows_ifaces(addr, bytes, &ctx)),
-        As::SliceHeader => Ok(rows_slice_headers(addr, bytes, &ctx)),
-        As::String => Ok(rows_strings(addr, bytes, bin, &ctx)),
+        As::Qwords => Ok(rows_qwords(addr, bytes, None, 8)),
+        As::Ptrs => Ok(rows_qwords(addr, bytes, Some(&ctx), ps)),
+        As::Ifaces => Ok(rows_ifaces(addr, bytes, &ctx, ps)),
+        As::SliceHeader => Ok(rows_slice_headers(addr, bytes, &ctx, ps)),
+        As::String => Ok(rows_strings(addr, bytes, bin, &ctx, ps)),
     }
 }
 
@@ -250,19 +256,28 @@ fn rows_bytes(start: u64, bytes: &[u8]) -> Vec<DataRow> {
     out
 }
 
-fn rows_qwords(start: u64, bytes: &[u8], ctx: Option<&SymCtx>) -> Vec<DataRow> {
+/// The little-endian word of `ps` bytes (4 or 8) at `off`.
+fn word(b: &[u8], off: usize, ps: usize) -> u64 {
+    if ps == 8 {
+        u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
+    } else {
+        u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as u64
+    }
+}
+
+fn rows_qwords(start: u64, bytes: &[u8], ctx: Option<&SymCtx>, ps: usize) -> Vec<DataRow> {
     let mut out = Vec::new();
-    for (i, chunk) in bytes.chunks(8).enumerate() {
-        if chunk.len() < 8 {
+    for (i, chunk) in bytes.chunks(ps).enumerate() {
+        if chunk.len() < ps {
             break;
         }
-        let v = u64::from_le_bytes(chunk.try_into().unwrap());
+        let v = word(chunk, 0, ps);
         let rendering = match ctx {
             Some(c) => format!("0x{v:016x}  {}", c.symbolize(v).render()),
             None => format!("0x{v:016x}"),
         };
         out.push(DataRow {
-            addr: start + (i as u64) * 8,
+            addr: start + (i as u64) * ps as u64,
             bytes: chunk.to_vec(),
             rendering,
         });
@@ -270,18 +285,19 @@ fn rows_qwords(start: u64, bytes: &[u8], ctx: Option<&SymCtx>) -> Vec<DataRow> {
     out
 }
 
-fn rows_ifaces(start: u64, bytes: &[u8], ctx: &SymCtx) -> Vec<DataRow> {
+fn rows_ifaces(start: u64, bytes: &[u8], ctx: &SymCtx, ps: usize) -> Vec<DataRow> {
     let mut out = Vec::new();
-    for (i, chunk) in bytes.chunks(16).enumerate() {
-        if chunk.len() < 16 {
+    let n = 2 * ps;
+    for (i, chunk) in bytes.chunks(n).enumerate() {
+        if chunk.len() < n {
             break;
         }
-        let itab_ptr = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-        let data_ptr = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+        let itab_ptr = word(chunk, 0, ps);
+        let data_ptr = word(chunk, ps, ps);
         let itab_sym = ctx.symbolize(itab_ptr);
         let data_sym = ctx.symbolize(data_ptr);
         out.push(DataRow {
-            addr: start + (i as u64) * 16,
+            addr: start + (i as u64) * n as u64,
             bytes: chunk.to_vec(),
             rendering: format!(
                 "iface{{ itab=0x{:016x} ({}), data=0x{:016x} ({}) }}",
@@ -295,17 +311,18 @@ fn rows_ifaces(start: u64, bytes: &[u8], ctx: &SymCtx) -> Vec<DataRow> {
     out
 }
 
-fn rows_slice_headers(start: u64, bytes: &[u8], ctx: &SymCtx) -> Vec<DataRow> {
+fn rows_slice_headers(start: u64, bytes: &[u8], ctx: &SymCtx, ps: usize) -> Vec<DataRow> {
     let mut out = Vec::new();
-    for (i, chunk) in bytes.chunks(24).enumerate() {
-        if chunk.len() < 24 {
+    let n = 3 * ps;
+    for (i, chunk) in bytes.chunks(n).enumerate() {
+        if chunk.len() < n {
             break;
         }
-        let data_ptr = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-        let len = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
-        let cap = u64::from_le_bytes(chunk[16..24].try_into().unwrap());
+        let data_ptr = word(chunk, 0, ps);
+        let len = word(chunk, ps, ps);
+        let cap = word(chunk, 2 * ps, ps);
         out.push(DataRow {
-            addr: start + (i as u64) * 24,
+            addr: start + (i as u64) * n as u64,
             bytes: chunk.to_vec(),
             rendering: format!(
                 "slice{{ data=0x{:016x} ({}), len={}, cap={} }}",
@@ -319,16 +336,23 @@ fn rows_slice_headers(start: u64, bytes: &[u8], ctx: &SymCtx) -> Vec<DataRow> {
     out
 }
 
-fn rows_strings(start: u64, bytes: &[u8], bin: &GoBinary, _ctx: &SymCtx) -> Vec<DataRow> {
+fn rows_strings(
+    start: u64,
+    bytes: &[u8],
+    bin: &GoBinary,
+    _ctx: &SymCtx,
+    ps: usize,
+) -> Vec<DataRow> {
     let mut out = Vec::new();
-    for (i, chunk) in bytes.chunks(16).enumerate() {
-        if chunk.len() < 16 {
+    let n = 2 * ps;
+    for (i, chunk) in bytes.chunks(n).enumerate() {
+        if chunk.len() < n {
             break;
         }
-        let data_ptr = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-        let len = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+        let data_ptr = word(chunk, 0, ps);
+        let len = word(chunk, ps, ps);
         out.push(DataRow {
-            addr: start + (i as u64) * 16,
+            addr: start + (i as u64) * n as u64,
             bytes: chunk.to_vec(),
             rendering: render_string_header(bin, data_ptr, len),
         });
@@ -336,7 +360,7 @@ fn rows_strings(start: u64, bytes: &[u8], bin: &GoBinary, _ctx: &SymCtx) -> Vec<
     out
 }
 
-/// Render a 16-byte window as a Go string header, telling the truth when it is
+/// Render a two-word window as a Go string header, telling the truth when it is
 /// not one. Reading code or a pointer field as a string (a wrong `--data-as
 /// string`) yields a wild pointer and a nonsense length; presenting that as a
 /// string with a quiet "(unmapped)" reads as real data. So reject an implausible
