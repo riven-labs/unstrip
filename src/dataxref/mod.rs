@@ -7,6 +7,7 @@ use crate::Result;
 
 /// One static reference from `.text` to a data address.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct DataXref {
     /// Link-time VA of the instruction that issued the reference.
     pub instruction_pc: u64,
@@ -21,6 +22,7 @@ pub struct DataXref {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum Kind {
     /// `LEA r64, [rip+disp32]` - address loaded, no memory read.
     Lea,

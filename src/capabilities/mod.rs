@@ -17,6 +17,7 @@ use crate::pclntab::Function;
 use crate::types::Type;
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Capability {
     pub name: &'static str,
     pub category: &'static str,
@@ -32,6 +33,7 @@ pub struct Capability {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct CapabilityReport {
     pub capabilities: Vec<Capability>,
 }

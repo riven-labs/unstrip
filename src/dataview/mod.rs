@@ -10,6 +10,7 @@ use crate::Result;
 /// the per-row formatter; the raw bytes are always available via the
 /// `bytes` field on `DataView` regardless of choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum As {
     /// Hex dump, 16 bytes per row.
     Bytes,
@@ -37,6 +38,7 @@ pub enum As {
 /// stable: stdout text format is one row per record formatted via
 /// `format_text`; JSON output emits each record directly.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct DataRow {
     /// Address of this row inside the requested span.
     pub addr: u64,
@@ -54,6 +56,7 @@ pub struct DataRow {
 /// consumers can pattern-match on the discriminant.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum Symbol {
     /// `pkg.func @ off` when the address lies inside a recovered
     /// function (offset is bytes into the function, 0 at the entry
@@ -89,6 +92,7 @@ pub enum Symbol {
 /// One method entry carried inline on [`Symbol::Itab`] so iface
 /// dispatch slots can resolve to a callable body in one query.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct ItabMethodEntry {
     pub name: String,
     pub concrete_fn: u64,

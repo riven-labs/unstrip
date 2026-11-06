@@ -47,6 +47,7 @@ enum Layout {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Function {
     pub address: u64,
     pub name: String,
@@ -95,6 +96,7 @@ pub struct Pclntab<'a> {
 /// PC-range size, both of which are needed to decode funcdata structures
 /// such as the inline tree.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FuncEntry {
     pub address: u64,
     pub name: String,
@@ -109,6 +111,7 @@ pub struct FuncEntry {
 /// (leaf) frame comes first; subsequent entries are the inlined call chain
 /// outward to the physical function the compiler actually emitted code for.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct InlineFrame {
     pub name: String,
     pub file: Option<String>,

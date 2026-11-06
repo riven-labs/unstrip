@@ -16,6 +16,7 @@ use goblin::Object;
 /// entropy of its on-disk bytes. High entropy in an executable section is the
 /// classic packed/encrypted signal.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SectionInfo {
     pub name: String,
     pub vaddr: u64,
@@ -28,6 +29,7 @@ pub struct SectionInfo {
 
 /// A container-level summary that does not depend on any Go metadata.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ContainerProbe {
     pub container: &'static str,
     pub arch: String,

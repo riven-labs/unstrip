@@ -9,6 +9,7 @@ use crate::Result;
 /// A recovered (interface, concrete type) pairing from `runtime.itablinks`,
 /// optionally with the method-by-method dispatch table populated.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Itab {
     pub addr: u64,
     pub interface_name: String,
@@ -31,6 +32,7 @@ pub struct Itab {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct ItabMethod {
     pub interface_method: String,
     pub concrete_fn: u64,

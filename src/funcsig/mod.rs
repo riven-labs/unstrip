@@ -72,6 +72,7 @@ const UNCOMMON_TYPE_SIZE: usize = 16;
 
 /// One recovered method from a `_type.uncommon().methods` table.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct RecoveredMethod {
     /// Receiver type name (the type that owns this method).
     pub receiver: String,

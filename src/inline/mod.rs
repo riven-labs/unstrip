@@ -54,6 +54,7 @@ use crate::Result;
 
 /// One inlined-call record from `FUNCDATA_InlTree`.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct InlinedCall {
     pub func_id: u8,
     pub name_off: i32,
@@ -221,6 +222,7 @@ pub fn resolve_leaf_name(pcln: &Pclntab, leaf: &InlinedCall) -> Option<String> {
 /// pclntab or a synthetic anonymous-inline placeholder for an inlined
 /// call site whose callee name was stripped (`name_off == 0`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Node {
     /// Real text VA for `Physical` nodes; a synthetic high-bit-tagged
     /// ID for `AnonymousInline` nodes (see [`Self::is_anonymous_addr`]).
@@ -244,6 +246,7 @@ impl Node {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NodeKind {
     /// Real function from pclntab. `addr` is its link-time entry PC.
     Physical,
@@ -260,6 +263,7 @@ pub enum NodeKind {
 
 /// An edge in the inlined call graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Edge {
     /// `addr` of the caller node.
     pub from: u64,
@@ -271,6 +275,7 @@ pub struct Edge {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EdgeKind {
     /// The caller inlined the callee at `call_site`.
     Inlined,
@@ -284,6 +289,7 @@ pub enum EdgeKind {
 /// Built by [`inline_callgraph`]; see the function's docs for the
 /// Go envelope this is witnessed on.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct CallGraph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,

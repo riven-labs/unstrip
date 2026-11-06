@@ -15,6 +15,7 @@ use crate::Result;
 /// We target the Go 1.20-1.25 layout. Field order has been stable across that
 /// range; if it drifts, only the offset table here needs updating.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct ModuleData {
     /// File offset where this moduledata begins.
     pub file_offset: usize,
@@ -93,6 +94,7 @@ pub struct ModuleData {
 /// (the same encoding 1.18+ uses). The pclntab magic does not distinguish 1.16
 /// from 1.17, so the encoding is detected from the data, not the magic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub enum NameEnc {
     /// Varint length (Go 1.17 and later).
     Varint,
@@ -108,9 +110,15 @@ pub struct SliceHeader {
 }
 
 /// Which Go pclntab/moduledata layout to parse. They differ in a few
-/// added/removed uintptr fields across minor versions.
+/// added/removed uintptr fields across minor versions. Variants run oldest
+/// to newest; a later Go release may add one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Layout {
+    /// Go 1.16 and 1.17 (pclntab magic 0xfffffffa): no `covctrs` (added in 1.20)
+    /// and no `rodata`/`gofunc` (added in 1.18), so the offset table after
+    /// `etypes` sits two pointers earlier than every later layout.
+    Pre118,
     /// Go 1.18 and 1.19, no `covctrs`/`ecovctrs` fields between `enoptrbss`
     /// and `end`.
     V118,
@@ -124,10 +132,6 @@ pub enum Layout {
     /// `types` and `itaboffset`, `itabsize` follow `etypes`. Same pclntab
     /// magic again: told apart from V126 by which parse validates.
     V127,
-    /// Go 1.16 and 1.17 (pclntab magic 0xfffffffa): no `covctrs` (added in 1.20)
-    /// and no `rodata`/`gofunc` (added in 1.18), so the offset table after
-    /// `etypes` sits two pointers earlier than every later layout.
-    Pre118,
 }
 
 /// The runtime's `textAddr` loop over a split text: `sects` is `textsectmap` as

@@ -31,6 +31,7 @@ use crate::pclntab::{Function, Pclntab};
 use crate::Result;
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct GoroutineSpawn {
     /// PC of the CALL instruction in `.text`.
     pub call_site: u64,
@@ -60,6 +61,7 @@ pub struct GoroutineSpawn {
 /// without parsing free-form strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum Resolution {
     /// Funcval pointer decoded and its entry PC read successfully.
     /// `target_name` may still be `None` if the entry PC doesn't match

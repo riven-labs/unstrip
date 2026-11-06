@@ -19,6 +19,7 @@ use crate::Result;
 /// "this binary is built from xyz fork of cobra at commit abc". Not a hash
 /// of the file bytes, that changes every build.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Fingerprint {
     pub sha256: String,
     pub function_count: usize,
@@ -30,6 +31,7 @@ pub struct Fingerprint {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Components {
     pub main_module_path: Option<String>,
     pub user_function_count: usize,
@@ -107,6 +109,7 @@ pub fn compute_behavioral_from(itabs: &[Itab]) -> BehavioralFingerprint {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct BehavioralFingerprint {
     pub sha256: String,
     pub interface_count: usize,

@@ -34,6 +34,7 @@ pub const MIN_SAMPLE: usize = 50;
 /// enough samples AND H1 + H2 both tripped; `confidence` is 0.0 when we
 /// declined for lack of evidence.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct GarbleVerdict {
     pub is_garbled: bool,
     pub confidence: f32,
@@ -209,6 +210,7 @@ fn looks_like_garbled_identifier(name: &str) -> bool {
 
 /// Vote of a single underlying heuristic.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct Signal {
     /// Stable identifier for grep/CI gating (e.g. `pclntab.magic`,
     /// `runtime.build_version`, `names.hashed_ratio`,
@@ -224,6 +226,7 @@ pub struct Signal {
 /// in `--info` / `--buildinfo`. One answer, one confidence, structured
 /// per-signal evidence.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct GarbleAssessment {
     /// Three-state verdict: `Garbled`, `Clean`, or `Indeterminate`. Use
     /// this for routing; use the [`GarbleAssessment::exit_code`] helper
@@ -240,6 +243,7 @@ pub struct GarbleAssessment {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Verdict {
     Garbled,
     Clean,
@@ -408,6 +412,7 @@ fn mean_stdev(xs: &[f32]) -> (f32, f32) {
 /// value artifact on a garbled binary: it recovers type, field, and method
 /// names that are otherwise only present as hashes.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ReflectNames {
     obf_to_orig: std::collections::HashMap<String, String>,
 }

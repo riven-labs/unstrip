@@ -32,6 +32,7 @@ use crate::gobin::{GoBinary, SectionKind};
 /// One recovered printable run, anchored to its link-time VA so callers
 /// can cross-reference into xrefs / disasm.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct GoString {
     /// Link-time VA where the run starts.
     pub addr: u64,

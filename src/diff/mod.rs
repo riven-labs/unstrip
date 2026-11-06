@@ -29,6 +29,7 @@ use serde::Serialize;
 use crate::pclntab::Function;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MatchKind {
     /// Same recovered name, same address. Nothing changed; existing
     /// annotations port directly.
@@ -46,6 +47,7 @@ pub enum MatchKind {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Pairing {
     pub kind: MatchKind,
     pub old_addr: Option<u64>,
@@ -55,6 +57,7 @@ pub struct Pairing {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct DiffReport {
     pub old_total: usize,
     pub new_total: usize,

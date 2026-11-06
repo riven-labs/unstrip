@@ -44,6 +44,7 @@ const ITAB_SLOT_BYTES: u64 = 8;
 /// indirect-itab method (deferred to Scanner 2) needs the itab
 /// table to know which method slot a call goes through.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Target {
     /// Function recovered from pclntab, named.
     Function(String),
@@ -57,6 +58,7 @@ pub enum Target {
 
 /// One call site that targets the requested symbol.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct CallSite {
     /// Link-time VA of the call instruction itself.
     pub call_site: u64,
@@ -71,6 +73,7 @@ pub struct CallSite {
 /// How the call site reaches its target.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum CallKind {
     /// Direct amd64 `CALL rel32` (opcode 0xE8). The most common shape
     /// on Go binaries; covers 80-90% of call sites on a typical build

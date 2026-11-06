@@ -9,6 +9,7 @@ use crate::Result;
 /// Format reference: `src/cmd/go/internal/modload/build.go` and
 /// `src/debug/buildinfo/buildinfo.go` in the Go source tree.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct BuildInfo {
     pub go_version: String,
     pub path: Option<String>,
@@ -19,6 +20,7 @@ pub struct BuildInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Module {
     pub path: String,
     pub version: String,
@@ -26,12 +28,14 @@ pub struct Module {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Replace {
     pub from: Module,
     pub to: Module,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Setting {
     pub key: String,
     pub value: String,

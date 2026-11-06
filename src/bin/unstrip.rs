@@ -868,6 +868,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     None => format!("indirect-itab [slot {method_index}]"),
                                 },
+                                _ => "other".to_string(),
                             };
                             writeln!(out, "  0x{:016x}  {kind}", s.call_site)?;
                         }
@@ -919,6 +920,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                             unstrip::dataxref::Kind::MovStore => "mov-store",
                             unstrip::dataxref::Kind::Cmp => "cmp",
                             unstrip::dataxref::Kind::CallIndirect => "call-indirect",
+                            _ => "other",
                         };
                         let fname = h.function_name.as_deref().unwrap_or("(no function)");
                         writeln!(out, "0x{:016x}  {:<14}  {}", h.instruction_pc, kind, fname,)?;
@@ -1282,6 +1284,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                             unstrip::goroutines::Resolution::Resolved => resolved += 1,
                             unstrip::goroutines::Resolution::NoLeaPattern => no_lea += 1,
                             unstrip::goroutines::Resolution::FuncvalUnmapped => unmapped += 1,
+                            _ => {}
                         }
                     }
                     let unresolved = no_lea + unmapped;
@@ -1603,6 +1606,14 @@ fn print_pairing<W: Write>(w: &mut W, p: &unstrip::diff::Pairing) -> io::Result<
             p.old_addr.unwrap_or(0),
             p.old_name.as_deref().unwrap_or("?")
         ),
+        _ => writeln!(
+            w,
+            "  ?  {}",
+            p.old_name
+                .as_deref()
+                .or(p.new_name.as_deref())
+                .unwrap_or("?")
+        ),
     }
 }
 
@@ -1628,7 +1639,7 @@ fn write_goroutines<W: Write>(
                 let reason = match s.resolution {
                     unstrip::goroutines::Resolution::NoLeaPattern => "no-lea-pattern",
                     unstrip::goroutines::Resolution::FuncvalUnmapped => "funcval-unmapped",
-                    unstrip::goroutines::Resolution::Resolved => "unknown",
+                    _ => "unknown",
                 };
                 format!("(unresolved: {reason})")
             }

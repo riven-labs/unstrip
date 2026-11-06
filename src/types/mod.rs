@@ -10,6 +10,7 @@ use crate::Result;
 /// structs, and maps lives in [`KindData`]; we attempt those opportunistically
 /// and fall through to `Other` on failure rather than aborting a whole pass.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Type {
     pub addr: u64,
     pub name: String,
@@ -125,6 +126,7 @@ impl KindName {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum KindData {
     None,
     Pointer {
@@ -168,12 +170,14 @@ pub enum KindData {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct InterfaceMethod {
     pub name: String,
     pub typ: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct StructField {
     pub name: String,
     pub typ: u64,

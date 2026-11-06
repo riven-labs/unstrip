@@ -256,6 +256,7 @@ fn inline_callgraph_anonymous_addrs_use_high_bit_tag() {
                 "anonymous-inline node addr 0x{:x} must have the anonymous tag",
                 n.addr,
             ),
+            _ => {}
         }
     }
 }

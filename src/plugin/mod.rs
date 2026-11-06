@@ -24,6 +24,7 @@ use crate::Result;
 /// Result of an install: where the file went and what the user should do
 /// to activate it (usually a restart or rescan).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct InstallReport {
     pub target: Target,
     pub installed_at: PathBuf,

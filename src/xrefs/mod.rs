@@ -21,6 +21,7 @@ use crate::Result;
 
 /// One edge in the call graph: caller calls callee at this site.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct CallEdge {
     pub call_site: u64,
     pub caller_addr: u64,
@@ -161,6 +162,7 @@ pub fn forward_graph(edges: &[CallEdge]) -> Vec<(String, String)> {
 /// `addr: None` means the name showed up only as the root or only as a
 /// caller/callee on the opposite side of the edge map being walked.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct XrefNode {
     pub name: String,
     pub addr: Option<u64>,
@@ -174,6 +176,7 @@ pub struct XrefNode {
 /// stopped because it reached `max_nodes` before exhausting the depth
 /// bound. Nodes are sorted by name for stable output.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct XrefResult {
     pub root: String,
     pub direction: &'static str,

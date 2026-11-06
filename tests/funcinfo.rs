@@ -54,6 +54,7 @@ fn shape(a: &[ArgComp]) -> String {
             ArgComp::Agg(v) => format!("A({})", shape(v)),
             ArgComp::Ellipsis => "...".to_string(),
             ArgComp::TooLarge => "_".to_string(),
+            _ => "?".to_string(),
         })
         .collect::<Vec<_>>()
         .join(" ")

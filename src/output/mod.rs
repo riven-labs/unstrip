@@ -7,6 +7,7 @@ use crate::gobin::GoBinary;
 use crate::pclntab::{Function, Pclntab};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Format {
     Text,
     Json,
@@ -246,6 +247,7 @@ fn write_section_map<W: Write>(w: &mut W, bin: &GoBinary) -> io::Result<()> {
 /// look weird, nothing more. A real garble-recovery pass (string XOR,
 /// seed extraction) is a separate effort.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct GarbleReport {
     pub magic_rewritten: bool,
     pub version_overwritten: bool,

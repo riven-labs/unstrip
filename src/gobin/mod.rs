@@ -9,6 +9,7 @@ use crate::Result;
 pub(crate) mod segments;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Container {
     Elf,
     MachO,
@@ -26,6 +27,7 @@ impl Container {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Arch {
     X86_64,
     Aarch64,
@@ -47,6 +49,7 @@ impl Arch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SectionKind {
     Text,
     ReadOnlyData,
@@ -58,6 +61,7 @@ pub enum SectionKind {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Section {
     pub name: String,
     pub kind: SectionKind,
@@ -133,6 +137,7 @@ impl Section {
     }
 }
 
+#[non_exhaustive]
 pub struct GoBinary {
     pub bytes: Vec<u8>,
     pub container: Container,

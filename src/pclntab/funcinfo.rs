@@ -45,6 +45,7 @@ pub const PCDATA_STACK_MAP_INDEX: u32 = 1;
 /// One stack object record (`runtime.stackObjectRecord`): an address-taken
 /// local that holds pointers and stays in the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StackObject {
     /// Offset in the frame: negative from varp (entry SP - 8 on amd64, which
     /// saves a frame pointer; entry SP on 386), else from argp (entry SP plus
@@ -65,6 +66,7 @@ pub struct StackObject {
 /// `FUNCDATA_LocalsPointerMaps`): `nbit` words each, one bitmap per stack
 /// map index.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PointerMaps {
     /// Words covered by each bitmap.
     pub nbit: u32,
@@ -114,6 +116,7 @@ const MAX_PCVALUE_STEPS: u32 = 1_000_000;
 
 /// The fixed fields of a function's `_func` record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct FuncFields {
     /// Entry PC from the functab. The `_func` copy is not used: garble XORs it.
     pub entry: u64,
@@ -148,6 +151,7 @@ pub struct FuncFields {
 /// A source position covering a PC range of one function. Ranges are absolute
 /// PCs, half-open, increasing, and non-overlapping.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct LineSpan {
     /// First PC of the range.
     pub pc_lo: u64,
@@ -161,6 +165,7 @@ pub struct LineSpan {
 
 /// The innermost inlined call covering a PC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct InlineLeaf {
     /// Name of the inlined callee; empty when the record names none (`-tiny`).
     pub func_name: String,
@@ -183,6 +188,7 @@ pub struct InlineLeaf {
 /// argument words; aggregates (strings, slices, interfaces, structs, arrays,
 /// complex numbers) nest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub enum ArgComp {
     /// A scalar of `size` bytes at argument-frame offset `off`.
     Word { off: u8, size: u8 },
@@ -196,6 +202,7 @@ pub enum ArgComp {
 
 /// Which compiler wrote an open-coded defer record. The format changed twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub enum OpenDeferFormat {
     /// Go 1.14 to 1.17: maxargsize, deferBits, nDefers, then per defer its arg
     /// width, closure slot, and argument copies.
@@ -209,6 +216,7 @@ pub enum OpenDeferFormat {
 /// A decoded FUNCDATA_OpenCodedDeferInfo record. Offsets are positive and
 /// subtracted from the frame's varp (`varp - off`), as the runtime does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct OpenDeferInfo {
     /// Which record format the compiler wrote.
     pub format: OpenDeferFormat,
