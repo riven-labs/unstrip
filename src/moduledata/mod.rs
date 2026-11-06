@@ -66,6 +66,8 @@ pub struct ModuleData {
     /// `types`) and their total bytes, back to back (there is no
     /// `itablinks`). Zero on older layouts.
     pub itaboffset: u64,
+    /// Go 1.27+: total bytes of the linked itabs at `types + itaboffset`.
+    /// Zero on older layouts.
     pub itabsize: u64,
 
     pub rodata: u64,

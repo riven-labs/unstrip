@@ -50,6 +50,7 @@ pub struct StackObject {
     /// saves a frame pointer; entry SP on 386), else from argp (entry SP plus
     /// the pointer size).
     pub off: i32,
+    /// Size of the object in bytes.
     pub size: i32,
     /// The bytes holding pointers, from its start.
     pub ptr_bytes: i32,
@@ -65,7 +66,10 @@ pub struct StackObject {
 /// map index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PointerMaps {
+    /// Words covered by each bitmap.
     pub nbit: u32,
+    /// One bitmap per stack map index, `nbit` bits each, least significant
+    /// bit first. Use [`PointerMaps::bit`] to test a word.
     pub maps: Vec<Vec<u8>>,
 }
 
@@ -119,10 +123,13 @@ pub struct FuncFields {
     pub args: i32,
     /// Offset from entry of the deferreturn call, 0 when there is none.
     pub deferreturn: u32,
-    /// pctab offsets of the SP-delta, file, and line tables (0 = no table).
+    /// pctab offset of the SP-delta table (0 = no table).
     pub pcsp: u32,
+    /// pctab offset of the file table (0 = no table).
     pub pcfile: u32,
+    /// pctab offset of the line table (0 = no table).
     pub pcln: u32,
+    /// Number of PCDATA tables the record lists.
     pub npcdata: u32,
     /// Base index of this function's compilation unit in the cutab.
     pub cu_offset: u32,
@@ -134,6 +141,7 @@ pub struct FuncFields {
     /// `funcFlag` bits (TopFrame 1, SPWrite 2, Asm 4 from Go 1.21). Go 1.16 has
     /// a zero pad byte here, so 0 on a 1.16/1.17-magic binary proves nothing.
     pub flag: u8,
+    /// Number of FUNCDATA slots the record lists.
     pub nfuncdata: u8,
 }
 
@@ -141,9 +149,13 @@ pub struct FuncFields {
 /// PCs, half-open, increasing, and non-overlapping.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LineSpan {
+    /// First PC of the range.
     pub pc_lo: u64,
+    /// One past the last PC of the range.
     pub pc_hi: u64,
+    /// Source file name.
     pub file: String,
+    /// Source line.
     pub line: u32,
 }
 
@@ -154,6 +166,7 @@ pub struct InlineLeaf {
     pub func_name: String,
     /// Source position of the PC itself, inside the inlined callee.
     pub file: Option<String>,
+    /// Source line of the PC itself, inside the inlined callee.
     pub line: Option<u32>,
     /// Absolute PC of an instruction whose source position is the call site
     /// in the caller (the record's parentPc plus the function entry). Every
@@ -197,6 +210,7 @@ pub enum OpenDeferFormat {
 /// subtracted from the frame's varp (`varp - off`), as the runtime does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OpenDeferInfo {
+    /// Which record format the compiler wrote.
     pub format: OpenDeferFormat,
     /// The deferBits byte lives at `varp - defer_bits_offset`.
     pub defer_bits_offset: u32,
