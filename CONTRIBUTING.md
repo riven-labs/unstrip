@@ -35,7 +35,7 @@ Integration tests need fixtures built from a local Go toolchain:
 
 ```
 cd testdata && ./build-fixtures.sh && cd ..
-cargo test --features integration
+cargo test
 ```
 
 Requirements: Rust 1.85 or newer, Go 1.18 or newer on `$PATH` for the integration fixtures.
