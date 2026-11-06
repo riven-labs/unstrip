@@ -95,7 +95,7 @@ pub struct Pclntab<'a> {
 /// A richer per-function record with the raw `_func` struct offset and the
 /// PC-range size, both of which are needed to decode funcdata structures
 /// such as the inline tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct FuncEntry {
     pub address: u64,
