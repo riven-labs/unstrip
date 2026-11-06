@@ -360,6 +360,11 @@ pub fn detect_go_version(bytes: &[u8]) -> Option<String> {
         if end - i < 5 || end - i > 20 {
             continue;
         }
+        // A release number follows "go1."; garble can leave strings like
+        // "go1.go" behind after it overwrites the real version.
+        if !bytes[i + marker.len()].is_ascii_digit() {
+            continue;
+        }
         let s = std::str::from_utf8(&bytes[i..end]).ok()?;
         // Sanity: must have at least one dot after "go1."
         if s[3..].chars().filter(|&c| c == '.').count() >= 1 {
@@ -390,5 +395,14 @@ mod tests {
     fn ignores_partial_matches() {
         let blob = b"go1.\x00short";
         assert_eq!(detect_go_version(blob), None);
+    }
+
+    #[test]
+    fn ignores_non_numeric_release() {
+        assert_eq!(detect_go_version(b"\x00go1.go\x00"), None);
+        assert_eq!(
+            detect_go_version(b"go1.go\x00go1.21.4\x00").as_deref(),
+            Some("go1.21.4")
+        );
     }
 }
