@@ -9,72 +9,95 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Added
 
-- Per-function metadata readers on `Pclntab` (`src/pclntab/funcinfo.rs`), layout-aware
-  across the Go 1.16/1.17, 1.18/1.19, and 1.20+ pclntabs:
-  - `line_table(func)` returns the per-PC source positions as `LineSpan { pc_lo,
+- Go 1.27 support. Go 1.27 dropped `moduledata.typelinks` and `itablinks`; the
+  new `Layout::V127` reads its moduledata (the new `typedesclen`, `itaboffset`,
+  and `itabsize` fields), and `ModuleData::type_addrs` and
+  `ModuleData::itab_addrs` return the type and itab addresses on every layout,
+  walking the types region in place on Go 1.27 as the runtime does. A Go 1.27
+  binary used to have no moduledata, and so no types, itabs, or gofunc-relative
+  funcdata.
+
+- GOARCH=386 binaries. Type-graph recovery, method tables, itabs, build info,
+  stack objects, garble's reflected-name table, the C struct declarations of the
+  exporters, and the `--data-at` `ptrs`, `ifaces`, `slice-header`, and `string`
+  views all read at the binary's pointer size. Checked on Go 1.17 to 1.27 Linux
+  and Windows builds. The call, goroutine, and data-reference scanners still
+  decode amd64 and arm64 code only; big-endian targets are still refused by type
+  recovery.
+
+- Per-function metadata readers on `Pclntab`, for the Go 1.16/1.17, 1.18/1.19,
+  and 1.20+ layouts. Each takes the `FuncEntry` that `func_entry_at(pc)` returns:
+  - `line_table` returns the per-PC source positions as `LineSpan { pc_lo,
     pc_hi, file, line }`, increasing and merged where adjacent; PCs with no
     resolvable file or a non-positive line are left out.
-  - `sp_delta_at(func, pc)` reads the pcsp table; `pcdata_value(func, table, pc)`
-    reads any PCDATA table.
-  - `inline_leaf(func, pc)` returns the innermost inlined call at a PC as
-    `InlineLeaf { func_name, file, line, parent_pc, start_line, func_id }`.
-  - `func_fields(func)` decodes the fixed `_func` fields (`FuncFields`;
-    `start_line` only on Go 1.20+), and `funcdata(func, idx)` the address of a
-    funcdata slot (gofunc-relative on 1.18+, absolute on 1.16/1.17).
-  - `arg_info(func)` decodes FUNCDATA_ArgInfo exactly as the runtime's
-    traceback printer walks it (`ArgComp::{Word, Agg, Ellipsis, TooLarge}`).
-  - `open_coded_defer_info(func)` decodes FUNCDATA_OpenCodedDeferInfo in all
-    three formats (Go 1.14-1.17, 1.18-1.21, 1.22+); `is_wrapper(func)` checks
-    the funcID against the binary's FuncIDWrapper. On the shared 1.20+ magic
-    the release epoch is pinned from `runtime.systemstack_switch`'s funcID.
-  - `func_entry_at(pc)` returns the `FuncEntry` these readers take;
-    `parse_arg_info` and `parse_open_defer_info` decode raw records.
-- `testdata/funcinfo.go` and its per-release builds in `build-fixtures.sh`.
+  - `sp_delta_at` reads the pcsp table; `pcdata_value` reads any PCDATA table.
+  - `inline_leaf` returns the innermost inlined call at a PC as `InlineLeaf`.
+  - `func_fields` decodes the fixed `_func` fields (`FuncFields`; `start_line`
+    only on Go 1.20+), and `funcdata` the address of a funcdata slot.
+  - `arg_info` decodes FUNCDATA_ArgInfo as the runtime's traceback printer
+    walks it (`ArgComp`), and `arg_live_first` reads the first tracked spill
+    slot from FUNCDATA_ArgLiveInfo.
+  - `open_coded_defer_info` decodes FUNCDATA_OpenCodedDeferInfo in all three
+    formats (Go 1.14 to 1.17, 1.18 to 1.21, 1.22+).
+  - `stack_objects` and `stack_object_mask` read FUNCDATA_StackObjects and each
+    object's pointer mask; `pointer_maps` and `stack_map_index` read the args
+    and locals pointer bitmaps and the bitmap index at a PC.
+  - `is_wrapper` checks the funcID against the binary's own FuncIDWrapper.
+  - `parse_arg_info` and `parse_open_defer_info` decode raw record bytes, and
+    the FUNCDATA_* and PCDATA_* index constants are exported.
+
+- `ModuleData::is_pointer_word` tells whether a package variable's word holds a
+  pointer, from the `gcdata` and `gcbss` GC programs expanded as the runtime
+  does. `ModuleData::text_addr` maps a text offset to an address through
+  `textsectmap`, and `ModuleData::itab_fun_offset` gives where an itab's method
+  slots start.
+
+- `ContainerProbe::declared_size`, the end of the section and segment data the
+  headers describe (larger than the file when it is truncated), and
+  `ContainerProbe::import_count`, the number of functions a PE imports.
+
+### Changed
+
+- `ModuleData` and `ContainerProbe` have new public fields, and
+  `moduledata::Layout` has the new `V127` variant. Code that builds either struct
+  with a literal, or matches `Layout` without a wildcard arm, needs updating.
+
+- An ELF whose section header table points outside the file (damaged on purpose,
+  or a truncated download) is read from its program headers, as the loader maps
+  it, instead of failing to open. The probe names its architecture and segments.
+
+- `UnsupportedPclntabVersion` names Go 1.16 as the oldest release that is read.
 
 ### Fixed
 
-- Inline frames on Go 1.16/1.17 binaries: `lookup_inline` read the inline
-  frame's pcfile, pcln, and cuOffset at the Go 1.18+ `_func` offsets, which are
-  wrong for the 1.16/1.17 layout's pointer-sized entry, and it returned only the
-  physical frame there. Positions are now read at the layout's offsets and the
-  inline tree is walked on every supported layout.
-- Inline trees on Go 1.18/1.19: `decode_inline_tree` and `lookup_inline` assumed
-  the 1.20+ `_func` header (with `startLine`) and the 16-byte `inlinedCall`; they
-  now read the 1.18/1.19 header and the 20-byte record of Go 1.16 to 1.19
-  (`InlinedCall::start_line` is 0 there, since those records do not carry it).
-- pc-value tables honor the pclntab quantum (it was assumed to be 1, wrong on
-  arm64) and a table offset of 0 means "no table", as in the runtime.
-- The inline-tree docs no longer claim parentPc is -1 for top-level entries;
-  every record carries a real call-site offset.
-- Method tables of named func types: the UncommonType was read 4 bytes after
-  the type header instead of 8 (`FuncType` is padded to pointer alignment), so
-  every named func type (Go 1.23+'s `iter.Seq[...]` in every binary) yielded
-  thousands of nameless methods with PCs outside the text, and some fabricated
-  signatures at real entries. Methods on named map types are now recovered too:
-  the pre-1.24 and swiss-table `MapType` layouts are told apart from the record
-  itself. A method table with a nameless method or an offset outside its region
-  is rejected as a whole, and text offsets go through the new
-  `ModuleData::text_addr`, which follows `textsectmap` like the runtime.
-- GOARCH=386 (32-bit pointers), checked on Go 1.17 to 1.27 linux and windows
-  builds:
-  - `BuildInfo::parse` decodes the pre-Go-1.18 pointer format (two pointers to
-    the version and modinfo string headers); Go 1.17 binaries of every arch
-    used to fail.
-  - The name-encoding probe read the 64-bit `_type` str offset and could pick
-    the 2-byte length encoding on 32-bit, garbling every itab and type name.
-  - Itab slots: Go 1.23 dropped the 4-byte pad after `hash`, so on 32-bit
-    `fun[0]` is at 12, not 16 (`ModuleData::itab_fun_offset`).
-  - `stack_objects` reads the pointer-sized record count (and Go 1.17's
-    `gcdata` pointer) at the pointer size; `stack_object_mask` has one bit per
-    pointer-sized word.
-  - Type-graph recovery (`types::recover_all`), the uncommon method tables and
-    the map extension sizes work at pointer size 4; big-endian is still
-    refused.
-  - garble's reflected-name table and the `--data-at` `ptrs`, `ifaces`,
-    `slice-header` and `string` views read pointer-sized words.
-- Methods of named map types on Go 1.27: its `MapType` is ten words plus
-  flags (88 bytes on 64-bit), not the swiss 64; the uncommon block was read
-  24 bytes early.
+- Build info on Go 1.17 and older: `BuildInfo::parse` now decodes the
+  pre-Go-1.18 format (two pointers to the version and modinfo string headers),
+  so those binaries report their Go version and modules.
+- Struct field offsets on Go 1.16 to 1.18, which store `offset<<1 | embedded`,
+  are decoded; the encoding is picked from the pclntab magic and the build
+  version.
+- Itab type names honor `TFlagExtraStar`, so a value type is no longer listed as
+  a pointer (`*main.Shape = *main.Circle`).
+- Method tables of named func types were read 4 bytes early, which produced
+  thousands of nameless methods on every Go 1.23+ binary and some fabricated
+  signatures. Methods of named map types are recovered on every map layout,
+  including Go 1.27's `MapType`, and a method table with a nameless method or an
+  offset outside its region is rejected as a whole.
+- Itab method slots on 32-bit Go 1.23+: `fun[0]` is at 12, not 16, since Go 1.23
+  dropped the pad after `hash`.
+- The type-name encoding probe read the 64-bit `_type` layout and could garble
+  every itab and type name of a 32-bit binary.
+- Inline frames and inline trees on Go 1.16 to 1.19: `lookup_inline` and
+  `decode_inline_tree` read the Go 1.20+ `_func` and `inlinedCall` layouts.
+  Both now read each layout, and `lookup_inline` walks the inline tree on every
+  supported release (`InlinedCall::start_line` is 0 before Go 1.20).
+- pc-value tables honor the pclntab quantum (it was taken as 1, wrong on arm64),
+  and a table offset of 0 means no table, as in the runtime.
+- ELF NOBITS and Mach-O zero-fill sections (`.bss`, `.noptrbss`) have no file
+  bytes; reads used to return whatever another section kept at that offset.
+- A garbled binary whose Go version was overwritten no longer reports a bogus
+  version such as `go1.go`, and the garble report flags the overwrite.
+- The inline-tree docs no longer claim parentPc is -1 for top-level entries.
 
 ## [1.2.0] - 2026-07-01
 
