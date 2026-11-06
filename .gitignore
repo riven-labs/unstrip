@@ -43,12 +43,11 @@ testdata/*.macho
 /probe/inline-coverage/DAY1.md
 
 # Monorepo-internal scaffolding. These directories live at the parent
-# Public/ working tree (Public/scripts/, Public/docs/, Public/.claude/)
+# Public/ working tree (Public/scripts/, Public/docs/)
 # and must never be vendored into a public sub-repo. The deny rules below
 # block accidental copies that land under unstrip/.
 /scripts/
 /docs/
-/.claude/
 
 # Allow-list for files we deliberately want under unstrip/docs/. Add new
 # entries here when a new public reference doc gets authored. Anything in
