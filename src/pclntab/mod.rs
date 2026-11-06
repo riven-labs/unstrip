@@ -19,7 +19,7 @@ pub const MAGIC_1_20: u32 = 0xfffffff1;
 pub const MAGIC_1_18: u32 = 0xfffffff0;
 /// Go 1.16 and 1.17 pclntab magic. The header has no textStart, the functab
 /// entries are pointer-sized (an absolute entry PC and a funcoff), and the `_func`
-/// struct leads with a uintptr entry. [`Layout::Pre118`] reads it.
+/// struct leads with a uintptr entry.
 pub const MAGIC_1_16: u32 = 0xfffffffa;
 /// Go 1.2 to 1.15 pclntab magic. A different table shape again (a two-level
 /// functab and no offset header) that this reader does not yet implement.
@@ -361,7 +361,7 @@ impl<'a> Pclntab<'a> {
         self.pctab_off
     }
 
-    /// `gofunc` base from moduledata, if it was supplied via [`with_gofunc`].
+    /// `gofunc` base from moduledata, if it was supplied via [`with_gofunc`](Self::with_gofunc).
     /// Required for inline-tree decoding because funcdata pointers are stored
     /// as offsets relative to this address.
     pub fn gofunc(&self) -> Option<u64> {
@@ -536,7 +536,7 @@ impl<'a> Pclntab<'a> {
     /// Walk the functab and yield a richer per-function record that includes
     /// the `_func` struct offset and the function's PC size. Callers that need
     /// to decode funcdata/pcdata structures want this richer view; callers
-    /// that only want names and entry PCs should use [`functions`] instead.
+    /// that only want names and entry PCs should use [`functions`](Self::functions) instead.
     pub fn functions_with_offsets(&self) -> Result<Vec<FuncEntry>> {
         let stride = self.functab_stride();
         const MAX_FUNCS: u64 = 5_000_000;
