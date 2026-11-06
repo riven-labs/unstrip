@@ -4,12 +4,12 @@
 [![CI](https://github.com/riven-labs/unstrip/actions/workflows/ci.yml/badge.svg)](https://github.com/riven-labs/unstrip/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
-[![Go versions](https://img.shields.io/badge/go-1.18--1.25-00ADD8.svg)](https://go.dev)
+[![Go versions](https://img.shields.io/badge/go-1.16--1.27-00ADD8.svg)](https://go.dev)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
 
 > Recover function names, method signatures, types, and interface dispatch tables from stripped Go binaries, with inlined call stacks the leaf-only tools miss.
 
-Stripped Go binaries still carry `pclntab`, moduledata, typelinks, and itablinks because the runtime needs them for stack traces and reflection. `unstrip` reads all of it: every function with file and line, every method with its Go-syntax signature where the linker kept the type record, every type with full struct layout, every `(interface, concrete)` pair the dispatcher uses, and the module dependency tree. ELF, Mach-O, PE. amd64 and arm64. Go 1.18 through 1.25.
+Stripped Go binaries still carry `pclntab`, moduledata, typelinks, and itablinks because the runtime needs them for stack traces and reflection. `unstrip` reads all of it: every function with file and line, every method with its Go-syntax signature where the linker kept the type record, every type with full struct layout, every `(interface, concrete)` pair the dispatcher uses, and the module dependency tree. ELF, Mach-O, PE. amd64, arm64, and 386. Go 1.16 through 1.27.
 
 ## Install
 
@@ -41,7 +41,7 @@ Built-in Ghidra, IDA, and Binary Ninja Python exporters via `--format`, with C s
 
 `--xref <symbol>` enumerates every call site targeting a function, on amd64 and arm64 binaries alike. Direct CALL/BL coverage is solid on both. Indirect dispatch through itab method slots is reported alongside direct calls with the resolved itab and method name carried inline.
 
-A 1.4 MiB static Rust binary, no runtime deps. Go 1.18 through 1.25, ELF + Mach-O + PE, amd64 + arm64, PIE + non-PIE, one tool.
+A 1.4 MiB static Rust binary, no runtime deps. Go 1.16 through 1.27, ELF + Mach-O + PE, amd64 + arm64 + 386, PIE + non-PIE, one tool.
 
 ## Compared to
 
@@ -53,7 +53,7 @@ A short verified-only table follows. The longer differences and the "when to rea
 |-----------------------------------------|------------------|------------|----------|----------|
 | CLI vs library                          | CLI              | CLI        | CLI      | library  |
 | Go 1.18 through 1.25                    | yes              | yes        | yes      | yes      |
-| Pre-Go-1.18                             | no               | Go 1.2+    | Go 1.5+  | Go 1.5+  |
+| Pre-Go-1.18                             | Go 1.16+         | Go 1.2+    | Go 1.5+  | Go 1.5+  |
 | Method-signature recovery               | yes              | no         | no       | no       |
 | Ghidra + IDA + Binja exporters          | yes              | yes        | no       | no       |
 | Inlined call stacks on PC lookup        | yes              | unverified | no       | no       |
@@ -401,9 +401,31 @@ for e in &graph.edges {
 
 `NodeKind::Physical` nodes are real pclntab functions with their entry PC as `addr`. `NodeKind::AnonymousInline` nodes carry their parent's PC plus the inline-tree start line, and their `addr` is a synthetic high-bit-tagged ID (`Node::is_anonymous_addr`) so they cannot collide with a real text VA. Anonymous-inline records appear when the compiler kept the inlined call's topology but the binary was built with `-tiny`, `-ldflags=-s -w`, or garble's name obfuscation, all of which zero the callee's `name_off`. The topology is intact in all these cases; only the name is gone.
 
-The `runtime.inlinedCall` record is byte-identical across Go 1.20 through 1.26 (the layout has not drifted since `startLine` was added in Go 1.20). The decoder runs unchanged across that range. Garble's `entryoff` XOR rewrite does not touch the inline-tree FUNCDATA section, so the decoder also runs unchanged on garble-obfuscated binaries; callee names come back obfuscated, not stripped.
+The `runtime.inlinedCall` record has two layouts: the 20-byte record of Go 1.16 through 1.19 and the 16-byte record Go 1.20 introduced with `startLine`. The decoder reads both; `start_line` is 0 on the older one, which does not carry it. Garble's `entryoff` XOR rewrite does not touch the inline-tree FUNCDATA section, so the decoder also runs unchanged on garble-obfuscated binaries; callee names come back obfuscated, not stripped.
 
 For direct (non-inlined) call edges and full-graph traversal, use `--xrefs` (CLI) or `unstrip::xrefs` (library). `EdgeKind::Direct` is reserved on the inlined call graph for a future fold of those edges; today only `EdgeKind::Inlined` is emitted by `inline_callgraph`.
+
+### Per-function metadata (library API)
+
+`Pclntab` also reads what the runtime keeps per function: the line table, SP deltas, any PCDATA table, the innermost inlined call at a PC, the raw `_func` fields, FUNCDATA_ArgInfo, open-coded defer records, stack objects, and the args/locals pointer maps. Each reader takes the `FuncEntry` that `func_entry_at` returns and follows the binary's pclntab layout (Go 1.16/1.17, 1.18/1.19, 1.20+) and pointer size:
+
+```rust
+let pcln = Pclntab::parse(&bin)?.with_gofunc(md.gofunc);
+
+if let Some(func) = pcln.func_entry_at(pc) {
+    for span in pcln.line_table(&func) {
+        println!("0x{:x}..0x{:x} {}:{}", span.pc_lo, span.pc_hi, span.file, span.line);
+    }
+    if let Some(leaf) = pcln.inline_leaf(&func, pc) {
+        println!("inlined {} called from 0x{:x}", leaf.func_name, leaf.parent_pc);
+    }
+    if let Some(args) = pcln.arg_info(&func) {
+        println!("{} argument components", args.len());
+    }
+}
+```
+
+`stack_objects`, `pointer_maps`, `open_coded_defer_info`, and `is_wrapper` follow the same pattern; `parse_arg_info` and `parse_open_defer_info` decode raw record bytes.
 
 ## How it works
 
@@ -414,7 +436,7 @@ Every Go binary built since 1.2 carries a `pclntab`, a self-describing table tha
 1. **Find the pclntab.** Look up `.gopclntab` / `__gopclntab` by name; if the section table's stripped or the section was renamed, fall back to a magic-byte scan with a structural sanity filter (so we don't false-positive on random `0xfffffff1` sequences inside other data).
 2. **Walk the function table.** For each function entry, resolve the name through the funcnametab, the file through the cutab -> filetab indirection, and the start line through the pcln pc-value table.
 3. **Find the moduledata.** Scan `.noptrdata` / `.data` for a pointer to the pclntab, that's the first field of `runtime.firstmoduledata`. Verify by checking that the next five slice headers all point inside the pclntab (the corroborating-references trick that defeats false positives).
-4. **Walk the type graph.** Start from `typelinks` (the linker's list of every type the program references), parse each `_type` header, resolve its name through the names blob relative to `moduledata.types`, decode kind-specific extra data (pointer.elem, slice.elem, struct fields, ...), and follow the references to pull in types `typelinks` itself missed. Same trick for `itablinks`.
+4. **Walk the type graph.** Start from `typelinks` (the linker's list of every type the program references; Go 1.27 dropped it, so there the descriptors are walked back to back from the start of the types region, as the runtime does), parse each `_type` header, resolve its name through the names blob relative to `moduledata.types`, decode kind-specific extra data (pointer.elem, slice.elem, struct fields, ...), and follow the references to pull in types `typelinks` itself missed. Same trick for `itablinks`, or the in-place itab walk on Go 1.27. Every record is read at the binary's pointer size.
 5. **Parse buildinfo.** Locate the `\xff Go buildinf:` marker, decode the inline string format introduced in Go 1.18 (or, before 1.18, the two pointers to the version and modinfo string headers), strip the 16-byte sentinel framing, parse the tab-separated `path`/`mod`/`dep`/`build` records.
 
 No relocations. No rewriting. Read-only output. Pipe it into IDA, Ghidra, gdb, or a script.
@@ -423,9 +445,9 @@ No relocations. No rewriting. Read-only output. Pipe it into IDA, Ghidra, gdb, o
 
 What works:
 
-- Go 1.18 through 1.25
+- Go 1.16 through 1.27
 - ELF, Mach-O, and PE containers
-- amd64 and arm64
+- amd64, arm64, and 386 (on 386 the table readers; the instruction scanners decode amd64 and arm64 only)
 - PIE and non-PIE
 - Garble-obfuscated binaries (detected and flagged; structural data still recovered)
 - Function names, file paths, line numbers
@@ -437,11 +459,11 @@ What works:
 - Direct CALL/BL call-site enumeration on amd64 and arm64; indirect-itab dispatch reporting alongside
 - IDA, Ghidra, Binary Ninja, JSON, and human-readable output
 
-Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, on Go versions in the supported range. Mach-O code paths are exercised by unit tests; the integration suite has no macOS-built fixture yet. Open an issue if it breaks. Garble heuristic detection works and structural recovery survives the default mode (string literals, inline trees, and the funcdata array all stay walkable).
+Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, Linux ELF and Windows PE 386, on Go versions in the supported range. Mach-O code paths are exercised by unit tests; the integration suite has no macOS-built fixture yet. Open an issue if it breaks. Garble heuristic detection works and structural recovery survives the default mode (string literals, inline trees, and the funcdata array all stay walkable).
 
 What's out of scope, and where to look instead:
 
-- **Go < 1.18**: pre-1.18 pclntab layouts are unsupported. Use [GoReSym](https://github.com/mandiant/GoReSym) for those.
+- **Go < 1.16**: the Go 1.2 to 1.15 pclntab layout is recognized and reported by version (`UnsupportedPclntabVersion`), not read. Use [GoReSym](https://github.com/mandiant/GoReSym) for those.
 - **Generic ELF symbol recovery**: not this tool. Use `eu-unstrip` from elfutils.
 - **Decompilation**: not this tool. This gives you names; a decompiler gives you code.
 
@@ -454,7 +476,7 @@ Known gaps in v1.0:
 
 Work we have not landed in v1.0. Ordered roughly by how often we expect it to come up.
 
-Pre-Go-1.18 pclntab parsing. The Go 1.13 through 1.17 layouts are different enough that the current parser does not even try. GoReSym covers the older corpus; we do not yet. Until we do, that is the gap.
+Pre-Go-1.16 pclntab parsing. The Go 1.2 through 1.15 layout (a two-level functab and no offset header) is different enough that the current parser only names the release. GoReSym covers the older corpus; we do not yet. Until we do, that is the gap.
 
 Free-function signature recovery. Methods ship today (we walk `_type.uncommon().methods` and the itab method tables). Free top-level functions do not appear in either table, so their signatures are absent from a stripped binary unless the compiler emitted a `funcType` for reflection or interface storage. Closing that gap means either reading DWARF when present or recognizing reflective uses and back-resolving.
 

@@ -45,7 +45,7 @@ Single static Rust binary, no runtime dependencies.
 
 ## What the other tools do that unstrip does not
 
-**Pre-Go-1.18 pclntab support.** GoReSym's README states "pclntab parsing: >= Go 1.2" and "moduledata type parsing: >= Go 1.5". unstrip does not parse pre-1.18 layouts. Use GoReSym for older binaries.
+**Pre-Go-1.16 pclntab support.** GoReSym's README states "pclntab parsing: >= Go 1.2" and "moduledata type parsing: >= Go 1.5". unstrip reads Go 1.16 and later; it names the release of a Go 1.2 to 1.15 binary but does not parse it. Use GoReSym for older binaries.
 
 **Long history and ecosystem fit.** Mandiant has shipped GoReSym since 2022; it is the tool most existing analyst workflows already integrate with.
 
@@ -69,7 +69,7 @@ Use-case fit, not a winner-takes-all ranking. Each tool has a shape; pick the on
 
 **Reach for unstrip when** you want method signatures attached to recovered symbols, when you want the data-side analysis surface (`--data-at` with symbolic resolution, `--xref-readers`/`--xref-writers`, itab reachability), when you want all three RE-tool exporters from a single Rust binary, when you need the inlined call stack on a PC lookup, when you want garble-aware behavior with exit-code semantics for CI, or when batch PC resolution (`--addr-file`) matters.
 
-**Reach for GoReSym when** you have pre-Go-1.18 binaries to analyze, when your workflow is already centered on the Mandiant tool, or when you want the deepest type catalog including every primitive instantiation (GoReSym surfaces more catalog entries by counting primitive leaves and synthetic supporting types that unstrip's focused mode omits; pass `--types-full` on unstrip for comparable breadth).
+**Reach for GoReSym when** you have pre-Go-1.16 binaries to analyze, when your workflow is already centered on the Mandiant tool, or when you want the deepest type catalog including every primitive instantiation (GoReSym surfaces more catalog entries by counting primitive leaves and synthetic supporting types that unstrip's focused mode omits; pass `--types-full` on unstrip for comparable breadth).
 
 **Reach for gore when** you're building another Go program that needs to parse Go binaries and you want a library, not a CLI subprocess.
 
