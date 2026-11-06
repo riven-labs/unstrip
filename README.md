@@ -467,14 +467,14 @@ What's out of scope, and where to look instead:
 - **Generic ELF symbol recovery**: not this tool. Use `eu-unstrip` from elfutils.
 - **Decompilation**: not this tool. This gives you names; a decompiler gives you code.
 
-Known gaps in v1.0:
+Known gaps:
 
 - Type recovery surfaces struct package paths as `_pkg_path` (read-and-discarded). Function-type argument types (in/out parameter type pointers) aren't enumerated, you get the count + variadic flag but not the signature types.
 - Free top-level function signatures: the binary records signatures for methods (on types reached at runtime) but not for free top-level functions; their signatures are absent without DWARF.
 
 ## Roadmap
 
-Work we have not landed in v1.0. Ordered roughly by how often we expect it to come up.
+Work we have not landed yet. Ordered roughly by how often we expect it to come up.
 
 Pre-Go-1.16 pclntab parsing. The Go 1.2 through 1.15 layout (a two-level functab and no offset header) is different enough that the current parser only names the release. GoReSym covers the older corpus; we do not yet. Until we do, that is the gap.
 
