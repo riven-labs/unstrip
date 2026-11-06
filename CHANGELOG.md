@@ -7,7 +7,45 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-06
+
+### Breaking changes
+
+- The structs unstrip returns are `#[non_exhaustive]`, so new fields no longer
+  need a major release: `ModuleData`, `ContainerProbe`, `SectionInfo`,
+  `GoBinary`, `Section`, `Function`, `FuncEntry`, `InlineFrame`, `Type`,
+  `StructField`, `InterfaceMethod`, `Itab`, `ItabMethod`, `BuildInfo`, `Module`,
+  `Replace`, `Setting`, `RecoveredMethod`, `CallSite`, `CallEdge`, `XrefNode`,
+  `XrefResult`, `DataXref`, `DataRow`, `ItabMethodEntry`, `GoroutineSpawn`,
+  `InlinedCall`, `CallGraph`, `Node`, `Edge`, `Capability`,
+  `CapabilityReport`, `Fingerprint`, `Components`, `BehavioralFingerprint`,
+  `GarbleReport`, `GarbleVerdict`, `GarbleAssessment`, `Signal`,
+  `ReflectNames`, `DiffReport`, `Pairing`, `GoString`, and `InstallReport`,
+  plus the new `FuncFields`, `LineSpan`, `InlineLeaf`, `OpenDeferInfo`,
+  `StackObject`, and `PointerMaps`. A struct literal or an exhaustive
+  destructuring pattern of any of them no longer compiles outside the crate:
+  use the values the crate returns, and add `..` to patterns. Field access is
+  unchanged.
+- These enums are `#[non_exhaustive]`: `Error`, `moduledata::Layout`,
+  `NameEnc`, `gobin::Container`, `Arch`, `SectionKind`, `types::KindData`,
+  `output::Format`, `export::Target`, `callsites::Target`, `CallKind`,
+  `dataview::As`, `dataview::Symbol`, `dataxref::Kind`, `goroutines::Resolution`,
+  `garble::Verdict`, `diff::MatchKind`, `inline::NodeKind`, `inline::EdgeKind`,
+  and the new `ArgComp` and `OpenDeferFormat`. A `match` on one of them from
+  outside the crate needs a wildcard arm. Constructing their variants is
+  unchanged.
+- `ModuleData` has the new `typedesclen`, `itaboffset`, and `itabsize` fields,
+  `ContainerProbe` the new `declared_size` and `import_count`, and
+  `moduledata::Layout` the new `V127` variant.
+- `moduledata::Layout`'s variants run oldest to newest (`Pre118` first), which
+  changes their discriminants. Code that cast a `Layout` to an integer gets
+  different values.
+
 ### Added
+
+- `Default` for `Type`, `StructField` and `FuncEntry` (and `KindName`,
+  `KindData`), so code that builds these values by hand starts from
+  `Default::default()` and sets the fields it needs.
 
 - Go 1.27 support. Go 1.27 dropped `moduledata.typelinks` and `itablinks`; the
   new `Layout::V127` reads its moduledata (the new `typedesclen`, `itaboffset`,
@@ -57,10 +95,6 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   `ContainerProbe::import_count`, the number of functions a PE imports.
 
 ### Changed
-
-- `ModuleData` and `ContainerProbe` have new public fields, and
-  `moduledata::Layout` has the new `V127` variant. Code that builds either struct
-  with a literal, or matches `Layout` without a wildcard arm, needs updating.
 
 - An ELF whose section header table points outside the file (damaged on purpose,
   or a truncated download) is read from its program headers, as the loader maps
