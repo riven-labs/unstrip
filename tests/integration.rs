@@ -2190,6 +2190,23 @@ fn fat_binary_with_absurd_arch_count_bails_fast() {
 }
 
 #[test]
+fn fat_slice_pointing_at_its_own_header_is_not_unpacked_again() {
+    // One arch slice at offset 0 spanning the whole file: the slice is the fat
+    // header again. Unpacking it as another fat binary recursed until the
+    // stack overflowed. A slice is parsed as a thin Mach-O, so this is an
+    // error. Found by fuzzing.
+    let mut bytes = vec![0xca, 0xfe, 0xba, 0xbe]; // FAT_MAGIC, big-endian
+    bytes.extend_from_slice(&1u32.to_be_bytes()); // nfat_arch
+    bytes.extend_from_slice(&0x0100_0007u32.to_be_bytes()); // CPU_TYPE_X86_64
+    bytes.extend_from_slice(&3u32.to_be_bytes()); // cpusubtype
+    bytes.extend_from_slice(&0u32.to_be_bytes()); // offset: the header itself
+    bytes.extend_from_slice(&64u32.to_be_bytes()); // size: the whole file
+    bytes.extend_from_slice(&0u32.to_be_bytes()); // align
+    bytes.resize(64, 0);
+    assert!(GoBinary::parse(bytes).is_err());
+}
+
+#[test]
 fn rejects_non_go_binary() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let result = GoBinary::open(&path);

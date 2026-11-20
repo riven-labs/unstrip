@@ -11,6 +11,10 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Fixed
 
+- A universal (fat) Mach-O whose arch slice points back at its own header no
+  longer overflows the stack. The selected slice was unpacked as another fat
+  binary, again and again; a slice is now parsed as a thin Mach-O, so such a
+  file is an error.
 - A Go program carried inside another file as data (a dropper's payload, an
   installer, an executable built with a Go binary in its data) is no longer
   read as the file's own code. When the container names no pclntab section,

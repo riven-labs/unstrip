@@ -174,8 +174,11 @@ impl GoBinary {
     pub fn parse(bytes: Vec<u8>) -> Result<Self> {
         // A Mach-O universal (fat) binary holds several arch slices. Select one
         // and parse it as a standalone Mach-O so every offset is consistent.
+        // A slice is a thin Mach-O, so it is parsed as one: a slice that is
+        // itself fat (one pointing back at its own header) is an error here,
+        // not another level of unpacking.
         if let Some(slice) = fat_slice(&bytes) {
-            return Self::parse(slice);
+            return parse_container(slice, true);
         }
         parse_container(bytes, true)
     }
