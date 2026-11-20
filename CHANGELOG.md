@@ -7,6 +7,29 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-20
+
+### Fixed
+
+- A Go program carried inside another file as data (a dropper's payload, an
+  installer, an executable built with a Go binary in its data) is no longer
+  read as the file's own code. When the container names no pclntab section,
+  the scan could stop at the carried program's table, and a zero `textStart`
+  (every Windows build, and Go 1.26 and later everywhere) anchored that
+  function table at the container's `.text`: the carried program's names
+  landed on unrelated machine code. A scanned table that no moduledata in the
+  container references is now checked for positive evidence that it belongs to
+  another image: an ELF, PE, or Mach-O header earlier in the file whose image,
+  parsed on its own, has its pclntab at exactly that offset; a pointer size or
+  PC quantum the container does not use; or entries that land on code without
+  Go's stack-check prologue. Such a table is passed over and the scan resumes,
+  so a Go program that carries another Go program still opens as itself.
+  When no table of the file's own remains, `GoBinary::parse` returns the new
+  `Error::EmbeddedGoImage`, with the carried program's offset, its length when
+  its header is intact (so `bytes[offset..offset + len]` parses on its own),
+  and its GOOS and GOARCH when known. A table nothing references and nothing
+  ties to another image is read as before.
+
 ## [2.0.0] - 2026-11-06
 
 ### Breaking changes
