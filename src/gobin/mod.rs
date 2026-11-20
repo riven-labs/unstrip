@@ -6,6 +6,7 @@ use goblin::Object;
 use crate::error::Error;
 use crate::Result;
 
+mod embedded;
 pub(crate) mod segments;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,14 +161,23 @@ impl GoBinary {
         Self::parse(bytes)
     }
 
+    /// Parse a Go binary from its bytes.
+    ///
+    /// When the container names no pclntab section, the pclntab is found by
+    /// scanning, and the scan can land on a Go program carried inside the file
+    /// as data (a dropper's payload, an installer, a test executable built with
+    /// a Go sample in it). Mapping that table onto the container's own code
+    /// would describe the wrong machine code, so a scanned pclntab that nothing
+    /// in the container references and that positive evidence ties to another
+    /// image is refused with [`Error::EmbeddedGoImage`], which says where the
+    /// embedded program sits and, when its header is intact, how to carve it.
     pub fn parse(bytes: Vec<u8>) -> Result<Self> {
         // A Mach-O universal (fat) binary holds several arch slices. Select one
         // and parse it as a standalone Mach-O so every offset is consistent.
         if let Some(slice) = fat_slice(&bytes) {
             return Self::parse(slice);
         }
-        let parsed = describe(&bytes)?;
-        finish(bytes, parsed)
+        parse_container(bytes, true)
     }
 
     pub fn pclntab_slice(&self) -> &[u8] {
@@ -253,6 +263,51 @@ struct Described {
     /// address (it can sit a page below the real `.text`), so `finish` refines it
     /// from `moduledata.text` when that recovers.
     stripped_sections: bool,
+    /// The pclntab was found by scanning the bytes, not through a named section,
+    /// so it may belong to a Go image carried inside the file (see [`embedded`]).
+    pclntab_scanned: bool,
+}
+
+/// Parse one (non-fat) container. With `check_embedded`, a scanned pclntab is
+/// put through [`embedded::verdict`]; one that belongs to an embedded image is
+/// skipped and the scan resumes, so a Go program that carries another Go
+/// program as data still opens as itself. The image parse that confirms an
+/// embedded header calls this without the check, which bounds the recursion.
+fn parse_container(mut bytes: Vec<u8>, check_embedded: bool) -> Result<GoBinary> {
+    let mut skip: Vec<usize> = Vec::new();
+    let mut embedded_err: Option<Error> = None;
+    loop {
+        let d = match describe(&bytes, &skip) {
+            Ok(d) => d,
+            Err(e) => return Err(embedded_err.unwrap_or(e)),
+        };
+        let scanned = d.pclntab_scanned;
+        let offset = d.pclntab_offset;
+        let bin = match finish(bytes, d) {
+            Ok(bin) => bin,
+            Err(e) => return Err(embedded_err.unwrap_or(e)),
+        };
+        if !check_embedded || !scanned {
+            return Ok(bin);
+        }
+        match embedded::verdict(&bin) {
+            embedded::Verdict::Own => return Ok(bin),
+            // Nothing references the table and nothing ties it to another
+            // image: keep today's reading. Once an earlier candidate proved to
+            // be embedded, though, an unreferenced table is no longer the
+            // likely answer, so it is passed over like the embedded one.
+            embedded::Verdict::Unproven if embedded_err.is_none() => return Ok(bin),
+            embedded::Verdict::Unproven => {}
+            embedded::Verdict::Embedded(e) => {
+                embedded_err.get_or_insert(e);
+            }
+        }
+        if skip.len() + 1 >= embedded::MAX_CANDIDATES {
+            return Err(embedded_err.unwrap_or(Error::NoPclntab));
+        }
+        skip.push(offset);
+        bytes = bin.bytes;
+    }
 }
 
 /// If `bytes` is a Mach-O universal (fat) binary, return the bytes of one arch
@@ -290,19 +345,19 @@ fn fat_slice(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(bytes[off..end].to_vec())
 }
 
-fn describe(bytes: &[u8]) -> Result<Described> {
+fn describe(bytes: &[u8], skip: &[usize]) -> Result<Described> {
     let object = match Object::parse(bytes) {
         Ok(object) => object,
         // goblin walks the section header table as part of its parse, so an ELF
         // whose table points outside the file (damaged on purpose, or cut short)
         // fails here although the loader maps it from its program headers. Read
         // it the loader's way before giving up.
-        Err(e) => return describe_elf_segments(bytes).unwrap_or(Err(Error::Goblin(e))),
+        Err(e) => return describe_elf_segments(bytes, skip).unwrap_or(Err(Error::Goblin(e))),
     };
     match object {
-        Object::Elf(elf) => describe_elf(bytes, elf),
-        Object::Mach(mach) => describe_mach(bytes, mach),
-        Object::PE(pe) => describe_pe(bytes, pe),
+        Object::Elf(elf) => describe_elf(bytes, elf, skip),
+        Object::Mach(mach) => describe_mach(bytes, mach, skip),
+        Object::PE(pe) => describe_pe(bytes, pe, skip),
         _ => Err(Error::UnknownContainer),
     }
 }
@@ -321,7 +376,7 @@ fn elf_arch(e_machine: u16) -> Arch {
 /// [`segments`]): the PT_LOAD segments are the section map, as on a binary
 /// whose section table was stripped, and the pclntab is searched for in their
 /// bytes. None when the bytes are not an ELF with readable program headers.
-fn describe_elf_segments(bytes: &[u8]) -> Option<Result<Described>> {
+fn describe_elf_segments(bytes: &[u8], skip: &[usize]) -> Option<Result<Described>> {
     let seg = segments::read(bytes)?;
     let (sections, text_addr) = segments::sections_from_loads(&seg.loads);
     if sections.is_empty() {
@@ -329,7 +384,7 @@ fn describe_elf_segments(bytes: &[u8]) -> Option<Result<Described>> {
     }
     let little_endian = seg.little_endian;
     Some(
-        locate_pclntab(bytes, &sections, text_addr, little_endian).map(|(off, size)| {
+        locate_pclntab(bytes, &sections, text_addr, little_endian, skip).map(|(off, size)| {
             let addr = addr_for_offset(&sections, off).unwrap_or(0);
             Described {
                 container: Container::Elf,
@@ -342,12 +397,13 @@ fn describe_elf_segments(bytes: &[u8]) -> Option<Result<Described>> {
                 pclntab_addr: addr,
                 text_addr,
                 stripped_sections: true,
+                pclntab_scanned: true,
             }
         }),
     )
 }
 
-fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
+fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>, skip: &[usize]) -> Result<Described> {
     let arch = elf_arch(elf.header.e_machine);
     let little_endian = elf.little_endian;
     let ptr_size = if elf.is_64 { 8 } else { 4 };
@@ -401,10 +457,12 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
         }
     }
 
+    let pclntab_scanned = pcln.is_none();
+
     let (pclntab_offset, pclntab_size, pclntab_addr) = match pcln {
         Some(v) => v,
         None => {
-            let (off, size) = locate_pclntab(bytes, &sections, text_addr, little_endian)?;
+            let (off, size) = locate_pclntab(bytes, &sections, text_addr, little_endian, skip)?;
             let addr = addr_for_offset(&sections, off).unwrap_or(0);
             (off, size, addr)
         }
@@ -421,6 +479,7 @@ fn describe_elf(bytes: &[u8], elf: goblin::elf::Elf<'_>) -> Result<Described> {
         pclntab_addr,
         text_addr,
         stripped_sections,
+        pclntab_scanned,
     })
 }
 
@@ -451,7 +510,7 @@ fn classify_elf_section(name: &str, sh: &goblin::elf::SectionHeader) -> SectionK
     }
 }
 
-fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>) -> Result<Described> {
+fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>, skip: &[usize]) -> Result<Described> {
     let macho = match mach {
         goblin::mach::Mach::Binary(m) => m,
         goblin::mach::Mach::Fat(fat) => {
@@ -514,10 +573,12 @@ fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>) -> Result<Described
         }
     }
 
+    let pclntab_scanned = pcln.is_none();
+
     let (pclntab_offset, pclntab_size, pclntab_addr) = match pcln {
         Some(v) => v,
         None => {
-            let (off, size) = locate_pclntab(bytes, &sections, text_addr, little_endian)?;
+            let (off, size) = locate_pclntab(bytes, &sections, text_addr, little_endian, skip)?;
             let addr = addr_for_offset(&sections, off).unwrap_or(0);
             (off, size, addr)
         }
@@ -536,6 +597,7 @@ fn describe_mach(bytes: &[u8], mach: goblin::mach::Mach<'_>) -> Result<Described
         // Mach-O already maps via segments/load commands, which survive a stripped
         // section table, so there is no program-header refinement step here.
         stripped_sections: false,
+        pclntab_scanned,
     })
 }
 
@@ -560,7 +622,7 @@ fn classify_mach_section(segname: &str, sectname: &str) -> SectionKind {
     }
 }
 
-fn describe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> Result<Described> {
+fn describe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>, skip: &[usize]) -> Result<Described> {
     let arch = match pe.header.coff_header.machine {
         goblin::pe::header::COFF_MACHINE_X86_64 => Arch::X86_64,
         goblin::pe::header::COFF_MACHINE_ARM64 => Arch::Aarch64,
@@ -606,10 +668,12 @@ fn describe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> Result<Described> {
         sections.push(s);
     }
 
+    let pclntab_scanned = pcln.is_none();
+
     let (pclntab_offset, pclntab_size, pclntab_addr) = match pcln {
         Some(v) => v,
         None => {
-            let (off, size) = locate_pclntab(bytes, &sections, text_addr, little_endian)?;
+            let (off, size) = locate_pclntab(bytes, &sections, text_addr, little_endian, skip)?;
             let addr = addr_for_offset(&sections, off).unwrap_or(0);
             (off, size, addr)
         }
@@ -628,6 +692,7 @@ fn describe_pe(bytes: &[u8], pe: goblin::pe::PE<'_>) -> Result<Described> {
         // PE recovers the pclntab structurally and resolves addresses through the
         // section table / image base; no program-header refinement applies.
         stripped_sections: false,
+        pclntab_scanned,
     })
 }
 
@@ -678,6 +743,7 @@ fn scan_for_magic(
     bytes: &[u8],
     sections: &[Section],
     little_endian: bool,
+    skip: &[usize],
 ) -> Result<(usize, usize)> {
     // Include the Go 1.16/1.17 magic: a PE carries no named pclntab section, so a
     // 1.16/1.17 Windows binary is only reachable through this scan, and pcheader_at
@@ -708,7 +774,9 @@ fn scan_for_magic(
             // the full structural check -- climbing table offsets inside the
             // file, textStart in a text section -- rejects the stray match so the
             // scan continues to the real header, or reports none found.
-            if pcheader_at(bytes, offset, sections, little_endian).is_some() {
+            if !skip.contains(&offset)
+                && pcheader_at(bytes, offset, sections, little_endian).is_some()
+            {
                 best = Some(best.map(|b| b.min(offset)).unwrap_or(offset));
                 break;
             }
@@ -730,17 +798,19 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// pcHeader magic to a per-build random value, so on a Windows PE (which has no
 /// named pclntab section) the magic scan finds nothing; the structural scan
 /// recovers the header by its shape instead. The same fallback helps any
-/// container whose section table was stripped.
+/// container whose section table was stripped. Header offsets in `skip` were
+/// already judged to belong to an embedded image and are passed over.
 fn locate_pclntab(
     bytes: &[u8],
     sections: &[Section],
     text_addr: u64,
     little_endian: bool,
+    skip: &[usize],
 ) -> Result<(usize, usize)> {
-    if let Ok(found) = scan_for_magic(bytes, sections, little_endian) {
+    if let Ok(found) = scan_for_magic(bytes, sections, little_endian, skip) {
         return Ok(found);
     }
-    if let Ok(found) = scan_for_pcheader(bytes, sections, text_addr, little_endian) {
+    if let Ok(found) = scan_for_pcheader(bytes, sections, text_addr, little_endian, skip) {
         return Ok(found);
     }
     // Both scans look for the Go 1.18+ pcHeader shape. Before reporting "no
@@ -843,6 +913,7 @@ fn scan_for_pcheader(
     sections: &[Section],
     _text_addr: u64,
     little_endian: bool,
+    skip: &[usize],
 ) -> Result<(usize, usize)> {
     for s in sections {
         // The pclntab lives in read-only or data regions (on PE it sits inside
@@ -860,8 +931,10 @@ fn scan_for_pcheader(
         // pcHeaders are pointer-aligned; step by 8 from an aligned start.
         let mut off = start + if start % 8 == 0 { 0 } else { 8 - start % 8 };
         while off + 8 <= end {
-            if let Some(size) = pcheader_at(bytes, off, sections, little_endian) {
-                return Ok((off, size));
+            if !skip.contains(&off) {
+                if let Some(size) = pcheader_at(bytes, off, sections, little_endian) {
+                    return Ok((off, size));
+                }
             }
             off += 8;
         }
@@ -1226,6 +1299,7 @@ mod tests {
             pclntab_addr: 0,
             text_addr: 0x1000,
             stripped_sections: false,
+            pclntab_scanned: false,
         };
         let bin = finish(vec![0u8; 100], d).expect("finish");
         let s = &bin.sections[0];

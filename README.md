@@ -464,6 +464,7 @@ Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, L
 What's out of scope, and where to look instead:
 
 - **Go < 1.16**: the Go 1.2 to 1.15 pclntab layout is recognized and reported by version (`UnsupportedPclntabVersion`), not read. Use [GoReSym](https://github.com/mandiant/GoReSym) for those.
+- **A Go program carried as data** (a dropper's payload, an installer, an executable with a Go binary in its data): reported, not read in place. When the file's only pclntab is the carried program's, parsing fails with `EmbeddedGoImage`, which gives its file offset, its length when its header is intact, and its GOOS/GOARCH; parse `bytes[offset..offset + len]` to read it.
 - **Generic ELF symbol recovery**: not this tool. Use `eu-unstrip` from elfutils.
 - **Decompilation**: not this tool. This gives you names; a decompiler gives you code.
 

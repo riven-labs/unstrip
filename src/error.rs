@@ -61,4 +61,42 @@ pub enum Error {
 
     #[error("xrefs: {0}")]
     Xrefs(String),
+
+    /// The only pclntab found belongs to a Go program carried inside the file
+    /// as data (a dropper's payload, an installer, an executable built with a
+    /// Go binary in its resources), not to the file's own code. Reading it
+    /// against the container would attach the embedded program's function names
+    /// to unrelated machine code, so the parse stops here instead.
+    ///
+    /// When the embedded image's own ELF, PE, or Mach-O header was found, `len`
+    /// is its extent and `bytes[offset..offset + len]` parses on its own with
+    /// [`crate::GoBinary::parse`]. Without a header, `offset` is the embedded
+    /// pclntab's file offset and `len` is `None`.
+    #[error(
+        "embedded Go program at file offset 0x{offset:x}{}, carried as data rather than run as this file's code",
+        platform_suffix(.goos.as_deref(), .goarch.as_deref())
+    )]
+    #[non_exhaustive]
+    EmbeddedGoImage {
+        /// File offset of the embedded image's header, or of its pclntab when
+        /// no header was found.
+        offset: usize,
+        /// Byte length of the embedded image, when its header was found.
+        len: Option<usize>,
+        /// File offset of the embedded program's pclntab.
+        pclntab_offset: usize,
+        /// The embedded program's `GOOS` (from its buildinfo or its container
+        /// format), when known.
+        goos: Option<String>,
+        /// The embedded program's `GOARCH`, when known.
+        goarch: Option<String>,
+    },
+}
+
+fn platform_suffix(goos: Option<&str>, goarch: Option<&str>) -> String {
+    match (goos, goarch) {
+        (Some(os), Some(arch)) => format!(" ({os}/{arch})"),
+        (Some(one), None) | (None, Some(one)) => format!(" ({one})"),
+        (None, None) => String::new(),
+    }
 }

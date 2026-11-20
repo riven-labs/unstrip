@@ -221,10 +221,12 @@ impl<'a> Pclntab<'a> {
             }
         }
 
-        // textStart in the header is the runtime-resolved VA. If the binary sets
-        // it to zero (rare, but happens for some shared objects), fall back to the
-        // .text section address from the container. Only meaningful for Modern;
-        // Pre118 functab entries are absolute, so text_start stays 0 there.
+        // textStart in the header is the runtime-resolved VA. Windows builds and
+        // Go 1.26+ store zero (the runtime takes the base from moduledata), so fall
+        // back to the .text section address from the container. That anchor is
+        // only right for the container's own table: GoBinary::parse refuses a
+        // scanned table that belongs to an embedded image. Only meaningful for
+        // Modern; Pre118 functab entries are absolute, so text_start stays 0 there.
         let text_start = if layout == Layout::Modern && text_start == 0 {
             bin.text_addr
         } else {
@@ -281,7 +283,7 @@ impl<'a> Pclntab<'a> {
 
     /// Entry PC (absolute VA) of functab index `i`. In 1.18+ the entry is a u32
     /// offset from textStart; in 1.16/1.17 it is an absolute uintptr.
-    fn functab_addr(&self, i: usize) -> Option<u64> {
+    pub(crate) fn functab_addr(&self, i: usize) -> Option<u64> {
         // Checked throughout: a hostile header can set nfunc or the offsets so that
         // funcdata_off + i*stride overflows usize. Overflow resolves to None (no
         // such entry), never a panic or a wrapped offset.
