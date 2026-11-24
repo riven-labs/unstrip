@@ -72,35 +72,79 @@ fn quote_py(s: &str) -> String {
 }
 
 const GHIDRA_HEADER: &str = concat!(
-    "# unstrip: interface dispatch resolver for Ghidra.\n",
-    "# Place the current cursor on a virtual CALL site (CALL qword ptr [reg + offset]\n",
-    "# on amd64; BLR / BR through a register on arm64) and run this script.\n",
-    "# It prints every recovered (interface, concrete impl) pair whose method\n",
-    "# table contains the dereferenced offset.\n",
+    "# unstrip: interface dispatch resolver for Ghidra (PyGhidra, Python 3).\n",
+    "# Place the cursor on an interface method call and run this script. Go\n",
+    "# loads the method from the itab into a register and calls through it:\n",
+    "#   amd64: MOV RDX, qword ptr [RDX + 0x18] ... CALL RDX\n",
+    "#   arm64: ldr x1, [x0, #0x18] ... blr x1\n",
+    "# The load offset gives the itab method slot, and the script prints every\n",
+    "# recovered (interface, concrete impl) pair with a method in that slot.\n",
     "# @category unstrip\n",
     "# @menupath Tools.Unstrip.Resolve dispatch at cursor\n",
+    "# @runtime PyGhidra\n",
+    "\n",
+    "from ghidra.program.model.lang import Register\n",
+    "from ghidra.program.model.scalar import Scalar\n",
     "\n",
 );
 
 const GHIDRA_FOOTER: &str = concat!(
-    "def _slot_for_instruction(insn):\n",
-    "    # CALL qword ptr [REG + offset] on amd64. The offset is the\n",
-    "    # method slot * 8. Pull the integer scalar from the second operand.\n",
-    "    if insn is None:\n",
+    "# itab.fun starts after inter, _type and the 4-byte hash: 24 bytes on\n",
+    "# 64-bit in every Go release.\n",
+    "FUN_OFFSET = 24\n",
+    "PTR_SIZE = 8\n",
+    "# How far back from the call to look for the load, within straight-line code.\n",
+    "MAX_LOOKBACK = 64\n",
+    "\n",
+    "def _base_and_offset(objs):\n",
+    "    regs = [o for o in objs if isinstance(o, Register)]\n",
+    "    scalars = [o for o in objs if isinstance(o, Scalar)]\n",
+    "    if len(regs) != 1 or len(scalars) != 1:\n",
     "        return None\n",
-    "    n = insn.getNumOperands()\n",
-    "    for i in range(n):\n",
-    "        objs = insn.getOpObjects(i)\n",
-    "        for o in objs:\n",
-    "            try:\n",
-    "                v = o.getValue()\n",
-    "                if isinstance(v, (int, long)) and v >= 0 and v < 4096 and v % 8 == 0:\n",
-    "                    return int(v) // 8\n",
-    "            except Exception:\n",
-    "                continue\n",
+    "    return regs[0], int(scalars[0].getValue())\n",
+    "\n",
+    "def _itab_load_offset(insn):\n",
+    "    # The offset of the itab method load that feeds the call at insn.\n",
+    "    if insn is None or insn.getMnemonicString().upper() not in ('CALL', 'BLR'):\n",
+    "        return None\n",
+    "    objs = list(insn.getOpObjects(0))\n",
+    "    # CALL qword ptr [reg + off]: the load is the call itself.\n",
+    "    direct = _base_and_offset(objs)\n",
+    "    if direct is not None:\n",
+    "        return direct\n",
+    "    if len(objs) != 1 or not isinstance(objs[0], Register):\n",
+    "        return None\n",
+    "    target = objs[0].getBaseRegister()\n",
+    "    prev = insn.getPrevious()\n",
+    "    for _ in range(MAX_LOOKBACK):\n",
+    "        if prev is None or not prev.getFlowType().isFallthrough():\n",
+    "            return None\n",
+    "        written = [o for o in prev.getResultObjects() if isinstance(o, Register)]\n",
+    "        if any(r.getBaseRegister() == target for r in written):\n",
+    "            if prev.getMnemonicString().upper() not in ('MOV', 'LDR'):\n",
+    "                return None\n",
+    "            return _base_and_offset(list(prev.getOpObjects(1)))\n",
+    "        prev = prev.getPrevious()\n",
     "    return None\n",
     "\n",
+    "def _slot_for_instruction(insn):\n",
+    "    load = _itab_load_offset(insn)\n",
+    "    if load is None:\n",
+    "        return None\n",
+    "    base, off = load\n",
+    "    # A load through the stack pointer is a spilled value, not an itab, and\n",
+    "    # an offset inside the itab header is a closure call (offset 0) or data.\n",
+    "    sp = currentProgram.getCompilerSpec().getStackPointer()\n",
+    "    if sp is not None and base.getBaseRegister() == sp.getBaseRegister():\n",
+    "        return None\n",
+    "    if off < FUN_OFFSET or (off - FUN_OFFSET) % PTR_SIZE != 0:\n",
+    "        return None\n",
+    "    return (off - FUN_OFFSET) // PTR_SIZE\n",
+    "\n",
     "def _resolve():\n",
+    "    if currentProgram.getDefaultPointerSize() != PTR_SIZE:\n",
+    "        print('unstrip dispatch: only 64-bit programs are supported')\n",
+    "        return\n",
     "    addr = currentAddress\n",
     "    if addr is None:\n",
     "        print('unstrip dispatch: no cursor address')\n",
@@ -109,9 +153,9 @@ const GHIDRA_FOOTER: &str = concat!(
     "    insn = listing.getInstructionAt(addr)\n",
     "    slot = _slot_for_instruction(insn)\n",
     "    if slot is None:\n",
-    "        print('unstrip dispatch: instruction at %s is not a register-indirect call we recognize' % addr)\n",
+    "        print('unstrip dispatch: instruction at %s is not a call through an itab method load we recognize' % addr)\n",
     "        return\n",
-    "    print('unstrip dispatch: looking for itabs with a method at slot %d (offset 0x%x)' % (slot, slot * 8))\n",
+    "    print('unstrip dispatch: looking for itabs with a method at slot %d (offset 0x%x)' % (slot, FUN_OFFSET + slot * PTR_SIZE))\n",
     "    hits = 0\n",
     "    for it in ITABS:\n",
     "        for m in it['methods']:\n",
@@ -126,3 +170,38 @@ const GHIDRA_FOOTER: &str = concat!(
     "\n",
     "_resolve()\n",
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::itabs::ItabMethod;
+
+    #[test]
+    fn script_maps_the_itab_load_offset_to_the_method_slot() {
+        let itab = Itab {
+            addr: 0x601c00,
+            interface_name: "io.Writer".into(),
+            concrete_name: "*os.File".into(),
+            methods: vec![ItabMethod {
+                interface_method: "Write".into(),
+                concrete_fn: 0x4b9020,
+            }],
+            hash: 0,
+            incomplete: false,
+            stdlib_interface: Some("io.Writer"),
+        };
+        let script = write_ghidra(&[itab]);
+        assert!(
+            script.contains("{'slot': 0, 'name': 'Write', 'fn': 0x4b9020}"),
+            "the itab's first method is slot 0"
+        );
+        // MOV RDX, [RDX + 0x18] loads fun[0]: slot = (0x18 - 24) / 8.
+        assert!(script.contains("FUN_OFFSET = 24\n"));
+        assert!(script.contains("return (off - FUN_OFFSET) // PTR_SIZE\n"));
+        assert!(
+            !script.contains("long"),
+            "PyGhidra runs Python 3, which has no `long`"
+        );
+        assert!(script.contains("# @runtime PyGhidra\n"));
+    }
+}
