@@ -195,10 +195,7 @@ fn scan_amd64(
             if let Some(&spawner_name) = spawners.get(&target_va) {
                 let (target_addr, target_name, resolution) =
                     resolve_amd64_target(bin, text_bytes, text_start_va, i, by_addr);
-                let (file, line) = pcln
-                    .lookup(call_site_va)
-                    .map(|f| (f.file, f.start_line))
-                    .unwrap_or((None, None));
+                let (file, line) = pcln.pc_position(call_site_va);
                 out.push(GoroutineSpawn {
                     call_site: call_site_va,
                     spawner: spawner_name.to_string(),
@@ -300,10 +297,7 @@ fn scan_arm64(
             if let Some(&spawner_name) = spawners.get(&target_va) {
                 let (target_addr, target_name, resolution) =
                     resolve_arm64_target(bin, text_bytes, text_start_va, i, by_addr);
-                let (file, line) = pcln
-                    .lookup(call_site_va)
-                    .map(|f| (f.file, f.start_line))
-                    .unwrap_or((None, None));
+                let (file, line) = pcln.pc_position(call_site_va);
                 out.push(GoroutineSpawn {
                     call_site: call_site_va,
                     spawner: spawner_name.to_string(),

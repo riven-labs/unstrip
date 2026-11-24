@@ -213,6 +213,44 @@ fn funcinfo_fixtures_across_releases() {
         assert_eq!(frames[0].line, Some(40), "{ctx}");
         assert!(frames[0].file.as_deref().unwrap().ends_with("funcinfo.go"));
         assert_eq!(frames[1].name, "main.main");
+        assert_eq!(
+            frames[1].line,
+            Some(56),
+            "{ctx}: the physical frame is at the call site"
+        );
+        assert!(frames[1].file.as_deref().unwrap().ends_with("funcinfo.go"));
+    }
+}
+
+#[test]
+fn a_pc_reports_its_own_line_not_the_function_start() {
+    // main.main opens on line 52 and its body runs 53..=58. Every PC the line
+    // table covers resolves to that span's line, through pc_position and the
+    // physical frame of lookup_inline alike.
+    for (suffix, minor) in VERSIONS {
+        let Some(bin) = fixture(&format!("funcinfo.go{suffix}.stripped")) else {
+            continue;
+        };
+        let ctx = format!("go1.{minor}");
+        let p = pclntab(&bin);
+        let funcs = p.functions_with_offsets().expect("functab");
+        let main = func(&funcs, "main.main");
+        let mut body_pcs = 0;
+        for s in p.line_table(&main) {
+            for pc in [s.pc_lo, s.pc_hi - 1] {
+                let (file, line) = p.pc_position(pc);
+                assert_eq!(file.as_deref(), Some(s.file.as_str()), "{ctx}: 0x{pc:x}");
+                assert_eq!(line, Some(s.line), "{ctx}: 0x{pc:x}");
+                let frames = p.lookup_inline(&bin, pc);
+                if frames.len() == 1 {
+                    assert_eq!(frames[0].line, Some(s.line), "{ctx}: 0x{pc:x}");
+                    if (53..=58).contains(&s.line) {
+                        body_pcs += 1;
+                    }
+                }
+            }
+        }
+        assert!(body_pcs > 0, "{ctx}: no PC on a body line of main.main");
     }
 }
 

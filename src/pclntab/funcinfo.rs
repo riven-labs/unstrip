@@ -597,6 +597,24 @@ impl<'a> Pclntab<'a> {
         self.inline_chain(func, pc).into_iter().next()
     }
 
+    /// The source file and line of absolute `pc` itself, from the pcfile and
+    /// pcln tables: the position `go tool objdump` prints for the instruction.
+    /// Inside inlined code it is the inlined callee's position. This is not
+    /// [`Function::start_line`](super::Function::start_line), which is the line
+    /// of the function's `func` keyword.
+    pub fn pc_position(&self, pc: u64) -> (Option<String>, Option<u32>) {
+        let Some(func) = self.func_entry_at(pc) else {
+            return (None, None);
+        };
+        let Some(fields) = self.func_fields(&func) else {
+            return (None, None);
+        };
+        let Some(off) = self.pc_offset(&func, pc) else {
+            return (None, None);
+        };
+        self.file_line_at_off(&fields, off, func.size)
+    }
+
     /// The decoded FUNCDATA_ArgInfo of `func` (Go 1.17+): one component per
     /// input parameter, after the generic dictionary, in declaration order. It
     /// covers inputs only (results are not recorded) and the compiler stops

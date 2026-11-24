@@ -1953,6 +1953,35 @@ fn goroutines_surfaces_unresolved_call_sites() {
 }
 
 #[test]
+fn goroutine_spawn_line_is_the_go_statement() {
+    // featureset.go: `func run` is on line 74, its `go func(...)` on line 80.
+    let Some(path) = fixture("featureset.go126.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let spawns = unstrip::goroutines::find_spawns(&bin, &pcln).expect("scan");
+    let in_run: Vec<_> = spawns
+        .iter()
+        .filter(|s| {
+            pcln.lookup(s.call_site)
+                .is_some_and(|f| f.name == "main.run")
+        })
+        .collect();
+    assert_eq!(in_run.len(), 1, "one go statement in main.run");
+    assert!(in_run[0]
+        .file
+        .as_deref()
+        .unwrap()
+        .ends_with("featureset.go"));
+    assert_eq!(
+        in_run[0].line,
+        Some(80),
+        "the go statement, not func run on 74"
+    );
+}
+
+#[test]
 fn symbols_as_elf_writes_valid_symtab() {
     // Rewrite a real stripped binary with --symbols-as elf and verify the
     // resulting file has a valid Elf64_Sym table containing every function

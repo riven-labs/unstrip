@@ -52,6 +52,8 @@ pub struct Function {
     pub address: u64,
     pub name: String,
     pub file: Option<String>,
+    /// Line of the function's `func` keyword. The line of a PC inside the
+    /// function is [`Pclntab::pc_position`].
     pub start_line: Option<u32>,
 }
 
@@ -424,14 +426,22 @@ impl<'a> Pclntab<'a> {
     /// absolute and no gofunc is needed. Funcdata is read through the binary
     /// this table was parsed from; `_bin` is kept for API compatibility.
     ///
+    /// Each frame carries the source line at its own PC, as a Go traceback
+    /// prints it: the PC's line for the innermost frame and the call site for
+    /// each frame outside it.
+    ///
     /// [`with_gofunc`]: Self::with_gofunc
     pub fn lookup_inline(&self, _bin: &crate::gobin::GoBinary, pc: u64) -> Vec<InlineFrame> {
         let Some(leaf) = self.lookup(pc) else {
             return Vec::new();
         };
         let mut frames = Vec::new();
+        // The physical frame's position is the outermost call site when the PC
+        // is in inlined code, and the PC's own otherwise.
+        let mut physical_pc = pc;
         if let Some(func) = self.func_entry_at(pc) {
             for (i, call) in self.inline_chain(&func, pc).into_iter().enumerate() {
+                physical_pc = call.parent_pc;
                 let name = if call.func_name.is_empty() {
                     format!("inlined@{i}")
                 } else {
@@ -445,10 +455,11 @@ impl<'a> Pclntab<'a> {
                 });
             }
         }
+        let (file, line) = self.pc_position(physical_pc);
         frames.push(InlineFrame {
             name: leaf.name,
-            file: leaf.file,
-            line: leaf.start_line,
+            file: file.or(leaf.file),
+            line,
             inlined: false,
         });
         frames
