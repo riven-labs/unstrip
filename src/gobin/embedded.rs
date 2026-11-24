@@ -356,8 +356,8 @@ mod tests {
     use super::*;
 
     /// Write a Go 1.20 pcHeader at `off` with a zero textStart (as Windows and Go
-    /// 1.26+ builds store it) and `nfunc` functab entries, the first function
-    /// `0x1000` bytes into the text and each next one `0x40` further.
+    /// 1.26+ builds store it) and `nfunc` functab entries, the first function at
+    /// the start of the text and each next one `0x40` further.
     fn put_pcheader(b: &mut [u8], off: usize, ptrsize: u8, nfunc: usize) {
         b[off..off + 4].copy_from_slice(&[0xf1, 0xff, 0xff, 0xff]);
         b[off + 6] = 1; // quantum
@@ -373,7 +373,7 @@ mod tests {
         let functab = off + 0xe0;
         for i in 0..nfunc {
             let at = functab + i * 8;
-            b[at..at + 4].copy_from_slice(&(0x1000 + 0x40 * i as u32).to_le_bytes());
+            b[at..at + 4].copy_from_slice(&(0x40 * i as u32).to_le_bytes());
         }
     }
 
@@ -428,8 +428,9 @@ mod tests {
     #[test]
     fn a_table_over_foreign_code_is_reported_and_one_over_go_code_is_not() {
         // No image header anywhere: only the code the table maps onto can tell.
-        // The container's one segment maps the file at 0x400000, so function i
-        // sits at file offset 0x1000 + 0x40 * i.
+        // The container's one segment maps the file at 0x400000 and its text
+        // starts past the 0x1000-byte header reserve, so function i sits at file
+        // offset 0x1000 + 0x40 * i.
         let mut b = segments::tests::elf64_bogus_shoff(0x4000);
         put_pcheader(&mut b, 0x200, 8, 64);
         for i in 0..64 {

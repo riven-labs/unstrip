@@ -1068,13 +1068,27 @@ fn finish(bytes: Vec<u8>, d: Described) -> Result<GoBinary> {
     // when it stores zero, so a coarse base shifts every recovered address by that
     // gap. `moduledata.text` is the authoritative text start (`runtime.text`),
     // recovered without the section table by scanning the data for the pclntab
-    // pointer. Refine from it when it parses to a plausible value; otherwise keep
-    // the segment base, which is still far closer than zero. Best-effort: a failure
-    // here never breaks parsing.
+    // pointer. Refine from it when it parses to a plausible value. Best-effort: a
+    // failure here never breaks parsing.
+    //
+    // Without a moduledata (a file cut short before it), use where Go's linker
+    // puts `.text`: it reserves the first 0x1000 bytes of the file for the ELF
+    // headers (ELFRESERVE in cmd/link) and starts `.text` right after, in the
+    // segment that maps those headers. Otherwise keep the segment base.
     if d.stripped_sections {
-        if let Ok(md) = crate::moduledata::ModuleData::locate(&bin) {
-            if md.text != 0 {
-                bin.text_addr = md.text;
+        match crate::moduledata::ModuleData::locate(&bin) {
+            Ok(md) if md.text != 0 => bin.text_addr = md.text,
+            _ => {
+                const ELF_RESERVE: usize = 0x1000;
+                let header_text = bin.sections.iter().find(|s| {
+                    s.kind == SectionKind::Text
+                        && s.addr == bin.text_addr
+                        && s.file_offset < ELF_RESERVE
+                        && ELF_RESERVE < s.file_offset.saturating_add(s.file_size)
+                });
+                if let Some(s) = header_text {
+                    bin.text_addr = s.addr + (ELF_RESERVE - s.file_offset) as u64;
+                }
             }
         }
     }

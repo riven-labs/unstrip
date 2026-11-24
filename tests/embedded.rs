@@ -249,3 +249,38 @@ fn no_go_fixture_is_reported_as_embedded() {
     }
     eprintln!("checked {seen} fixtures");
 }
+
+#[test]
+fn a_go_elf_cut_short_before_its_moduledata_reads_as_itself() {
+    // A truncated download or a carved sample loses the section table and the
+    // moduledata, which sits after the pclntab. Nothing references the table
+    // then, but it is still the file's own, at its own addresses.
+    for name in ["hello.linux-amd64.stripped", "hello.linux-arm64.stripped"] {
+        let Some(elf) = fixture(name) else {
+            continue;
+        };
+        let full = GoBinary::parse(elf.clone()).unwrap();
+        let expected = function_table(&full);
+        let pclntab_end = full.pclntab_offset + full.pclntab_size;
+        let md = unstrip::moduledata::ModuleData::locate(&full).unwrap();
+        assert!(
+            pclntab_end < md.file_offset,
+            "{name}: moduledata follows the pclntab"
+        );
+        for cut in [
+            pclntab_end,
+            (pclntab_end + md.file_offset) / 2,
+            md.file_offset + 8,
+        ] {
+            let bin = match GoBinary::parse(elf[..cut].to_vec()) {
+                Ok(bin) => bin,
+                Err(e) => panic!("{name} cut at 0x{cut:x}: {e}"),
+            };
+            assert_eq!(
+                function_table(&bin),
+                expected,
+                "{name} cut at 0x{cut:x}: same functions at the same addresses"
+            );
+        }
+    }
+}
