@@ -7,9 +7,74 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
-## [2.0.1] - 2026-11-20
+## [2.0.1] - 2026-11-25
+
+### Added
+
+- `Pclntab::pc_position`: the file and line of a PC from the pcfile and pcln
+  tables, the position `go tool objdump` prints.
+- `output::go_version`: the Go release from the build info, with the byte scan
+  as a fallback.
+- `XrefResult::walked_edges`: the call edges a `callers_of` or `callees_from`
+  traversal walked.
+
+### Changed
+
+- `--detect-garble` exits 3 when the file cannot be read as a Go binary. A
+  clean binary still exits 1, garbled 0, indeterminate 2.
+- `dataxref::referenced_addresses` returns an error on an architecture it has
+  no code scanner for (anything but little-endian amd64) instead of an empty
+  set.
+- `--show value` hides only the `(*T).M` wrappers the compiler generates for
+  value-receiver methods, which the binary marks as wrappers. It used to hide
+  every `pkg.(*T).M` function, methods declared on `*T` included (888 of the
+  962 it hid on a Go 1.26 test program). `--show pointer` keeps only those
+  wrappers, and `(itab thunk)` marks only wrappers.
 
 ### Fixed
+
+- An ELF cut short between the end of its pclntab and its moduledata is read
+  as itself again, at its own addresses. 2.0.1's embedded-program check
+  reported it as a carried Go program and printed nothing, and 2.0.0 read it
+  with every function 0x1000 bytes low: without the section table the text
+  address was the start of the segment holding the ELF headers.
+- `--addr`, `--addr-file` and `--goroutines` report the line of the PC, not
+  the line of the function's `func` keyword. `Pclntab::lookup_inline` gave the
+  physical frame `Function::start_line`; it now reads the line table, at the
+  outermost call site when the PC is in inlined code.
+- The stdlib-interface list matches itab names again. Since 2.0.0 itab
+  interface names carry no leading `*`, so nothing matched:
+  `Itab::stdlib_interface` was always `None`, `--info` never printed its stdlib
+  section, and `--fingerprint --behavioral` gave every binary the same hash.
+- `--info`, `--buildinfo` and `--detect-garble` take the Go version from the
+  build info. They took the first `go1.` string in the file, which is often
+  another package's version string (`go1.23.0H9` for a go1.26.3 build).
+- `--types-full` (`types::Mode::Full`) keeps only candidates that read as real
+  type descriptors. The linear scan emitted hundreds of entries per binary
+  with control-character names and sizes past 1e9.
+- `--itabs` prints `(reachability unknown)` on architectures without a code
+  scanner, instead of `(unreachable)` for every itab.
+- `--xrefs --callgraph` honors `--from`, `--to` and `--depth`.
+- The IDA, Ghidra and Binary Ninja scripts declare structs under C
+  identifiers (`errors_errorString`). Ghidra's C parser rejected the dotted Go
+  names: 524 of 540 declarations failed on a Go 1.26 test program, and all
+  parse now. Two Go types that map to one identifier are told apart by the Go
+  type hash.
+- `--dispatch-resolver ghidra` finds the method slot the way Go compiles an
+  interface call: a load from the itab into a register, then a call through
+  it. It took the offset from the call instruction and divided by 8, which
+  never matched Go code and was off by the three-word itab header, and it
+  used Python 2's `long`, so under PyGhidra the slot was never found. The
+  script now walks back from the call to the load, subtracts the 24-byte
+  header, and runs on Python 3.
+- `unstrip -h` printed version 1.0.0.
+- README, COMPARISON.md and USAGE.md claims that did not hold: other tools and
+  signatures (IDA applies reflection prototypes to methods; GoReSym emits
+  function-type signatures without attaching them), goroutine resolution
+  rates, the `--xrefs` timing, `delve` reading `--symbols-as` output, the
+  `--diff` pairing passes, `--fingerprint --behavioral` being garble-stable,
+  Mach-O and fuzzing coverage, and the missing `--reflect-names` and
+  `--degarble` entries.
 
 - A universal (fat) Mach-O whose arch slice points back at its own header no
   longer overflows the stack. The selected slice was unpacked as another fat
