@@ -541,6 +541,31 @@ fn detects_garble_on_garbled_binary() {
 }
 
 #[test]
+fn go_version_comes_from_build_info_not_the_first_match() {
+    // Plant a version-shaped decoy in the ELF header padding, ahead of
+    // everything else in the file. The byte scan takes the first release
+    // it meets; the build info names the toolchain.
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
+    let mut bytes = std::fs::read(&path).expect("read");
+    let recorded = BuildInfo::parse(&GoBinary::parse(bytes.clone()).unwrap())
+        .expect("buildinfo")
+        .go_version;
+    let decoy = b"\x00go1.23.0H9\x00";
+    bytes[0x800..0x800 + decoy.len()].copy_from_slice(decoy);
+    let bin = GoBinary::parse(bytes).expect("parse");
+    assert_eq!(
+        unstrip::output::detect_go_version(&bin.bytes).as_deref(),
+        Some("go1.23.0")
+    );
+    assert_eq!(
+        unstrip::output::go_version(&bin).as_deref(),
+        Some(recorded.as_str())
+    );
+}
+
+#[test]
 fn inline_stack_recovers_three_deep_inlining() {
     // The inline3 fixture has main.anchor calling level1 calling level2 calling
     // level3, all inlinable. PCs inside the level3 body must produce a four-

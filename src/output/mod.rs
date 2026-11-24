@@ -344,40 +344,76 @@ fn looks_garbled(name: &str) -> bool {
     !pkg_part.contains('/') && pkg_part.len() < 16 && last_dot.len() < 8
 }
 
-/// Scans the binary for the Go build version string. Go embeds it as
-/// `runtime.buildVersion`'s data, prefixed by the marker byte sequence
-/// "\xff Go buildinf:" in the buildinfo section. This is a quick scan, not
-/// a full buildinfo parse, we just want the version string.
+/// The Go release that built `bin`, such as `go1.22.3`.
+///
+/// Read from the build info, which records `runtime.buildVersion`. When the
+/// build info does not parse, the bytes are scanned with [`detect_go_version`].
+/// None when the build info holds no release (garble blanks it) or the scan
+/// finds none.
+pub fn go_version(bin: &GoBinary) -> Option<String> {
+    match crate::buildinfo::BuildInfo::parse(bin) {
+        // The recorded string can carry experiments after a space
+        // (`go1.21.0 X:nocoverageredesign`); the release is the first word.
+        Ok(bi) => {
+            let first = bi.go_version.split_whitespace().next()?;
+            if release_len(first.as_bytes()) != Some(first.len()) {
+                return None;
+            }
+            Some(first.to_string())
+        }
+        Err(_) => detect_go_version(&bin.bytes),
+    }
+}
+
+/// Scans the bytes for the first string that starts with a Go release (`go1.N`,
+/// `go1.N.P`, `go1.NrcK`, `go1.NbetaK`) and returns the release. Go packs its
+/// string literals end to end with no terminator, so the text after the release
+/// belongs to the next literal (`go1.16.4hijackedhttp`) and is dropped. This is
+/// a fallback for a binary whose build info does not parse: the first match can
+/// be a version string some package carries, not the toolchain's. Prefer
+/// [`go_version`].
 pub fn detect_go_version(bytes: &[u8]) -> Option<String> {
     let marker = b"go1.";
     for (i, w) in bytes.windows(marker.len()).enumerate() {
         if w != marker {
             continue;
         }
-        let end = bytes[i..]
-            .iter()
-            .position(|&b| !is_version_char(b))
-            .map(|p| i + p)
-            .unwrap_or(bytes.len());
-        if end - i < 5 || end - i > 20 {
+        let Some(len) = release_len(&bytes[i..]) else {
             continue;
-        }
-        // A release number follows "go1."; garble can leave strings like
-        // "go1.go" behind after it overwrites the real version.
-        if !bytes[i + marker.len()].is_ascii_digit() {
-            continue;
-        }
-        let s = std::str::from_utf8(&bytes[i..end]).ok()?;
-        // Sanity: must have at least one dot after "go1."
-        if s[3..].chars().filter(|&c| c == '.').count() >= 1 {
-            return Some(s.to_string());
-        }
+        };
+        return std::str::from_utf8(&bytes[i..i + len])
+            .ok()
+            .map(str::to_string);
     }
     None
 }
 
-fn is_version_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'+'
+/// Length of the Go release string at the start of `b`: `go1.`, the minor
+/// version, then a `.patch` or an `rcN`/`betaN` suffix, if any.
+fn release_len(b: &[u8]) -> Option<usize> {
+    let digits = |from: usize| {
+        let n = b
+            .get(from..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        (n > 0 && n <= 4).then_some(from + n)
+    };
+    if !b.starts_with(b"go1.") {
+        return None;
+    }
+    let end = digits(4)?;
+    let rest = &b[end..];
+    if rest.starts_with(b".") {
+        return digits(end + 1).or(Some(end));
+    }
+    for tag in [&b"rc"[..], b"beta"] {
+        if rest.starts_with(tag) {
+            return digits(end + tag.len()).or(Some(end));
+        }
+    }
+    Some(end)
 }
 
 #[cfg(test)]
@@ -405,6 +441,26 @@ mod tests {
         assert_eq!(
             detect_go_version(b"go1.go\x00go1.21.4\x00").as_deref(),
             Some("go1.21.4")
+        );
+    }
+
+    #[test]
+    fn a_release_run_into_the_next_literal_is_cut_at_the_release() {
+        assert_eq!(
+            detect_go_version(b"\x00go1.23.0H9\x00").as_deref(),
+            Some("go1.23.0")
+        );
+        assert_eq!(
+            detect_go_version(b"go1.16.4hijackedhttp\x00").as_deref(),
+            Some("go1.16.4")
+        );
+        assert_eq!(
+            detect_go_version(b"\x00go1.22rc2\x00").as_deref(),
+            Some("go1.22rc2")
+        );
+        assert_eq!(
+            detect_go_version(b"\x00go1.21beta1 ").as_deref(),
+            Some("go1.21beta1")
         );
     }
 }

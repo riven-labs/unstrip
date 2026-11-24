@@ -9,7 +9,7 @@ use unstrip::export;
 use unstrip::gobin::GoBinary;
 use unstrip::itabs;
 use unstrip::moduledata::ModuleData;
-use unstrip::output::{detect_garble, detect_go_version, write_functions, write_info, Format};
+use unstrip::output::{detect_garble, go_version, write_functions, write_info, Format};
 use unstrip::pclntab::Pclntab;
 use unstrip::types;
 
@@ -496,7 +496,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.detect_garble {
         let funcs = pcln.functions().unwrap_or_default();
-        let version = detect_go_version(&bin.bytes);
+        let version = go_version(&bin);
         let assessment =
             unstrip::garble::assess(&funcs, version.as_deref(), pcln.magic_is_official());
         match args.format {
@@ -531,7 +531,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.info {
-        let version = detect_go_version(&bin.bytes);
+        let version = go_version(&bin);
         let funcs = pcln.functions().unwrap_or_default();
         let report = detect_garble(&funcs, version.as_deref(), pcln.magic_is_official());
         maybe_warn_garbled(
@@ -1384,7 +1384,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.buildinfo {
         let funcs_for_warn = pcln.functions().unwrap_or_default();
-        let version_for_warn = detect_go_version(&bin.bytes);
+        let version_for_warn = go_version(&bin);
         maybe_warn_garbled(
             &funcs_for_warn,
             version_for_warn.as_deref(),
