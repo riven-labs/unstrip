@@ -31,7 +31,7 @@ unstrip ./bin --format ghidra > apply.py    # Python script for Ghidra Script Ma
 
 ## Why unstrip
 
-Method signatures attached to recovered symbols. Every method on a type the Go linker emitted a `_type` record for gets a Go-syntax signature like `(_0 []uint8) (int, error)` appended to its name in the default listing, in `--addr` lookups, and in the Ghidra/IDA/Binja exporter comments. Other Go-binary symbol-recovery tools do not recover signatures at all.
+Method signatures attached to recovered symbols. Every method on a type the Go linker emitted a `_type` record for gets a Go-syntax signature like `(_0 []uint8) (int, error)` appended to its name in the default listing, in `--addr` lookups, and in the Ghidra/IDA/Binja exporter comments. IDA applies reflection prototypes to methods too; GoReSym, gore, and redress do not attach signatures to functions (see [COMPARISON.md](./COMPARISON.md)).
 
 Inlined call stacks, not just leaf functions. `--addr` returns the full inline tree from `FUNCDATA_InlTree`, so a PC that lands in inlined code resolves to the chain that led there, with file and line for every frame.
 
@@ -39,7 +39,7 @@ Built-in Ghidra, IDA, and Binary Ninja Python exporters via `--format`, with C s
 
 `--data-at <addr>` interprets bytes at a data address through the recovered itab table and function table. Iface headers resolve to concrete type plus dispatched method body. Slice headers expand to ptr/len/cap with the data pointer symbolized. String headers print a quoted preview.
 
-`--xref <symbol>` enumerates every call site targeting a function, on amd64 and arm64 binaries alike. Direct CALL/BL coverage is solid on both. Indirect dispatch through itab method slots is reported alongside direct calls with the resolved itab and method name carried inline.
+`--xref <symbol>` enumerates every call site targeting a function, on amd64 and arm64 binaries alike. Direct CALL/BL coverage is solid on both. Indirect dispatch is reported only in the `CALL [rip+itab+slot]` form, which stock Go codegen does not emit (see [Targeted xref by symbol](#targeted-xref-by-symbol)).
 
 A 1.4 MiB static Rust binary, no runtime deps. Go 1.16 through 1.27, ELF + Mach-O + PE, amd64 + arm64 + 386, PIE + non-PIE, one tool.
 
@@ -54,7 +54,7 @@ A short verified-only table follows. The longer differences and the "when to rea
 | CLI vs library                          | CLI              | CLI        | CLI      | library  |
 | Go 1.18 through 1.25                    | yes              | yes        | yes      | yes      |
 | Pre-Go-1.18                             | Go 1.16+         | Go 1.2+    | Go 1.5+  | Go 1.5+  |
-| Method-signature recovery               | yes              | no         | no       | no       |
+| Signatures attached to functions        | yes              | no         | no       | no       |
 | Ghidra + IDA + Binja exporters          | yes              | yes        | no       | no       |
 | Inlined call stacks on PC lookup        | yes              | unverified | no       | no       |
 | `--data-at` symbolic data inspection    | yes              | no         | no       | no       |
@@ -166,10 +166,10 @@ The `(interface, concrete)` pairs the runtime uses for dispatch, what your dynam
 
 ```
 $ unstrip ./samples/myapp --itabs --filter Writer
-0x00000000005a18c8  *io.Writer        =>  *os.File
-0x00000000005a1948  *io.Writer        =>  *bytes.Buffer
-0x00000000005a19a8  *io.Writer        =>  *gzip.Writer
-0x00000000005a1a08  *io.StringWriter  =>  *bufio.Writer
+0x00000000005a18c8  io.Writer        =>  *os.File
+0x00000000005a1948  io.Writer        =>  *bytes.Buffer
+0x00000000005a19a8  io.Writer        =>  *gzip.Writer
+0x00000000005a1a08  io.StringWriter  =>  *bufio.Writer
 ```
 
 ### Reverse PC lookup, with inline call stacks
@@ -203,7 +203,9 @@ $ unstrip ./samples/myapp --format ghidra > apply.py
 # In Ghidra: Window -> Script Manager -> Run apply.py
 ```
 
-Function names sanitize down to valid disassembler labels; the original Go name (with parens, brackets, generics arguments) is preserved as a function comment.
+The Ghidra script is Python 3 (`@runtime PyGhidra`), so Ghidra has to be started with PyGhidra (`support/pyghidraRun`); Ghidra 12 ships no Jython.
+
+Function names sanitize down to valid disassembler labels; the original Go name (with parens, brackets, generics arguments) is preserved as a function comment. Struct names become C identifiers (`errors.errorString` is declared as `errors_errorString`). The declarations carry sizes and offsets, not Go types: integer and pointer fields get a C type of the right width (pointers are `void *`), and strings, slices, interfaces, and nested structs are byte arrays of their size.
 
 For a menu-item install instead of running the script every time:
 
@@ -216,7 +218,7 @@ A Binary Ninja installer (`--install-plugin binja`) drops the wrapper into the B
 
 ### Bake symbols into a runnable binary
 
-`--symbols-as elf` writes a new ELF with a populated `.symtab` + `.strtab` built from the recovered functions. The result is a strict superset of the input that still runs, but `nm`, `gdb`, `objdump --syms`, `perf`, `addr2line`, eBPF stack traces, and `delve` all see the names.
+`--symbols-as elf` writes a new ELF with a populated `.symtab` + `.strtab` built from the recovered functions. The result is a strict superset of the input that still runs, but `nm`, `gdb`, `objdump --syms`, `perf`, `addr2line`, and eBPF stack traces see the names. `delve` does not: it needs DWARF, which this does not write.
 
 ```
 $ nm helm
@@ -235,27 +237,27 @@ $ gdb -q helm.symbols -ex 'info functions main.main' -ex quit
 0x00000000027f53a0  main.main.func1
 ```
 
-Use `--in-place --yes` to overwrite the input file. Today supports ELF64 little-endian only; Mach-O and PE rewrite ships later.
+Use `--in-place --yes` to overwrite the input file. `--symbols-as pe` does the same for PE. ELF32 (386, arm), big-endian ELF, and Mach-O are not supported.
 
 ### Port symbols between builds
 
-`--diff <OLD_BINARY>` is a name-port helper, not a structural binary differ. It pairs functions across two builds in two passes: first by exact address match (`identical`), then by exact Go symbol name at a new address (`renamed`). Everything else falls into `added` or `removed`. It does not hash basic blocks, fingerprint control-flow graphs, or follow functions across inlining, splitting, or compiler-driven renames. If a function was inlined away, renamed by the toolchain, or restructured, this tool will report it as `removed` plus `added` rather than matching it.
+`--diff <OLD_BINARY>` is a name-port helper, not a structural binary differ. It pairs functions across two builds in two passes: first by recovered Go symbol name (`identical` at the same address, `moved` at a new one), then, for what is left, by a masked-code signature that is unique on both sides (`renamed`: same code, different name). Everything else falls into `added` or `removed`. It does not hash basic blocks, fingerprint control-flow graphs, or follow functions across inlining, splitting, or compiler-driven renames. If a function was inlined away or restructured, this tool will report it as `removed` plus `added` rather than matching it. Two garble builds of the same source with different seeds pair poorly: every name is a different hash, and on a Go 1.27 test build the code pass matched none of 2,112 functions.
 
-For real structural diffing across optimization and inlining changes, reach for BinDiff or Diaphora. `--diff` here exists for the narrow but common case where you annotated v1.0 in your disassembler, v1.1 just shipped, and you want the symbol names you already recovered to land on the obvious counterparts in the new build:
+For real structural diffing across optimization and inlining changes, reach for BinDiff or Diaphora. `--diff` here exists for the narrow case where you want each function of the new build paired with its counterpart in the old one, and the old build's recovered names carried over:
 
 ```
 $ unstrip ./malware-v1.1.bin --diff ./malware-v1.0.bin
-old:        4687 functions
+old:        4699 functions
 new:        4823 functions
 
 identical:  4421
-renamed:    198
-moved addr: 12 (same address, different name)
+moved:      12 (same name, new address)
+renamed:    198 (same code, different name)
 added:      192 (in new, not in old)
 removed:    68 (in old, not in new)
 ```
 
-Pair with `--port-symbols ida|ghidra|binja` to emit a script that renames every paired function in the new binary using whatever name it had in the old one:
+Pair with `--port-symbols ida|ghidra|binja` to emit a script that renames every paired function in the new binary using the name unstrip recovered for it in the old one. The names come from the old binary's pclntab, not from an annotated database, so they only add information where the new build's own names are hashed or missing:
 
 ```
 $ unstrip ./malware-v1.1.bin --diff ./malware-v1.0.bin --port-symbols ghidra > port.py
@@ -279,7 +281,7 @@ crypto/tls.(*signOpts).Sign -> crypto/rsa.SignPSS
 $ unstrip ./helm --xrefs --callgraph > graph.dot && dot -Tsvg graph.dot -o graph.svg
 ```
 
-250,000+ caller-callee edges enumerated on a 65 MiB helm binary in under 300 ms. Direct calls only; virtual dispatch through itabs lives in `--itabs`.
+On a 61 MiB kubectl, `--xrefs` takes about 2 s end to end, 24 MB of text output included. Direct calls only; virtual dispatch through itabs lives in `--itabs`.
 
 ### Targeted xref by symbol
 
@@ -312,25 +314,27 @@ $ unstrip ./sliver-client --goroutines | head
 0x000000000049c4ae  runtime.newproc         -> (target unresolved)                     sync/waitgroup.go:235
 ```
 
-When the target resolves (40-50% of sites in real binaries), you see exactly which function the goroutine runs. When the LEA pattern doesn't match the heuristic (the funcval came from a register or stack slot), the call site and source file:line still show so you can open the source. amd64 and arm64 only today.
+When the target resolves, you see exactly which function the goroutine runs. Resolution is partial: on a Go 1.26 test program 4 of 34 sites resolve on amd64 and 7 of 34 on arm64; a funcval built in a heap object several instructions before the call is not followed. When the LEA pattern doesn't match the heuristic (the funcval came from a register or stack slot), the call site and source file:line still show so you can open the source. amd64 and arm64 only today.
 
 ### Dispatch resolver for Ghidra
 
-`--dispatch-resolver ghidra` emits a Ghidra Python script that embeds the recovered itab dispatch table and, when invoked at a virtual call site, prints every `(interface, concrete impl)` pair whose method table contains the dereferenced slot:
+`--dispatch-resolver ghidra` emits a Ghidra Python script that embeds the recovered itab dispatch table and, when invoked at an interface method call, prints every `(interface, concrete impl)` pair with a method in the slot that call reads:
 
 ```
 $ unstrip ./target --dispatch-resolver ghidra > unstrip_dispatch.py
-# Inside Ghidra: Script Manager -> add unstrip_dispatch.py
-# Place cursor on `CALL qword ptr [reg + 0x18]` and run the action.
+# Inside Ghidra (started with PyGhidra): Script Manager -> add unstrip_dispatch.py
+# Place the cursor on the CALL RDX that follows MOV RDX, qword ptr [RDX + 0x18]
+# and run the script.
 # Output (console):
-#   unstrip dispatch: looking for itabs with a method at slot 3 (offset 0x18)
+#   unstrip dispatch: looking for itabs with a method at slot 0 (offset 0x18)
 #     io.Writer => *os.File :: Write -> 0x4b9020
 #     io.Writer => *bytes.Buffer :: Write -> 0x4c1a40
-#     io.Writer => *bufio.Writer :: Write -> 0x4cd900
-#   unstrip dispatch: 3 candidates
+#     error => *errors.errorString :: Error -> 0x4a3e60
+#     ...
 ```
 
-This turns virtual dispatch through an itab, the worst class of stripped-Go reversing target, into a five-second lookup. The slot-offset heuristic pulls the integer scalar from the call's second operand; combined with the itab table unstrip already recovers, you get the candidate target set without re-running any analysis. amd64 today; arm64 BLR/BR-through-register support is straightforward to add once we have a test fixture.
+Go compiles an interface call as a load from the itab (`MOV reg, [itab + 0x18 + 8*slot]` on amd64, `ldr xN, [xM, #0x18 + 8*slot]` on arm64) followed by a call through the register. The script walks back from the call, within straight-line code, to that load and turns its offset into the method slot. It does not know which itab the register holds, so it lists every itab with a method in that slot; the method name and signature narrow it down. 64-bit programs only. The script is Python 3 and needs a PyGhidra-launched Ghidra.
+
 
 ### Capabilities
 
@@ -357,7 +361,7 @@ $ unstrip ./sliver-client --capabilities
   Protocol Buffers
 ```
 
-The rules cover HTTP servers and clients, TLS, X.509, RSA/ECDSA/AES, AWS/GCP/Azure SDKs, Kubernetes client, Docker/containerd, SQL/SQLite/Postgres/Redis/MongoDB, JSON/proto/YAML, file and child-process operations, raw sockets, and known offensive frameworks (Sliver). Each match includes up to five evidence strings showing exactly which recovered type or function triggered it.
+The rules cover HTTP servers and clients, TLS, X.509, RSA/ECDSA/AES, AWS/GCP/Azure SDKs, Kubernetes client, Docker/containerd, SQL/SQLite/Postgres/Redis/MongoDB, JSON/proto/YAML, file and child-process operations, raw sockets, and known offensive frameworks (Sliver). Each match includes up to five evidence strings showing exactly which recovered type or function triggered it. Rules match on names, so they report what the binary links, not what it runs: stdlib-only hits such as `syscall.Socket` fire in any program that uses `net`, and on a garbled build the hashed names hide most framework rules (the Sliver rule does not fire on a garbled Sliver implant).
 
 ### Triage hints
 
@@ -365,15 +369,15 @@ The rules cover HTTP servers and clients, TLS, X.509, RSA/ECDSA/AES, AWS/GCP/Azu
 
 ```
 stdlib interface implementations:
-  *error            142
-  *io.Reader         47
-  *io.Writer         38
-  *http.Handler      14
-  *net.Conn          11
-  *crypto.Signer      3
+  error          142
+  io.Reader      47
+  io.Writer      38
+  http.Handler   14
+  net.Conn       11
+  crypto.Signer  3
 ```
 
-(`--fingerprint --behavioral` exists for hashing that counter into a SHA-256; coarser than `--fingerprint` and not garble-stable, included for completeness.)
+(`--fingerprint --behavioral` hashes those counts into a SHA-256. Programs that implement the same stdlib interfaces the same number of times hash alike, so it clusters coarsely; garble renames the interfaces, so a garbled build does not hash like its plain build.)
 
 ### Inlined call graph (library API)
 
@@ -456,21 +460,21 @@ What works:
 - Interface to concrete type recovery via itabs
 - Module dependency tree, build settings, VCS info
 - PC-to-symbol reverse lookup with inlined call stacks
-- Direct CALL/BL call-site enumeration on amd64 and arm64; indirect-itab dispatch reporting alongside
+- Direct CALL/BL call-site enumeration on amd64 and arm64
 - IDA, Ghidra, Binary Ninja, JSON, and human-readable output
 
-Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, Linux ELF and Windows PE 386, on Go versions in the supported range. Mach-O code paths are exercised by unit tests; the integration suite has no macOS-built fixture yet. Open an issue if it breaks. Garble heuristic detection works and structural recovery survives the default mode (string literals, inline trees, and the funcdata array all stay walkable).
+Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, Linux ELF and Windows PE 386, and Mach-O amd64 and arm64 (cross-compiled darwin builds in the integration suite), on Go versions in the supported range. Open an issue if it breaks. Garble heuristic detection works and structural recovery survives the default mode (string literals, inline trees, and the funcdata array all stay walkable).
 
 What's out of scope, and where to look instead:
 
-- **Go < 1.16**: the Go 1.2 to 1.15 pclntab layout is recognized and reported by version (`UnsupportedPclntabVersion`), not read. Use [GoReSym](https://github.com/mandiant/GoReSym) for those.
+- **Go < 1.16**: the Go 1.2 to 1.15 pclntab layout is recognized and reported by version (`UnsupportedPclntabVersion`), not read. Windows builds from Go 1.8 and older are not recognized as Go at all (`no pclntab section found`). Use [GoReSym](https://github.com/mandiant/GoReSym) for those.
 - **A Go program carried as data** (a dropper's payload, an installer, an executable with a Go binary in its data): reported, not read in place. When the file's only pclntab is the carried program's, parsing fails with `EmbeddedGoImage`, which gives its file offset, its length when its header is intact, and its GOOS/GOARCH; parse `bytes[offset..offset + len]` to read it.
 - **Generic ELF symbol recovery**: not this tool. Use `eu-unstrip` from elfutils.
 - **Decompilation**: not this tool. This gives you names; a decompiler gives you code.
 
 Known gaps:
 
-- Type recovery surfaces struct package paths as `_pkg_path` (read-and-discarded). Function-type argument types (in/out parameter type pointers) aren't enumerated, you get the count + variadic flag but not the signature types.
+- Type recovery reads struct package paths and discards them, so two types with one name in different packages (`sync.Mutex` and `internal/sync.Mutex`) print the same name.
 - Free top-level function signatures: the binary records signatures for methods (on types reached at runtime) but not for free top-level functions; their signatures are absent without DWARF.
 
 ## Roadmap
@@ -500,9 +504,9 @@ What we do:
 
 What we do not claim:
 
-- We have not run a structured fuzzing campaign against the pclntab and moduledata parsers. The bounds-checking discipline above is the substitute today; a real fuzz runner is post-launch work.
+- `fuzz/` holds cargo-fuzz targets for the container parser and the recovery passes, but we do not run a fuzzing campaign in CI. The bounds-checking discipline above is the main defense.
 - Garble-obfuscated inputs are detected and flagged, but garble's full transform surface evolves; an obfuscator update that goes further than current behavior may produce output we mis-parse before we patch.
-- Mach-O code paths are exercised by unit tests, not by a full integration fixture matrix yet.
+- Mach-O is covered by cross-compiled darwin amd64 and arm64 fixtures, not by binaries built on macOS or a full version matrix.
 
 If you find a crash, an out-of-bounds read, or any other safety issue: see [SECURITY.md](./SECURITY.md) for the private reporting contact.
 
@@ -523,4 +527,4 @@ Contact: mohamed@riven-labs.com.
 
 ---
 
-A [Riven Labs](https://github.com/riven-labs) project.
+A [Riven Labs](https://github.com/riven-labs) project. unstrip is the metadata engine relift, Riven's Go decompiler, is built on.

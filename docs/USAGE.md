@@ -40,6 +40,10 @@ Printable string literals from the binary's read-only data regions (`.rodata` / 
 
 Matches the recovered types, itabs, and functions against a curated pattern set and reports what the binary appears to do: HTTP server, AWS S3 client, child-process spawn, raw socket, Sliver implant, and so on. First-pass triage answer to "what does this thing do?".
 
+### `--reflect-names`
+
+Recovers the table garble keeps so that reflection still returns original names, and prints each obfuscated -> original pair. On a binary without one it says so. Pass `--degarble` to apply the names to other output.
+
 ### `--fingerprint`
 
 Stable structural sha256 over the user-package surface: functions, types, itabs, deps. Same source rebuilt with different flags or on a different host produces the same hash. Useful for clustering malware families across recompiles.
@@ -83,7 +87,7 @@ Batch reverse-lookup. Reads PCs from a file (one per line; `#`-comments allowed,
 
 ### `--diff <OLD_BINARY>`
 
-Compares the binary you're running unstrip on against an older build passed here, reports identical / renamed / added / removed counts. Pair with `--port-symbols` to emit a script that renames functions in the new binary to whatever names they had in the old one.
+Compares the binary you're running unstrip on against an older build passed here, reports identical / moved / renamed / added / removed counts. Pair with `--port-symbols` to emit a script that renames functions in the new binary to whatever names they had in the old one.
 
 ### `--detect-garble`
 
@@ -95,8 +99,9 @@ Runs the garble obfuscation heuristic and prints the verdict and its signals. In
 
 These flags only make sense alongside one of the analysis modes above.
 
-- `--types-full`: with `--types`, also surface every type-header-shaped entry in the `[md.types, md.etypes)` region the focused walk missed.
-- `--behavioral`: with `--fingerprint`, hash only the stdlib-interface implementation-count vector. Coarser, but garble-stable.
+- `--types-full`: with `--types`, also surface every type descriptor in the `[md.types, md.etypes)` region the focused walk missed. A candidate is kept only when its header holds together (alignment, kind, size and pointer data for the kind, a printable name, references inside the region).
+- `--behavioral`: with `--fingerprint`, hash only the stdlib-interface implementation-count vector. Coarser. Not garble-stable: garble renames the interfaces, so a garbled build hashes differently from its plain build.
+- `--degarble`: relabel hashed names from garble's recovered reflected-name table (see `--reflect-names`), where known. Applies to function, type, and itab output.
 - `--rebase <DELTA>`: with `--addr`, subtract this offset (the `actual_load_base - preferred_load_base` delta) so you can pass a runtime PC instead of a link-time VA. Hex (`0x` prefix) or decimal.
 - `--data-as <KIND>`: with `--data-at`, the interpretation. See `--data-at` above.
 - `--data-len <N>` / `--data-count <N>`: with `--data-at`, bytes vs records. Mutually exclusive. The actual read is clamped to the containing section's file-backed range.
@@ -107,7 +112,7 @@ These flags only make sense alongside one of the analysis modes above.
 - `--max-nodes <N>`: with `--xrefs --from`/`--to`, BFS node cap so a deep traversal on a large binary cannot blow memory. Default 5000. Output includes a `truncated` flag in JSON or a warning line in text when the cap is hit.
 - `--callgraph`: with `--xrefs`, emit Graphviz dot format. With `--from` or `--to`, only the edges that traversal walks to `--depth`. Pipe to `dot -Tsvg -o callgraph.svg`.
 - `--goroutines-show <KIND>`: with `--goroutines`, restrict by resolution state. `all` (default), `resolved`, or `unresolved`. The `unresolved` set is the one worth eyeballing in a disassembler.
-- `--no-itab-reachability`: with `--itabs`, skip the `(reachable)/(unreachable)` annotation. Useful on large binaries where the scan is not free, or for scripted consumers that prefer the raw JSON shape.
+- `--no-itab-reachability`: with `--itabs`, skip the `(reachable)/(unreachable)` annotation. On architectures without a code scanner (anything but amd64) the annotation is `(reachability unknown)`. Useful on large binaries where the scan is not free, or for scripted consumers that prefer the raw JSON shape.
 
 ---
 
@@ -127,7 +132,7 @@ This is the destructive surface. By default unstrip writes a new file next to th
 
 ### `--symbols-as <elf|pe>`
 
-Writes a new binary with a populated symbol table built from the recovered functions. For ELF the result has a synthetic `.symtab` + `.strtab` so `nm`, `gdb`, `objdump --syms`, `perf`, eBPF stack traces, and `delve` see the symbols. For PE the result has a populated COFF symbol table referenced from `IMAGE_FILE_HEADER` so `dumpbin /symbols` and WinDbg pick it up. Pass the format that matches the input container.
+Writes a new binary with a populated symbol table built from the recovered functions. For ELF the result has a synthetic `.symtab` + `.strtab` so `nm`, `gdb`, `objdump --syms`, `perf`, and eBPF stack traces see the symbols (`delve` needs DWARF and does not). ELF input must be little-endian ELF64; ELF32 (386, arm) is refused. For PE the result has a populated COFF symbol table referenced from `IMAGE_FILE_HEADER` so `dumpbin /symbols` and WinDbg pick it up. Pass the format that matches the input container.
 
 - `-o, --output <PATH>`: write the result here. Default: `<input>.symbols` next to the input.
 - `--in-place`: overwrite the input file. Refuses to run without `--yes`. Mutually exclusive with `--output`.
@@ -143,8 +148,8 @@ Drops a wrapper plugin into the user's RE-tool plugin directory. IDA gets a menu
 
 ### `--dispatch-resolver <ghidra>`
 
-Emits a Ghidra script that, when invoked at a virtual call site (cursor on a `CALL [reg + slot*8]` instruction), prints every recovered itab whose method table contains the dereferenced slot. Useful for de-virtualizing dispatch in a stripped Go program inside Ghidra. Only Ghidra is supported today.
+Emits a Ghidra script (Python 3, PyGhidra) that, when invoked at an interface method call (cursor on the `CALL reg` or `blr xN` that follows the itab method load), finds that load, turns its offset into the method slot (`(offset - 0x18) / 8`), and prints every recovered itab with a method in that slot. 64-bit programs only. Useful for de-virtualizing dispatch in a stripped Go program inside Ghidra. Only Ghidra is supported today.
 
 ### `--port-symbols <ida|ghidra|binja>`
 
-With `--diff`, emit a port-symbols script for the chosen RE tool instead of the text/json report. The script applies the names from the OLD binary at their new addresses in the binary you're running unstrip on. Useful for tracking a malware family across rebuilds: name everything in v1 inside your disassembler, then port the names into v2 mechanically.
+With `--diff`, emit a port-symbols script for the chosen RE tool instead of the text/json report. The script applies the names unstrip recovered from the OLD binary's pclntab at the paired addresses in the binary you're running unstrip on. It does not read names you added in a disassembler database. Functions pair by name, then by unique masked code (see `--diff`), so two garble builds with different seeds pair poorly.

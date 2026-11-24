@@ -15,7 +15,8 @@ If a categorical claim reads stale against the current upstream, open an issue. 
 
 Sourced from each tool's README and repository as of late May 2026. Verifiable by visiting the linked repos.
 
-**Method-signature recovery.** Every method on a type the Go linker emitted a `_type` record for gets a Go-syntax signature appended to its name: `(_0 []uint8) (int, error)` for `*os.File.Write`, `() string` for `*errors.errorString.Error`, and so on. Parameter names are not in the binary (positional placeholders preserve the shape). Recovery covers every interface-method implementation plus any type reached through reflection or stored as `any`. GoReSym, gore, and redress do not recover signatures.
+**Method signatures attached to recovered symbols.** Every method on a type the Go linker emitted a `_type` record for gets a Go-syntax signature appended to its name: `(_0 []uint8) (int, error)` for `*os.File.Write`, `() string` for `*errors.errorString.Error`, and so on. Parameter names are not in the binary (positional placeholders preserve the shape). Recovery covers every interface-method implementation plus any type reached through reflection or stored as `any`. GoReSym, gore, and redress do not attach signatures to functions. Two of them do recover signatures in other forms: GoReSym emits C typedefs for function types since [PR #79](https://github.com/mandiant/GoReSym/pull/79) (merged June 2026) without applying them to function symbols, and GoReSym and redress print interface method signatures in their type listings. IDA is the exception among disassemblers: since [7.7 SP1](https://docs.hex-rays.com/release-notes/7_7sp1) its Go support applies "reflection function prototypes to methods when available".
+
 
 **`--data-at <addr>` with symbolic interpretation.** Walks bytes at a data address through the recovered itab table, function table, and section map. Modes for raw bytes, qwords with symbolization, Go interface headers (resolved to concrete type with the dispatched method body address inline), slice headers, and Go string headers with quoted previews.
 
@@ -31,11 +32,11 @@ Sourced from each tool's README and repository as of late May 2026. Verifiable b
 
 **`--dispatch-resolver ghidra`.** Emits a Ghidra script that, when invoked at a virtual call site, prints every recovered itab whose method table contains the dereferenced slot.
 
-**`--symbols-as elf|pe`** rewrites the binary with a synthetic ELF `.symtab`+`.strtab` or COFF symbol table so `nm`, `gdb`, `objdump --syms`, `perf`, eBPF stack traces, and `delve` see the recovered names.
+**`--symbols-as elf|pe`** rewrites the binary with a synthetic ELF `.symtab`+`.strtab` or COFF symbol table so `nm`, `gdb`, `objdump --syms`, `perf`, and eBPF stack traces see the recovered names.
 
 **`--detect-garble` with exit-code contract** (0 garbled, 1 clean, 2 indeterminate, 3 error). Useful as a CI gate.
 
-**`--fingerprint --behavioral`** over the stdlib-interface implementation-count vector. Garble-stable, useful for clustering rebuilds.
+**`--fingerprint --behavioral`** over the stdlib-interface implementation-count vector. A coarse clustering signal; not garble-stable, since garble renames the interfaces.
 
 **arm64 in `--xref`.** Direct-CALL recognition on arm64 covers the BL instruction with sign-extended 26-bit offsets; indirect-itab dispatch covers the canonical `LDR Xt, [Xn, #slot]; BLR Xt` pair. amd64 paths are fully covered. Other RE tools in this list have not extended their static call-site scanners to arm64.
 
