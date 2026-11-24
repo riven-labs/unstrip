@@ -737,6 +737,35 @@ fn fingerprint_differs_across_distinct_binaries() {
 }
 
 #[test]
+fn stdlib_interfaces_are_recognized_on_real_itabs() {
+    // Every program that prints through fmt has an io.Writer itab for *os.File.
+    // The behavioral fingerprint hashes the per-interface counts, so it has
+    // something to hash and two different programs hash differently.
+    let mut hashes = Vec::new();
+    for name in ["hello.linux-amd64.stripped", "featureset.go126.stripped"] {
+        let Some(path) = fixture(name) else {
+            return;
+        };
+        let bin = GoBinary::open(&path).expect("open");
+        let md = ModuleData::locate(&bin).expect("moduledata");
+        let all = itabs::recover_all(&bin, &md).expect("itabs");
+        assert!(
+            all.iter().any(|it| it.interface_name == "io.Writer"
+                && it.concrete_name == "*os.File"
+                && it.stdlib_interface == Some("io.Writer")),
+            "{name}: io.Writer => *os.File is a stdlib interface"
+        );
+        let bfp = unstrip::fingerprint::compute_behavioral_from(&all);
+        assert!(bfp.interface_count > 0, "{name}: counts are not empty");
+        hashes.push(bfp.sha256);
+    }
+    assert_ne!(
+        hashes[0], hashes[1],
+        "different interface surfaces hash differently"
+    );
+}
+
+#[test]
 fn recovers_symbols_from_go_1_18() {
     let Some(path) = fixture("hello.go118.stripped") else {
         return;

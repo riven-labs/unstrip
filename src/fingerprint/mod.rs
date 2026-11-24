@@ -68,7 +68,7 @@ pub fn compute(bin: &GoBinary, pcln: &Pclntab<'_>) -> Result<Fingerprint> {
 /// collide. Use it as a clustering signal, not a unique ID.
 ///
 /// Garble caveat: garble v0.13+ also rewrites stdlib interface type names
-/// (e.g. `*io.Writer` becomes `*vGj9_a_I.GzonM4C`), so a garbled rebuild
+/// (e.g. `io.Writer` becomes `vGj9_a_I.GzonM4C`), so a garbled rebuild
 /// does NOT produce the same behavioral hash as its un-garbled source. The
 /// behavioral fingerprint clusters within obfuscation cohorts (all
 /// non-garbled builds of one family, or all garbled builds of one family),

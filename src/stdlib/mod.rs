@@ -1,9 +1,9 @@
 //! Standard-library interface recognition.
 //!
 //! Stripped Go binaries don't expose interface names by package path; they
-//! expose them as fully-qualified type names like `*io.Writer` or
-//! `*net.Conn`. We carry a baked-in list of well-known stdlib interfaces
-//! so we can classify itab entries and produce behavioral summaries:
+//! expose them by the runtime type name, package name then type name, like
+//! `io.Writer` or `net.Conn`. We carry a baked-in list of well-known stdlib
+//! interfaces so we can classify itab entries and produce behavioral summaries:
 //! "this binary implements `io.Reader` 47 times, `net.Conn` 14 times."
 //!
 //! The list is maintained by hand. Add entries when a new stdlib interface
@@ -14,94 +14,94 @@ use std::collections::HashMap;
 use crate::itabs::Itab;
 
 /// Curated list of stdlib interfaces worth tracking for behavioral
-/// classification. Names match what unstrip recovers via type lookup
-/// (typically with a leading `*` because itab `inter` pointers reference
-/// the pointer-to-interfacetype).
+/// classification. Names match the interface names itab recovery reports: the
+/// package name rather than its import path (`driver.Valuer`), with no leading
+/// `*`.
 pub const STDLIB_INTERFACES: &[&str] = &[
     // io
-    "*io.Reader",
-    "*io.Writer",
-    "*io.Closer",
-    "*io.ReadWriter",
-    "*io.ReadCloser",
-    "*io.WriteCloser",
-    "*io.ReadWriteCloser",
-    "*io.Seeker",
-    "*io.ReaderAt",
-    "*io.WriterAt",
-    "*io.ReaderFrom",
-    "*io.WriterTo",
-    "*io.StringWriter",
-    "*io.ByteReader",
-    "*io.ByteScanner",
-    "*io.RuneReader",
-    "*io.RuneScanner",
+    "io.Reader",
+    "io.Writer",
+    "io.Closer",
+    "io.ReadWriter",
+    "io.ReadCloser",
+    "io.WriteCloser",
+    "io.ReadWriteCloser",
+    "io.Seeker",
+    "io.ReaderAt",
+    "io.WriterAt",
+    "io.ReaderFrom",
+    "io.WriterTo",
+    "io.StringWriter",
+    "io.ByteReader",
+    "io.ByteScanner",
+    "io.RuneReader",
+    "io.RuneScanner",
     // errors / fmt
-    "*error",
-    "*fmt.Stringer",
-    "*fmt.GoStringer",
-    "*fmt.Formatter",
-    "*fmt.State",
-    "*fmt.Scanner",
-    "*fmt.ScanState",
+    "error",
+    "fmt.Stringer",
+    "fmt.GoStringer",
+    "fmt.Formatter",
+    "fmt.State",
+    "fmt.Scanner",
+    "fmt.ScanState",
     // net
-    "*net.Conn",
-    "*net.PacketConn",
-    "*net.Listener",
-    "*net.Addr",
-    "*net.Error",
+    "net.Conn",
+    "net.PacketConn",
+    "net.Listener",
+    "net.Addr",
+    "net.Error",
     // os / fs
-    "*fs.File",
-    "*fs.FileInfo",
-    "*fs.DirEntry",
-    "*fs.FS",
-    "*fs.ReadDirFile",
-    "*fs.ReadFileFS",
-    "*fs.StatFS",
-    "*fs.SubFS",
-    "*fs.GlobFS",
+    "fs.File",
+    "fs.FileInfo",
+    "fs.DirEntry",
+    "fs.FS",
+    "fs.ReadDirFile",
+    "fs.ReadFileFS",
+    "fs.StatFS",
+    "fs.SubFS",
+    "fs.GlobFS",
     // hash / crypto
-    "*hash.Hash",
-    "*hash.Hash32",
-    "*hash.Hash64",
-    "*crypto.Signer",
-    "*crypto.Decrypter",
-    "*crypto.SignerOpts",
-    "*crypto.PublicKey",
-    "*crypto.PrivateKey",
+    "hash.Hash",
+    "hash.Hash32",
+    "hash.Hash64",
+    "crypto.Signer",
+    "crypto.Decrypter",
+    "crypto.SignerOpts",
+    "crypto.PublicKey",
+    "crypto.PrivateKey",
     // encoding
-    "*encoding.BinaryMarshaler",
-    "*encoding.BinaryUnmarshaler",
-    "*encoding.TextMarshaler",
-    "*encoding.TextUnmarshaler",
-    "*encoding/json.Marshaler",
-    "*encoding/json.Unmarshaler",
-    "*encoding/xml.Marshaler",
-    "*encoding/xml.Unmarshaler",
+    "encoding.BinaryMarshaler",
+    "encoding.BinaryUnmarshaler",
+    "encoding.TextMarshaler",
+    "encoding.TextUnmarshaler",
+    "json.Marshaler",
+    "json.Unmarshaler",
+    "xml.Marshaler",
+    "xml.Unmarshaler",
     // sort / context / sync
-    "*sort.Interface",
-    "*context.Context",
-    "*sync.Locker",
+    "sort.Interface",
+    "context.Context",
+    "sync.Locker",
     // database
-    "*database/sql/driver.Driver",
-    "*database/sql/driver.Conn",
-    "*database/sql/driver.Stmt",
-    "*database/sql/driver.Rows",
-    "*database/sql/driver.Result",
-    "*database/sql/driver.Tx",
-    "*database/sql.Scanner",
-    "*driver.Valuer",
+    "driver.Driver",
+    "driver.Conn",
+    "driver.Stmt",
+    "driver.Rows",
+    "driver.Result",
+    "driver.Tx",
+    "sql.Scanner",
+    "driver.Valuer",
     // http / tls
-    "*http.Handler",
-    "*http.ResponseWriter",
-    "*http.RoundTripper",
-    "*http.CookieJar",
-    "*http.Flusher",
-    "*http.Hijacker",
-    "*http.Pusher",
-    "*tls.ClientSessionCache",
+    "http.Handler",
+    "http.ResponseWriter",
+    "http.RoundTripper",
+    "http.CookieJar",
+    "http.Flusher",
+    "http.Hijacker",
+    "http.Pusher",
+    "tls.ClientSessionCache",
     // reflect
-    "*reflect.Type",
+    "reflect.Type",
 ];
 
 /// Count, per known stdlib interface name, how many concrete implementations
@@ -132,10 +132,14 @@ mod tests {
 
     #[test]
     fn recognizes_common_interfaces() {
-        assert!(is_stdlib_interface("*io.Writer"));
-        assert!(is_stdlib_interface("*net.Conn"));
-        assert!(is_stdlib_interface("*sort.Interface"));
-        assert!(!is_stdlib_interface("*main.MyInterface"));
-        assert!(!is_stdlib_interface("io.Writer"));
+        assert!(is_stdlib_interface("io.Writer"));
+        assert!(is_stdlib_interface("net.Conn"));
+        assert!(is_stdlib_interface("sort.Interface"));
+        assert!(is_stdlib_interface("driver.Valuer"));
+        assert!(!is_stdlib_interface("main.MyInterface"));
+        assert!(
+            !is_stdlib_interface("*io.Writer"),
+            "itab interface names carry no leading star since TFlagExtraStar is honored"
+        );
     }
 }
