@@ -186,6 +186,35 @@ pub struct XrefResult {
     pub max_nodes: usize,
 }
 
+impl XrefResult {
+    /// The edges of `edges` this traversal walked: from the root, or from a
+    /// node short of the depth bound, to a node it reached. Pass them to
+    /// [`to_dot`] to draw the traversal instead of the whole program.
+    pub fn walked_edges(&self, edges: &[CallEdge]) -> Vec<CallEdge> {
+        let mut depth_of: std::collections::HashMap<&str, usize> = self
+            .nodes
+            .iter()
+            .map(|n| (n.name.as_str(), n.depth))
+            .collect();
+        // The root is depth 0 even when a cycle reaches it again.
+        depth_of.insert(self.root.as_str(), 0);
+        let callers = self.direction == "callers";
+        edges
+            .iter()
+            .filter(|e| {
+                let (near, far) = if callers {
+                    (&e.callee_name, &e.caller_name)
+                } else {
+                    (&e.caller_name, &e.callee_name)
+                };
+                let walked_from = matches!(depth_of.get(near.as_str()), Some(&d) if d < self.depth);
+                walked_from && depth_of.contains_key(far.as_str())
+            })
+            .cloned()
+            .collect()
+    }
+}
+
 /// Callers of `target_name`: every function that calls into it,
 /// transitively up to `depth` levels. BFS stops early when `max_nodes`
 /// distinct callers have been discovered; pass `usize::MAX` to disable.
@@ -327,4 +356,56 @@ pub fn to_dot(edges: &[CallEdge]) -> String {
 fn quote(s: &str) -> String {
     let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edge(caller: &str, callee: &str) -> CallEdge {
+        CallEdge {
+            call_site: 0,
+            caller_addr: caller.len() as u64,
+            caller_name: caller.to_string(),
+            callee_addr: callee.len() as u64,
+            callee_name: callee.to_string(),
+        }
+    }
+
+    fn pairs(edges: &[CallEdge]) -> Vec<(String, String)> {
+        let mut pairs = forward_graph(edges);
+        pairs.sort();
+        pairs
+    }
+
+    #[test]
+    fn walked_edges_stay_inside_the_traversal() {
+        // main -> a -> b -> c, a -> main (a cycle back to the root), and an
+        // unrelated x -> y.
+        let edges = vec![
+            edge("main", "a"),
+            edge("a", "b"),
+            edge("b", "c"),
+            edge("a", "main"),
+            edge("x", "y"),
+        ];
+        let p = |a: &str, b: &str| (a.to_string(), b.to_string());
+
+        let one = callees_from(&edges, "main", 1, usize::MAX);
+        assert_eq!(pairs(&one.walked_edges(&edges)), vec![p("main", "a")]);
+
+        let two = callees_from(&edges, "main", 2, usize::MAX);
+        assert_eq!(
+            pairs(&two.walked_edges(&edges)),
+            vec![p("a", "b"), p("a", "main"), p("main", "a")],
+            "depth 2 reaches b, not c, and keeps the edge back to the root"
+        );
+
+        let up = callers_of(&edges, "c", 2, usize::MAX);
+        assert_eq!(
+            pairs(&up.walked_edges(&edges)),
+            vec![p("a", "b"), p("b", "c")],
+            "callers walk the edges in reverse"
+        );
+    }
 }

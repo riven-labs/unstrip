@@ -1163,11 +1163,41 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let shown = |addr: u64| args.show.keeps(wrappers.contains(&addr));
 
         if args.callgraph {
-            // dot output: ignore --from/--to/--depth and emit the
-            // full graph. For focused subgraphs use --from + --depth
-            // and pipe text output into your own graph tool.
-            out.write_all(unstrip::xrefs::to_dot(&edges).as_bytes())?;
+            // dot output: the whole graph, or with --from/--to the edges the
+            // traversal walked to --depth.
+            let result = match (&args.from, &args.to) {
+                (Some(from), None) => Some(unstrip::xrefs::callees_from(
+                    &edges,
+                    from,
+                    args.depth,
+                    args.max_nodes,
+                )),
+                (None, Some(to)) => Some(unstrip::xrefs::callers_of(
+                    &edges,
+                    to,
+                    args.depth,
+                    args.max_nodes,
+                )),
+                (Some(_), Some(_)) => return Err("--from and --to are mutually exclusive".into()),
+                (None, None) => None,
+            };
+            let walked = match &result {
+                Some(result) => result.walked_edges(&edges),
+                None => edges.clone(),
+            };
+            let shown_edges: Vec<unstrip::xrefs::CallEdge> = walked
+                .into_iter()
+                .filter(|e| shown(e.caller_addr) && shown(e.callee_addr))
+                .collect();
+            out.write_all(unstrip::xrefs::to_dot(&shown_edges).as_bytes())?;
             out.flush()?;
+            if result.is_some_and(|r| r.truncated) {
+                // stdout is the dot file, so the warning goes to stderr.
+                eprintln!(
+                    "unstrip: graph truncated at {} nodes; raise --max-nodes",
+                    args.max_nodes
+                );
+            }
             return Ok(());
         }
 

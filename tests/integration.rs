@@ -2345,3 +2345,33 @@ fn locate_all_returns_single_module_on_normal_binary() {
         "locate_all()[0] should be the same record as locate()"
     );
 }
+
+#[test]
+fn callgraph_honors_from_and_depth() {
+    let Some(path) = fixture("hello.linux-amd64.stripped") else {
+        return;
+    };
+    let dot = |extra: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_unstrip"))
+            .arg(&path)
+            .args(["--xrefs", "--callgraph"])
+            .args(extra)
+            .output()
+            .expect("run unstrip");
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let edge_lines = |s: &str| s.lines().filter(|l| l.contains(" -> ")).count();
+    let whole = dot(&[]);
+    let direct = dot(&["--from", "main.main", "--depth", "1"]);
+    let deeper = dot(&["--from", "main.main", "--depth", "2"]);
+    assert!(edge_lines(&direct) > 0, "main.main calls something");
+    for line in direct.lines().filter(|l| l.contains(" -> ")) {
+        assert!(
+            line.trim_start().starts_with("\"main.main\" -> "),
+            "depth 1 has only main.main's own calls: {line}"
+        );
+    }
+    assert!(edge_lines(&direct) < edge_lines(&deeper));
+    assert!(edge_lines(&deeper) < edge_lines(&whole));
+}

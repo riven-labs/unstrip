@@ -105,7 +105,7 @@ These flags only make sense alongside one of the analysis modes above.
 - `--from <FUNCNAME>` / `--to <FUNCNAME>`: with `--xrefs`, filter to callers/callees of a named function. Combine with `--depth` for transitive walks.
 - `--depth <N>`: with `--xrefs --from`/`--to`, transitive depth. Default 1.
 - `--max-nodes <N>`: with `--xrefs --from`/`--to`, BFS node cap so a deep traversal on a large binary cannot blow memory. Default 5000. Output includes a `truncated` flag in JSON or a warning line in text when the cap is hit.
-- `--callgraph`: with `--xrefs`, emit Graphviz dot format. Pipe to `dot -Tsvg -o callgraph.svg`.
+- `--callgraph`: with `--xrefs`, emit Graphviz dot format. With `--from` or `--to`, only the edges that traversal walks to `--depth`. Pipe to `dot -Tsvg -o callgraph.svg`.
 - `--goroutines-show <KIND>`: with `--goroutines`, restrict by resolution state. `all` (default), `resolved`, or `unresolved`. The `unresolved` set is the one worth eyeballing in a disassembler.
 - `--no-itab-reachability`: with `--itabs`, skip the `(reachable)/(unreachable)` annotation. Useful on large binaries where the scan is not free, or for scripted consumers that prefer the raw JSON shape.
 
