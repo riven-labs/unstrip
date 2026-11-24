@@ -93,7 +93,7 @@ struct Args {
     #[arg(long, value_name = "OLD_BINARY", help_heading = "Analysis modes")]
     diff: Option<PathBuf>,
 
-    /// Garble heuristic verdict to stderr; exit-code contract for CI.
+    /// Garble heuristic verdict. Exits 0 garbled, 1 clean, 2 indeterminate, 3 error.
     #[arg(long, help_heading = "Analysis modes")]
     detect_garble: bool,
 
@@ -408,11 +408,18 @@ fn main() -> ExitCode {
     }
 
     let args = Args::parse();
+    // --detect-garble gives 1 to a clean binary, so its errors need their own
+    // code for a CI gate to tell the two apart.
+    let error_code = if args.detect_garble {
+        ExitCode::from(3)
+    } else {
+        ExitCode::FAILURE
+    };
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("unstrip: {e}");
-            ExitCode::FAILURE
+            error_code
         }
     }
 }
@@ -524,7 +531,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         out.flush()?;
         // Exit-code contract for --detect-garble (public, CI gating):
-        //   0 = garbled, 1 = clean, 2 = indeterminate.
+        //   0 = garbled, 1 = clean, 2 = indeterminate, 3 = error (see main).
         // Bypass the run/main success path so the code lands on the
         // wire verbatim; no other handler needs custom exit semantics.
         std::process::exit(assessment.exit_code());

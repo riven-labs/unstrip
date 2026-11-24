@@ -115,7 +115,7 @@ garble heuristic: likely garbled
   - 554/4310 user-package function names look hashed
 ```
 
-For a structured verdict and exit-code semantics (0 garbled, 1 clean, 2 indeterminate), use `--detect-garble`.
+For a structured verdict and exit-code semantics (0 garbled, 1 clean, 2 indeterminate, 3 error), use `--detect-garble`.
 
 ### Module dependency tree
 

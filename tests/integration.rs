@@ -566,6 +566,34 @@ fn go_version_comes_from_build_info_not_the_first_match() {
 }
 
 #[test]
+fn detect_garble_exit_codes_separate_clean_from_error() {
+    let unstrip = env!("CARGO_BIN_EXE_unstrip");
+    let code = |path: &std::path::Path| {
+        std::process::Command::new(unstrip)
+            .arg(path)
+            .arg("--detect-garble")
+            .output()
+            .expect("run unstrip")
+            .status
+            .code()
+    };
+    let missing = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/no-such-file");
+    assert_eq!(code(&missing), Some(3), "an unreadable file is an error");
+    let not_go = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/hello.go");
+    assert_eq!(
+        code(&not_go),
+        Some(3),
+        "a file that is not a binary is an error"
+    );
+    if let Some(path) = fixture("hello.linux-amd64.stripped") {
+        assert_eq!(code(&path), Some(1), "a clean binary");
+    }
+    if let Some(path) = fixture("gtest.garbled.stripped") {
+        assert_eq!(code(&path), Some(0), "a garbled binary");
+    }
+}
+
+#[test]
 fn inline_stack_recovers_three_deep_inlining() {
     // The inline3 fixture has main.anchor calling level1 calling level2 calling
     // level3, all inlinable. PCs inside the level3 body must produce a four-

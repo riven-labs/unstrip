@@ -87,7 +87,7 @@ Compares the binary you're running unstrip on against an older build passed here
 
 ### `--detect-garble`
 
-Runs the garble obfuscation heuristic and prints a verdict to stderr. Independent of `--info` / `--buildinfo` so CI can gate on the exit code (exits 0 with `is_garbled=true|false`; the heuristic itself does not fail the run).
+Runs the garble obfuscation heuristic and prints the verdict and its signals. Independent of `--info` / `--buildinfo` so CI can gate on the exit code: 0 garbled, 1 clean, 2 indeterminate, 3 when the file could not be read as a Go binary.
 
 ---
 

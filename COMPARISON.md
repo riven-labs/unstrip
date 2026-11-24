@@ -33,7 +33,7 @@ Sourced from each tool's README and repository as of late May 2026. Verifiable b
 
 **`--symbols-as elf|pe`** rewrites the binary with a synthetic ELF `.symtab`+`.strtab` or COFF symbol table so `nm`, `gdb`, `objdump --syms`, `perf`, eBPF stack traces, and `delve` see the recovered names.
 
-**`--detect-garble` with exit-code contract** (0 garbled, 1 clean, 2 indeterminate). Useful as a CI gate.
+**`--detect-garble` with exit-code contract** (0 garbled, 1 clean, 2 indeterminate, 3 error). Useful as a CI gate.
 
 **`--fingerprint --behavioral`** over the stdlib-interface implementation-count vector. Garble-stable, useful for clustering rebuilds.
 

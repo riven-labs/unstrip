@@ -253,7 +253,8 @@ pub enum Verdict {
 impl GarbleAssessment {
     /// Exit code for `--detect-garble`:
     ///   0 = garbled, 1 = clean, 2 = indeterminate. CI scripts gate on
-    /// these and the values are part of the public contract.
+    /// these and the values are part of the public contract. The CLI exits 3
+    /// when it cannot read the binary at all.
     pub fn exit_code(&self) -> i32 {
         match self.verdict {
             Verdict::Garbled => 0,
