@@ -1403,18 +1403,22 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         // annotation is `(reachable)` / `(unreachable)`, not
         // "live"/"unused": on well-formed Go binaries the linker
         // already dead-strips unreachable itabs, so the marker is a
-        // reachability confirmation, not a dead-code finder.
+        // reachability confirmation, not a dead-code finder. Where no
+        // scanner reads the code (anything but amd64), every itab is
+        // marked unknown rather than unreachable.
         let reachable_set = if args.no_itab_reachability {
             None
         } else {
-            Some(unstrip::dataxref::referenced_addresses(&bin).unwrap_or_default())
+            Some(unstrip::dataxref::referenced_addresses(&bin).ok())
         };
         match args.format {
             OutFormat::Json => {
                 serde_json::to_writer_pretty(&mut out, &all)?;
                 writeln!(out)?;
             }
-            OutFormat::Text => write_itabs(&mut out, &all, reachable_set.as_ref())?,
+            OutFormat::Text => {
+                write_itabs(&mut out, &all, reachable_set.as_ref().map(Option::as_ref))?
+            }
             f => return Err(format!("--itabs does not support --format {:?}", f).into()),
         }
         out.flush()?;
@@ -1736,7 +1740,8 @@ fn write_goroutines<W: Write>(
 fn write_itabs<W: Write>(
     w: &mut W,
     all: &[unstrip::Itab],
-    reachable: Option<&std::collections::HashSet<u64>>,
+    // None: no annotation. Some(None): no scanner for the architecture.
+    reachable: Option<Option<&std::collections::HashSet<u64>>>,
 ) -> io::Result<()> {
     let iw = all
         .iter()
@@ -1755,12 +1760,11 @@ fn write_itabs<W: Write>(
         if it.incomplete {
             markers.push_str("  [INCOMPLETE]");
         }
-        if let Some(reachable) = reachable {
-            if reachable.contains(&it.addr) {
-                markers.push_str("  (reachable)");
-            } else {
-                markers.push_str("  (unreachable)");
-            }
+        match reachable {
+            Some(Some(set)) if set.contains(&it.addr) => markers.push_str("  (reachable)"),
+            Some(Some(_)) => markers.push_str("  (unreachable)"),
+            Some(None) => markers.push_str("  (reachability unknown)"),
+            None => (),
         }
         writeln!(
             w,

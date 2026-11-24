@@ -212,10 +212,17 @@ fn read_i32(b: &[u8]) -> i32 {
 /// though no `.text` instruction LEAs its address directly. Without
 /// the data-side scan, every itab used by the (itab,data) iface
 /// layout would falsely show as unused.
+///
+/// The `.text` pass decodes amd64 only. On any other architecture this is an
+/// error, not an empty set: a set without the code references would call
+/// every itab the code loads unreferenced.
 pub fn referenced_addresses(bin: &GoBinary) -> Result<std::collections::HashSet<u64>> {
     let mut out = std::collections::HashSet::new();
     if !bin.little_endian || !matches!(bin.arch, Arch::X86_64) {
-        return Ok(out);
+        return Err(Error::Xrefs(format!(
+            "no reference scanner for {}; only little-endian amd64 today",
+            bin.arch.as_str()
+        )));
     }
     let text = bin
         .sections

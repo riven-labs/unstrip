@@ -2375,3 +2375,30 @@ fn callgraph_honors_from_and_depth() {
     assert!(edge_lines(&direct) < edge_lines(&deeper));
     assert!(edge_lines(&deeper) < edge_lines(&whole));
 }
+
+#[test]
+fn itab_reachability_is_unknown_without_a_code_scanner() {
+    // Only amd64 code is scanned for itab references. On arm64 and 386 the
+    // answer is unknown, not "unreachable" for every itab.
+    for name in [
+        "hello.linux-arm64.stripped",
+        "featureset.linux-386.stripped",
+    ] {
+        let Some(path) = fixture(name) else {
+            continue;
+        };
+        let bin = GoBinary::open(&path).expect("open");
+        assert!(
+            unstrip::dataxref::referenced_addresses(&bin).is_err(),
+            "{name}: no reference scanner"
+        );
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_unstrip"))
+            .arg(&path)
+            .arg("--itabs")
+            .output()
+            .expect("run unstrip");
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.contains("(reachability unknown)"), "{name}");
+        assert!(!text.contains("(unreachable)"), "{name}");
+    }
+}

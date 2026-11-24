@@ -30,7 +30,7 @@ Walks the typelinks table plus references reachable from it, prints recovered ty
 
 ### `--itabs`
 
-Recovers `(interface, concrete) -> method set` pairs from `runtime.itablinks`. Tags each entry as `(reachable)` if its address is referenced from `.text` or any data section, `(unreachable)` otherwise. Useful for spotting dead itabs the linker left behind and for de-virtualizing calls in a disassembler.
+Recovers `(interface, concrete) -> method set` pairs from `runtime.itablinks`. Tags each entry as `(reachable)` if its address is referenced from `.text` or any data section, `(unreachable)` otherwise. The `.text` scan is amd64 only; on other architectures every entry reads `(reachability unknown)`. Useful for spotting dead itabs the linker left behind and for de-virtualizing calls in a disassembler.
 
 ### `--strings`
 
