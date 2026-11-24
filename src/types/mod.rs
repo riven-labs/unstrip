@@ -326,20 +326,103 @@ fn linear_scan_types_region(
             continue;
         }
         if let Ok(t) = parse_type(bin, md, addr) {
-            // Only emit if the header looks plausible: nonzero size, valid
-            // kind, non-empty resolvable name. Without these filters we
-            // emit hundreds of random false positives per binary.
-            if t.size > 0
-                && !matches!(t.kind, KindName::Invalid | KindName::Unknown(_))
-                && !t.name.is_empty()
-                && !t.name.starts_with("type@0x")
-            {
+            // Most pointer-aligned offsets in the region are not the start of
+            // a descriptor, and many of them still parse: a string's bytes
+            // read as a size and a kind. Only a header that holds together
+            // the way the compiler writes one is emitted.
+            if is_plausible_descriptor(bin, md, &t) {
                 out.push(t);
             }
         }
         offset += ps;
     }
     out
+}
+
+/// Whether `t`, parsed at an address nothing pointed the reader to, reads as
+/// a `_type` the compiler wrote. Every field is checked against what the
+/// compiler emits for the kind:
+///
+/// - align and fieldAlign are powers of two up to 8, and size is a multiple
+///   of align;
+/// - the kind byte uses no bit above the kind and its two flags, and tflag
+///   no bit Go defines no flag for;
+/// - ptrdata is a multiple of the pointer size and at most size, and for a
+///   kind of fixed shape (scalars, string, slice, interface, pointer, map,
+///   chan, func) size and ptrdata are exactly that shape's;
+/// - the name is non-empty printable text;
+/// - every type the descriptor refers to (element, key, field, method,
+///   parameter) lies in the types region, and an array's size is its
+///   length times its element's size.
+fn is_plausible_descriptor(bin: &GoBinary, md: &ModuleData, t: &Type) -> bool {
+    let ps = bin.pointer_size() as u64;
+    let Some(buf) = bin.read_at_addr(t.addr, type_header_size(ps as usize)) else {
+        return false;
+    };
+    let h = 2 * ps as usize;
+    let (align, field_align, kind_byte) = (buf[h + 5], buf[h + 6], buf[h + 7]);
+    let align_ok = |a: u8| a.is_power_of_two() && a <= 8;
+    if !align_ok(align) || !align_ok(field_align) || t.size % align as u64 != 0 {
+        return false;
+    }
+    // Kind flags: KindDirectIface (1 << 5) and KindGCProg (1 << 6). TFlag
+    // values run up to TFlagDirectIface (1 << 5), where Go 1.26 moved the
+    // direct-interface bit.
+    if kind_byte & 0x80 != 0 || t.tflag >= 1 << 6 {
+        return false;
+    }
+    if t.ptr_bytes > t.size || t.ptr_bytes % ps != 0 {
+        return false;
+    }
+    if t.name.is_empty() || t.name.starts_with("type@0x") || t.name.chars().any(char::is_control) {
+        return false;
+    }
+    // (size, ptrdata) for kinds whose shape the kind fixes.
+    let shape = match t.kind {
+        KindName::Bool | KindName::Int8 | KindName::Uint8 => Some((1, 0)),
+        KindName::Int16 | KindName::Uint16 => Some((2, 0)),
+        KindName::Int32 | KindName::Uint32 | KindName::Float32 => Some((4, 0)),
+        KindName::Int64 | KindName::Uint64 | KindName::Float64 | KindName::Complex64 => {
+            Some((8, 0))
+        }
+        KindName::Complex128 => Some((16, 0)),
+        KindName::Int | KindName::Uint | KindName::Uintptr => Some((ps, 0)),
+        KindName::String => Some((2 * ps, ps)),
+        KindName::Slice => Some((3 * ps, ps)),
+        KindName::Interface => Some((2 * ps, 2 * ps)),
+        KindName::Pointer
+        | KindName::UnsafePointer
+        | KindName::Map
+        | KindName::Chan
+        | KindName::Func => Some((ps, ps)),
+        KindName::Array | KindName::Struct => None,
+        KindName::Invalid | KindName::Unknown(_) => return false,
+    };
+    if let Some(shape) = shape {
+        if (t.size, t.ptr_bytes) != shape {
+            return false;
+        }
+    }
+    let in_region = |a: u64| md.types <= a && a < md.etypes;
+    match &t.kind_data {
+        KindData::None => !matches!(
+            t.kind,
+            KindName::Pointer
+                | KindName::Slice
+                | KindName::Array
+                | KindName::Chan
+                | KindName::Map
+                | KindName::Struct
+                | KindName::Interface
+                | KindName::Func
+        ),
+        KindData::Array { elem, len } => {
+            in_region(*elem)
+                && parse_type(bin, md, *elem)
+                    .is_ok_and(|e| e.size.checked_mul(*len) == Some(t.size))
+        }
+        kd => child_addrs(kd).into_iter().all(in_region),
+    }
 }
 
 /// Walks the typelinks slice to recover every linked-in Go type, then

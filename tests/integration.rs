@@ -2402,3 +2402,50 @@ fn itab_reachability_is_unknown_without_a_code_scanner() {
         assert!(!text.contains("(unreachable)"), "{name}");
     }
 }
+
+#[test]
+fn full_type_scan_emits_only_well_formed_descriptors() {
+    // The linear scan behind --types-full tries every pointer-aligned offset
+    // of the types region. Offsets inside names and other data used to come
+    // out as types with control-character names and sizes past 1e18.
+    for name in [
+        "hello.linux-amd64.stripped",
+        "featureset.go126.stripped",
+        "featureset.go118.stripped",
+        "typeset.go116.stripped",
+        "featureset.linux-386.stripped",
+    ] {
+        let Some(path) = fixture(name) else {
+            continue;
+        };
+        let bin = GoBinary::open(&path).expect("open");
+        let md = ModuleData::locate(&bin).expect("moduledata");
+        let focused = types::recover_with_mode(&bin, &md, types::Mode::Focused).unwrap();
+        let full = types::recover_with_mode(&bin, &md, types::Mode::Full).unwrap();
+        let seen: std::collections::HashSet<u64> = focused.iter().map(|t| t.addr).collect();
+        let extras: Vec<_> = full.iter().filter(|t| !seen.contains(&t.addr)).collect();
+        assert_eq!(full.len(), focused.len() + extras.len(), "{name}");
+        for t in &extras {
+            assert!(
+                !t.name.is_empty() && !t.name.chars().any(char::is_control),
+                "{name}: 0x{:x} has name {:?}",
+                t.addr,
+                t.name
+            );
+            assert!(
+                t.size < 1 << 32 && t.ptr_bytes <= t.size,
+                "{name}: 0x{:x} {} has size {} ptrdata {}",
+                t.addr,
+                t.name,
+                t.size,
+                t.ptr_bytes
+            );
+            assert!(
+                !matches!(t.kind, KindName::Invalid | KindName::Unknown(_)),
+                "{name}: 0x{:x} {}",
+                t.addr,
+                t.name
+            );
+        }
+    }
+}
