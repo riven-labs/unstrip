@@ -103,11 +103,11 @@ struct Args {
     #[arg(long, help_heading = "Mode modifiers")]
     degarble: bool,
 
-    /// With --types: include primitive leaves (GoReSym-parity catalog).
+    /// With --types: also scan the types region for descriptors the walk missed.
     #[arg(long, help_heading = "Mode modifiers")]
     types_full: bool,
 
-    /// With --fingerprint: hash only the stdlib-interface vector (garble-stable).
+    /// With --fingerprint: hash only the stdlib-interface count vector.
     #[arg(long, help_heading = "Mode modifiers")]
     behavioral: bool,
 
@@ -379,8 +379,10 @@ impl OutFormat {
     }
 }
 
-const SHORT_HELP: &str = "\
-unstrip 1.0.0
+const SHORT_HELP: &str = concat!(
+    "unstrip ",
+    env!("CARGO_PKG_VERSION"),
+    "
 Recover symbols from stripped Go binaries.
 
 Usage
@@ -399,15 +401,17 @@ Examples
 Analysis modes  --info --buildinfo --types --itabs --strings --capabilities
                 --fingerprint --goroutines --xrefs --xref --xref-readers
                 --xref-writers --data-at --addr --addr-file --diff
-                --detect-garble
-Rewrite         --symbols-as <elf|pe>  [-o PATH | --in-place --yes]
+                --detect-garble --reflect-names
+Modifiers       --degarble --types-full --behavioral --show --from --to --depth
+Rewrite        --symbols-as <elf|pe>  [-o PATH | --in-place --yes]
 Integration     --install-plugin <ida|ghidra|binja>
                 --dispatch-resolver ghidra
                 --port-symbols <ida|ghidra|binja>
 
 See `unstrip --help` for the full flag reference, modifiers, and notes.
 Reference: https://github.com/riven-labs/unstrip/blob/main/docs/USAGE.md
-";
+"
+);
 
 fn main() -> ExitCode {
     // Hand-written `-h` cheat sheet; long `--help` stays clap-generated and
