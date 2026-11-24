@@ -119,13 +119,10 @@ fn write_ida<W: Write>(
     }
 
     if !types.is_empty() {
+        let decls = struct_c_decls(types);
         writeln!(w)?;
-        writeln!(
-            w,
-            "# Recovered struct types ({} total)",
-            count_struct_types(types)
-        )?;
-        for decl in struct_c_decls(types) {
+        writeln!(w, "# Recovered struct types ({} total)", decls.len())?;
+        for decl in decls {
             writeln!(w, "_struct({})", escape_py(&decl))?;
         }
     }
@@ -236,13 +233,10 @@ fn write_ghidra<W: Write>(
     }
 
     if !types.is_empty() {
+        let decls = struct_c_decls(types);
         writeln!(w)?;
-        writeln!(
-            w,
-            "# Recovered struct types ({} total)",
-            count_struct_types(types)
-        )?;
-        for decl in struct_c_decls(types) {
+        writeln!(w, "# Recovered struct types ({} total)", decls.len())?;
+        for decl in decls {
             writeln!(w, "_struct({})", escape_py(&decl))?;
         }
     }
@@ -318,13 +312,10 @@ fn write_binja<W: Write>(
     }
 
     if !types.is_empty() {
+        let decls = struct_c_decls(types);
         writeln!(w)?;
-        writeln!(
-            w,
-            "# Recovered struct types ({} total)",
-            count_struct_types(types)
-        )?;
-        for decl in struct_c_decls(types) {
+        writeln!(w, "# Recovered struct types ({} total)", decls.len())?;
+        for decl in decls {
             writeln!(w, "_struct({})", escape_py(&decl))?;
         }
     }
@@ -420,6 +411,21 @@ fn sanitize_label(name: &str) -> String {
     out
 }
 
+/// A C identifier for a Go name, for the declarations the tools' C parsers
+/// read. Those accept letters, digits and `_` only, so `.` and the rest of
+/// Go's punctuation map to `_`. A leading digit gets a `_` prefix and a C
+/// keyword a `_` suffix.
+fn c_identifier(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    escape_c_field_name(&out)
+}
+
 /// Per-function comment: "go: <full name>\n<file>:<line>".
 fn function_comment(f: &Function, signature: Option<&str>) -> String {
     let mut s = format!("go: {}", f.name);
@@ -435,13 +441,6 @@ fn function_comment(f: &Function, signature: Option<&str>) -> String {
         }
     }
     s
-}
-
-fn count_struct_types(types: &[Type]) -> usize {
-    types
-        .iter()
-        .filter(|t| matches!(t.kind_data, KindData::Struct { .. }))
-        .count()
 }
 
 /// Produce C struct declarations for every recovered Go struct type.
@@ -528,9 +527,16 @@ fn struct_c_decls(types: &[Type]) -> Vec<String> {
         let KindData::Struct { fields } = &t.kind_data else {
             continue;
         };
-        let c_name = sanitize_label(&t.name);
-        if c_name.is_empty() || !emitted_names.insert(c_name.clone()) {
-            continue;
+        // Two Go types can map to one identifier: `sync.Mutex` and
+        // `internal/sync.Mutex` share a name, and `a.b_c` and `a_b.c` share
+        // an identifier. The later one takes the Go type hash as a suffix,
+        // which is the same in every build of the type.
+        let mut c_name = c_identifier(&t.name);
+        if !emitted_names.insert(c_name.clone()) {
+            c_name = format!("{c_name}_{:08x}", t.hash);
+            if !emitted_names.insert(c_name.clone()) {
+                continue;
+            }
         }
         let mut decl = format!("struct {} {{\n", c_name);
         let mut next_offset = 0u64;
@@ -550,11 +556,11 @@ fn struct_c_decls(types: &[Type]) -> Vec<String> {
                 next_offset = field.offset;
             }
             let (prefix, suffix) = c_type_for_field(field, &by_addr);
-            let fname = sanitize_label(&field.name);
-            let fname = if fname.is_empty() || fname == "_" {
+            let fname = c_identifier(&field.name);
+            let fname = if fname == "_" {
                 format!("_anon_{idx}")
             } else {
-                escape_c_field_name(&fname)
+                fname
             };
             decl.push_str(&format!("    {prefix} {fname}{suffix};\n"));
             next_offset += fsize;
@@ -673,5 +679,61 @@ mod tests {
     #[test]
     fn escapes_newlines_in_comments() {
         assert_eq!(escape_py("a\nb"), "'a\\nb'");
+    }
+    #[test]
+    fn struct_declarations_use_unique_c_identifiers() {
+        let structure = |addr: u64, name: &str, hash: u32| Type {
+            addr,
+            name: name.to_string(),
+            kind: KindName::Struct,
+            size: 8,
+            hash,
+            kind_data: KindData::Struct {
+                fields: vec![StructField {
+                    name: "signed".into(),
+                    typ: 0,
+                    ..Default::default()
+                }],
+            },
+            ..Default::default()
+        };
+        let types = vec![
+            structure(0x10, "main.Config", 1),
+            structure(0x20, "sync.Mutex", 2),
+            structure(0x30, "sync.Mutex", 3),
+            structure(0x40, "a.b_c", 4),
+            structure(0x50, "a_b.c", 5),
+            structure(0x60, "main.Set[go.shape.string]", 6),
+        ];
+        let heads: Vec<String> = struct_c_decls(&types)
+            .iter()
+            .map(|d| d.split('{').next().unwrap().trim().to_string())
+            .collect();
+        assert_eq!(
+            heads,
+            [
+                "struct main_Config",
+                "struct sync_Mutex",
+                "struct sync_Mutex_00000003",
+                "struct a_b_c",
+                "struct a_b_c_00000005",
+                "struct main_Set_go_shape_string_",
+            ]
+        );
+        let decls = struct_c_decls(&types);
+        assert!(
+            decls[0].contains("void * signed_;"),
+            "a field named after a C keyword is renamed: {}",
+            decls[0]
+        );
+    }
+
+    #[test]
+    fn c_identifiers_hold_only_letters_digits_and_underscores() {
+        assert_eq!(c_identifier("errors.errorString"), "errors_errorString");
+        assert_eq!(c_identifier("*main.T"), "_main_T");
+        assert_eq!(c_identifier("1x"), "_1x");
+        assert_eq!(c_identifier("int"), "int_");
+        assert_eq!(c_identifier("café.T"), "caf__T");
     }
 }
