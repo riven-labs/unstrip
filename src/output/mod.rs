@@ -99,11 +99,10 @@ fn write_text<W: Write>(
                 name_col.push_str(sig);
             }
         }
-        // Mark pointer-receiver thunks that are wired up as itab
-        // dispatch targets. The operator who passed --show value
-        // would normally hide every `pkg.(*Type).Method` row; we keep
-        // the dispatched ones and tag them so the operator can spot
-        // the live dispatch surface at a glance.
+        // Mark the compiler's `(*T).M` wrappers that are wired up as
+        // itab dispatch targets. The operator who passed --show value
+        // would normally hide every wrapper row; we keep the dispatched
+        // ones and tag them so the operator can spot them at a glance.
         if let Some(thunks) = itab_thunks {
             if thunks.contains(&f.address) {
                 name_col.push_str("  (itab thunk)");
