@@ -240,6 +240,35 @@ if command -v "$GARBLE" >/dev/null 2>&1 && [ -d depsdemo ]; then
     (cd depsdemo && "$GARBLE" -literals build -ldflags='-s -w' -o ../depsdemo.garbled.stripped .)
 fi
 
+# strlits.go puts string literals in each shape the compiler emits, for the
+# `--strings` literal pairing: amd64 and arm64 on ELF, PE and Mach-O, 386
+# (which has no instruction scanner yet), and Go 1.15 for the stack ABI. The
+# Go 1.15 build comes from ~/sdk/go1.15.15 or the go1.15.15 wrapper and is
+# skipped when neither is there.
+build_strlits() {
+    local goos=$1
+    local goarch=$2
+    local out=$3
+    echo "building $out ($goos/$goarch)"
+    GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 GO111MODULE=off         "$GO" build -ldflags='-s -w' -o "$out" strlits.go
+}
+
+build_strlits linux   amd64 strlits.linux-amd64.stripped
+build_strlits linux   arm64 strlits.linux-arm64.stripped
+build_strlits linux   386   strlits.linux-386.stripped
+build_strlits windows amd64 strlits.windows-amd64.stripped.exe
+build_strlits darwin  arm64 strlits.darwin-arm64.stripped
+
+if [ -x "$HOME/sdk/go1.15.15/bin/go" ] || [ -x "$HOME/sdk/go1.15.15/bin/go.exe" ]; then
+    echo "building strlits.go115.linux-amd64.stripped (go1.15.15)"
+    GOROOT="$HOME/sdk/go1.15.15" GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GO111MODULE=off         "$HOME/sdk/go1.15.15/bin/go" build -ldflags='-s -w' -o strlits.go115.linux-amd64.stripped strlits.go
+elif command -v go1.15.15 >/dev/null 2>&1; then
+    echo "building strlits.go115.linux-amd64.stripped (go1.15.15)"
+    GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GO111MODULE=off         go1.15.15 build -ldflags='-s -w' -o strlits.go115.linux-amd64.stripped strlits.go
+else
+    echo "go1.15.15 not installed; skipping strlits.go115.linux-amd64.stripped"
+fi
+
 # Optional: a reflected program built with garble, used to test recovery on
 # obfuscated binaries: the magic is rewritten (structural pclntab discovery) and
 # the moduledata uses the toolchain's layout. garble needs a matching Go
