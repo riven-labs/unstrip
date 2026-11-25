@@ -527,4 +527,4 @@ Contact: mohamed@riven-labs.com.
 
 ---
 
-A [Riven Labs](https://github.com/riven-labs) project. unstrip is the metadata engine relift, Riven's Go decompiler, is built on.
+A [Riven Labs](https://github.com/riven-labs) project. relift, Riven's Go decompiler, is built on unstrip: unstrip reads the Go metadata, and relift lifts the code on top of it. Download relift from [riven-labs.com/relift](https://www.riven-labs.com/relift).

@@ -7,7 +7,7 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
-## [2.0.1] - 2026-11-25
+## [2.1.0] - 2026-11-25
 
 ### Added
 
@@ -34,10 +34,9 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 ### Fixed
 
 - An ELF cut short between the end of its pclntab and its moduledata is read
-  as itself again, at its own addresses. 2.0.1's embedded-program check
-  reported it as a carried Go program and printed nothing, and 2.0.0 read it
-  with every function 0x1000 bytes low: without the section table the text
-  address was the start of the segment holding the ELF headers.
+  at its own addresses. 2.0.0 read it with every function 0x1000 bytes low:
+  without the section table the text address was the start of the segment
+  holding the ELF headers.
 - `--addr`, `--addr-file` and `--goroutines` report the line of the PC, not
   the line of the function's `func` keyword. `Pclntab::lookup_inline` gave the
   physical frame `Function::start_line`; it now reads the line table, at the
