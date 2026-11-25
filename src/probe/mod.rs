@@ -107,6 +107,7 @@ fn packer_by_section_name(name: &str) -> Option<&'static str> {
 
 /// Decide a packer/obfuscation verdict from the section table and entropy.
 fn packer_verdict(
+    bytes: &[u8],
     sections: &[SectionInfo],
     has_go_pclntab: bool,
     file_entropy: f64,
@@ -115,6 +116,9 @@ fn packer_verdict(
         if let Some(label) = packer_by_section_name(&s.name) {
             return Some(format!("{label} (section `{}`)", s.name));
         }
+    }
+    if let Some(label) = upx_header(bytes) {
+        return Some(label);
     }
     // A high-entropy executable section is the textbook packed/encrypted signal.
     let exec_hi = sections
@@ -143,6 +147,19 @@ fn packer_verdict(
     None
 }
 
+/// UPX writes its `UPX!` magic into the packed file's header area (the
+/// `l_info` block after an ELF's program headers, before a PE's first
+/// section). The ELF it writes has no section table, so the section-name match
+/// cannot see it.
+fn upx_header(bytes: &[u8]) -> Option<String> {
+    let head = &bytes[..bytes.len().min(4096)];
+    let found = head.windows(4).any(|w| w == b"UPX!");
+    if !found {
+        return None;
+    }
+    Some("UPX (`UPX!` header)".to_string())
+}
+
 fn slice(bytes: &[u8], off: usize, size: usize) -> &[u8] {
     let start = off.min(bytes.len());
     let end = off.saturating_add(size).min(bytes.len());
@@ -168,7 +185,7 @@ fn finish(
     let file_entropy = entropy(bytes);
     let has_go_pclntab = sections.iter().any(|s| is_go_pclntab_name(&s.name));
     let overlay_size = bytes.len().saturating_sub(max_file_end);
-    let packer = packer_verdict(&sections, has_go_pclntab, file_entropy);
+    let packer = packer_verdict(bytes, &sections, has_go_pclntab, file_entropy);
     ContainerProbe {
         container,
         arch,
@@ -215,8 +232,10 @@ pub fn probe(bytes: &[u8]) -> Result<ContainerProbe> {
 /// whole-file entropy, and the PE machine when the COFF header outlived a zeroed PE
 /// signature. Returns None when the bytes carry no container magic at all.
 fn probe_malformed(bytes: &[u8]) -> Option<ContainerProbe> {
+    let mut declared_size = 0;
     let (container, arch, bits) = if bytes.starts_with(b"MZ") {
         let (arch, bits) = pe_machine(bytes).unwrap_or(("unknown", 0));
+        declared_size = pe_raw_end(bytes).unwrap_or(0);
         ("PE (header damaged)", arch, bits)
     } else if bytes.starts_with(&[0x7f, b'E', b'L', b'F']) {
         let bits = if bytes.get(4) == Some(&2) { 64 } else { 32 };
@@ -246,7 +265,7 @@ fn probe_malformed(bytes: &[u8]) -> Option<ContainerProbe> {
         // packing, and the file entropy here is often low. The "(header damaged)"
         // container label and the caller's error reason already say what happened.
         packer: None,
-        declared_size: 0,
+        declared_size,
         import_count: None,
     })
 }
@@ -320,6 +339,27 @@ fn elf_arch_name(e_machine: u16) -> &'static str {
 /// Read the COFF machine of a PE whose PE signature was zeroed but whose COFF
 /// header survives at e_lfanew+4. Returns None when the offsets fall outside the
 /// file or the machine is unrecognized.
+/// The end of the furthest section's raw data, read from a PE section table
+/// goblin rejected. A file cut short is rejected because a section's raw
+/// data runs past its end, and this is how far the headers say it should go.
+fn pe_raw_end(bytes: &[u8]) -> Option<usize> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    let e_lfanew = u32_at(0x3c)? as usize;
+    let coff = e_lfanew.checked_add(4)?;
+    let n_sections = u16_at(coff + 2)? as usize;
+    let optional_size = u16_at(coff + 16)? as usize;
+    let table = coff + 20 + optional_size;
+    let mut end = 0usize;
+    for i in 0..n_sections.min(96) {
+        let header = table + i * 40;
+        let raw_size = u32_at(header + 16)? as usize;
+        let raw_offset = u32_at(header + 20)? as usize;
+        end = end.max(raw_offset.saturating_add(raw_size));
+    }
+    Some(end)
+}
+
 fn pe_machine(bytes: &[u8]) -> Option<(&'static str, u32)> {
     let e_lfanew = u32::from_le_bytes(bytes.get(0x3c..0x40)?.try_into().ok()?) as usize;
     let machine = u16::from_le_bytes(bytes.get(e_lfanew + 4..e_lfanew + 6)?.try_into().ok()?);
@@ -484,6 +524,16 @@ mod tests {
     }
 
     #[test]
+    fn upx_magic_in_the_header_area_is_a_verdict() {
+        let mut b = vec![0u8; 8192];
+        b[0xe8..0xec].copy_from_slice(b"UPX!");
+        assert_eq!(upx_header(&b).as_deref(), Some("UPX (`UPX!` header)"));
+        let mut late = vec![0u8; 8192];
+        late[6000..6004].copy_from_slice(b"UPX!");
+        assert_eq!(upx_header(&late), None, "only the header area counts");
+    }
+
+    #[test]
     fn packer_name_table_matches_upx() {
         assert_eq!(packer_by_section_name("UPX0"), Some("UPX"));
         assert_eq!(packer_by_section_name(".vmp0"), Some("VMProtect"));
@@ -500,13 +550,13 @@ mod tests {
             entropy: 7.9,
             executable: true,
         }];
-        assert!(packer_verdict(&s, false, 6.0).is_some());
+        assert!(packer_verdict(&[], &s, false, 6.0).is_some());
         // A normal low-entropy text section is not flagged.
         let s2 = vec![SectionInfo {
             entropy: 6.0,
             ..s[0].clone()
         }];
-        assert!(packer_verdict(&s2, true, 6.0).is_none());
+        assert!(packer_verdict(&[], &s2, true, 6.0).is_none());
     }
 
     #[test]
