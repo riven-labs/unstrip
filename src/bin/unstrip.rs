@@ -1553,14 +1553,24 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 OutFormat::Binja => export::Target::BinaryNinja,
                 _ => unreachable!(),
             };
-            export::write_script(
-                &mut out,
-                target,
-                &functions,
-                &recovered_types,
-                signatures.as_ref(),
-                "unstrip",
-            )?;
+            let (prototypes, export_types) = match &md_opt {
+                Some(md) if !args.no_signatures => compute_prototypes(&bin, md),
+                _ => (std::collections::HashMap::new(), recovered_types.clone()),
+            };
+            let mut export = export::Export::new(&functions, "unstrip");
+            export.types = &export_types;
+            export.signatures = signatures.as_ref();
+            export.prototypes = Some(&prototypes);
+            export.abi = export_abi(&bin, &pcln);
+            export.itabs = &recovered_itabs;
+            export.moduledata = md_opt.as_ref().map(|md| md.addr);
+            export.pointer_size = bin.pointer_size() as u64;
+            export.linker_names = match pcln.magic() {
+                unstrip::pclntab::MAGIC_1_20 => export::LinkerNames::Go120,
+                _ if !pcln.magic_is_official() => export::LinkerNames::Go120,
+                _ => export::LinkerNames::Legacy,
+            };
+            export::write(&mut out, target, &export)?;
         }
         plain => {
             write_functions(
@@ -1622,6 +1632,19 @@ fn maybe_warn_garbled(
 /// entry, so their signatures are unrecoverable from a stripped binary
 /// without DWARF.
 fn compute_signatures(bin: &GoBinary, md: &ModuleData) -> std::collections::HashMap<u64, String> {
+    let (methods, mut cache) = recover_methods(bin, md);
+    unstrip::funcsig::signatures_by_pc(&methods, &mut cache)
+}
+
+/// Every method from the type and itab tables, and a type cache seeded with
+/// the types they came from.
+fn recover_methods<'a>(
+    bin: &'a GoBinary,
+    md: &'a ModuleData,
+) -> (
+    Vec<unstrip::funcsig::RecoveredMethod>,
+    unstrip::funcsig::TypeCache<'a>,
+) {
     let recovered_types = types::recover_with_mode(bin, md, types::Mode::Full).unwrap_or_default();
     let recovered_itabs = itabs::recover_all(bin, md).unwrap_or_default();
     let from_types = unstrip::funcsig::recover_methods_from_types(bin, md, &recovered_types);
@@ -1630,7 +1653,56 @@ fn compute_signatures(bin: &GoBinary, md: &ModuleData) -> std::collections::Hash
     let merged = unstrip::funcsig::merge_methods(from_types, from_itabs);
     let mut cache = unstrip::funcsig::TypeCache::new(bin, md);
     cache.seed_from(&recovered_types);
-    unstrip::funcsig::signatures_by_pc(&merged, &mut cache)
+    (merged, cache)
+}
+
+/// Typed prototypes for the RE-tool scripts, and the types the scripts
+/// declare: the linked ones plus every type a prototype refers to, which
+/// typelinks does not always reach.
+fn compute_prototypes(
+    bin: &GoBinary,
+    md: &ModuleData,
+) -> (
+    std::collections::HashMap<u64, unstrip::funcsig::Prototype>,
+    Vec<types::Type>,
+) {
+    let (methods, mut cache) = recover_methods(bin, md);
+    let prototypes = unstrip::funcsig::prototypes_by_pc(&methods, &mut cache);
+    let roots: Vec<u64> = prototypes
+        .values()
+        .flat_map(|p| p.receiver.iter().chain(&p.params).chain(&p.results))
+        .copied()
+        .collect();
+    let types =
+        types::recover_with_roots(bin, md, types::Mode::Focused, &roots).unwrap_or_default();
+    (prototypes, types)
+}
+
+/// The convention the binary's Go code was compiled for. amd64 moved to
+/// registers in Go 1.17, which shares its pclntab magic with 1.16, so that
+/// pair needs the buildinfo version. A garbled binary's rewritten magic
+/// says nothing.
+fn export_abi(bin: &GoBinary, pcln: &Pclntab<'_>) -> export::Abi {
+    use unstrip::gobin::Arch;
+    use unstrip::pclntab::{MAGIC_1_16, MAGIC_1_18, MAGIC_1_2, MAGIC_1_20};
+    match bin.arch {
+        Arch::X86 => export::Abi::Stack,
+        Arch::X86_64 if !pcln.magic_is_official() => export::Abi::Unknown,
+        Arch::X86_64 => match pcln.magic() {
+            MAGIC_1_18 | MAGIC_1_20 => export::Abi::Amd64Register,
+            MAGIC_1_2 => export::Abi::Stack,
+            MAGIC_1_16 => {
+                let version = BuildInfo::parse(bin).ok().map(|b| b.go_version);
+                match version.as_deref() {
+                    Some(v) if v.starts_with("go1.16") => export::Abi::Stack,
+                    Some(v) if v.starts_with("go1.17") => export::Abi::Amd64Register,
+                    _ => export::Abi::Unknown,
+                }
+            }
+            _ => export::Abi::Unknown,
+        },
+        _ => export::Abi::Unknown,
+    }
 }
 
 fn parse_pc(s: &str) -> Result<u64, Box<dyn std::error::Error>> {

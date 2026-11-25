@@ -1312,13 +1312,13 @@ fn exporter_python_parses_for_all_targets() {
             "header should name the generator"
         );
 
-        // Pass 1: every line that calls _func or _struct must have balanced
+        // Pass 1: every line that calls _func or _type must have balanced
         // parens and a properly-closed string literal. A real Python parser
         // would catch every kind of error; this catches the common ones
         // without needing a Python interpreter at test time.
         for (lineno, line) in script.lines().enumerate() {
             let trimmed = line.trim();
-            if !trimmed.starts_with("_func(") && !trimmed.starts_with("_struct(") {
+            if !trimmed.starts_with("_func(") && !trimmed.starts_with("_type(") {
                 continue;
             }
             assert!(
@@ -1333,10 +1333,11 @@ fn exporter_python_parses_for_all_targets() {
             );
         }
 
-        // Pass 2: every _struct(decl) string must contain a balanced struct
-        // body. Extract the decl literal and check brace pairing.
+        // Pass 2: every _type(name, decl, ...) declaration must contain a
+        // balanced struct body. Extract the decl literal and check brace
+        // pairing.
         for line in script.lines() {
-            let Some(decl) = extract_struct_decl(line) else {
+            let Some(decl) = extract_type_decl(line) else {
                 continue;
             };
             assert!(
@@ -1402,33 +1403,39 @@ fn balanced_python_strings(s: &str) -> bool {
     !in_str
 }
 
-fn extract_struct_decl(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    let after = trimmed.strip_prefix("_struct(")?;
-    let inner = after.strip_suffix(')')?;
-    // The decl is a single-quoted Python string. Unescape the \n and \' that
-    // our emitter inserted.
-    let body = inner.strip_prefix('\'')?.strip_suffix('\'')?;
+/// The declaration, the second argument, of a `_type('name', 'decl', size,
+/// 'go name')` line, unescaped.
+fn extract_type_decl(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("_type(")?;
+    let (_name, rest) = python_string(rest)?;
+    let (decl, _) = python_string(rest.strip_prefix(", ")?)?;
+    Some(decl)
+}
+
+/// A single-quoted Python string literal at the start of `s`, unescaped, and
+/// the text after it.
+fn python_string(s: &str) -> Option<(String, &str)> {
+    let body = s.strip_prefix('\'')?;
     let mut out = String::new();
     let mut escape = false;
-    for ch in body.chars() {
+    for (i, ch) in body.char_indices() {
         if escape {
             match ch {
                 'n' => out.push('\n'),
                 't' => out.push('\t'),
                 'r' => out.push('\r'),
-                '\\' => out.push('\\'),
-                '\'' => out.push('\''),
                 other => out.push(other),
             }
             escape = false;
         } else if ch == '\\' {
             escape = true;
+        } else if ch == '\'' {
+            return Some((out, &body[i + 1..]));
         } else {
             out.push(ch);
         }
     }
-    Some(out)
+    None
 }
 
 #[test]
@@ -2447,5 +2454,67 @@ fn full_type_scan_emits_only_well_formed_descriptors() {
                 t.name
             );
         }
+    }
+}
+
+/// Prototypes for the Ghidra script, end to end on a real binary: the
+/// receiver and slice argument of `main.xorCodec.Encode` land where Go's
+/// register ABI puts them (amd64) and where ABI0 puts them (386).
+#[test]
+fn ghidra_prototypes_place_arguments_per_go_abi() {
+    for (name, abi, expected) in [
+        (
+            "featureset.go126.stripped",
+            unstrip::export::Abi::Amd64Register,
+            "'struct GoSlice f(struct main_xorCodec recv, struct GoSlice p0);', [('recv', [('RAX', 1)]), ('p0', [('RDI', 8), ('RCX', 8), ('RBX', 8)])], [('RCX', 8), ('RBX', 8), ('RAX', 8)], 'abi-internal')",
+        ),
+        (
+            "featureset.linux-386.stripped",
+            unstrip::export::Abi::Stack,
+            "'struct GoSlice f(struct main_xorCodec recv, struct GoSlice p0);', [('recv', [(4, 1)]), ('p0', [(8, 12)])], [(20, 12)], 'abi0')",
+        ),
+    ] {
+        let Some(path) = fixture(name) else {
+            continue;
+        };
+        let bin = GoBinary::open(&path).expect("open");
+        let pcln = Pclntab::parse(&bin).expect("parse");
+        let funcs = pcln.functions().expect("functions");
+        let md = ModuleData::locate(&bin).expect("moduledata");
+        let all = types::recover_with_mode(&bin, &md, types::Mode::Full).expect("types");
+        let found = itabs::recover_all(&bin, &md).expect("itabs");
+        let methods = unstrip::funcsig::merge_methods(
+            unstrip::funcsig::recover_methods_from_types(&bin, &md, &all),
+            unstrip::funcsig::recover_methods_from_itabs(&all, &found),
+        );
+        let mut cache = unstrip::funcsig::TypeCache::new(&bin, &md);
+        cache.seed_from(&all);
+        let prototypes = unstrip::funcsig::prototypes_by_pc(&methods, &mut cache);
+        let roots: Vec<u64> = prototypes
+            .values()
+            .flat_map(|p| p.receiver.iter().chain(&p.params).chain(&p.results))
+            .copied()
+            .collect();
+        let export_types =
+            types::recover_with_roots(&bin, &md, types::Mode::Focused, &roots).expect("types");
+
+        let mut export = unstrip::export::Export::new(&funcs, "unstrip");
+        export.types = &export_types;
+        export.prototypes = Some(&prototypes);
+        export.abi = abi;
+        export.pointer_size = bin.pointer_size() as u64;
+        let mut buf = Vec::new();
+        unstrip::export::write(&mut buf, unstrip::export::Target::Ghidra, &export).expect("emit");
+        let script = String::from_utf8(buf).expect("utf-8");
+
+        let encode = funcs
+            .iter()
+            .find(|f| f.name == "main.xorCodec.Encode")
+            .expect("main.xorCodec.Encode");
+        let line = format!("_proto(0x{:x}, {expected}", encode.address);
+        assert!(
+            script.lines().any(|l| l == line),
+            "{name}: expected {line}"
+        );
     }
 }

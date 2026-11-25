@@ -1,7 +1,41 @@
+//! Scripts that apply recovered names, types, prototypes and labels inside a
+//! reverse engineering tool: IDA (IDAPython), Ghidra (PyGhidra) and Binary
+//! Ninja.
+//!
+//! Each script is plain data calls (`_type(...)`, `_func(...)`, `_proto(...)`,
+//! `_label(...)`) behind a few helpers that do the tool's API work and count
+//! what applied. It ends with one line per kind and a total,
+//! `unstrip: done, N failures`, that a headless run can check.
+//!
+//! What each tool gets:
+//!
+//! - Types: every recovered struct as a packed C declaration with typed
+//!   fields, after the builtin `GoString`, `GoSlice`, `GoIface`, `GoEface`,
+//!   `GoComplex64` and `GoComplex128`. Each script checks the parsed size
+//!   against the recorded one. Ghidra keeps the Go type name as the type's
+//!   description.
+//! - Functions: the Go name as the label (sanitized for IDA, which rejects
+//!   Go punctuation), with the full Go name, signature and file:line as the
+//!   comment. An ABI wrapper and its target share a pclntab name; the ABI0
+//!   one of the pair gets the `.abi0` suffix the Go linker gives it.
+//! - Prototypes, Ghidra only: parameter and result types with the storage
+//!   Go's ABI gives them, set as custom storage. No C calling convention
+//!   describes Go's, and IDA and Binary Ninja could not be checked here, so
+//!   those two keep the signature in the comment only.
+//! - Labels: itabs, type descriptors and moduledata under the linker's names.
+
+mod abi;
+mod c;
+
+use std::collections::HashMap;
 use std::io::{self, Write};
 
+use crate::funcsig::Prototype;
+use crate::itabs::Itab;
 use crate::pclntab::Function;
-use crate::types::{KindData, KindName, StructField, Type};
+use crate::types::{KindName, Type};
+
+use self::c::{CTypes, Decl, Dialect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -11,6 +45,73 @@ pub enum Target {
     BinaryNinja,
 }
 
+/// The calling convention of the binary's Go code, which decides where a
+/// prototype's arguments and results live.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Abi {
+    /// Not known: no prototypes are applied.
+    #[default]
+    Unknown,
+    /// ABI0: arguments, then results, in the caller's frame. 386, and amd64
+    /// before Go 1.17.
+    Stack,
+    /// ABIInternal on amd64, Go 1.17 and later: integer and float registers,
+    /// the stack for what does not fit.
+    Amd64Register,
+}
+
+/// How the Go linker spells the symbols the labels are named after. Go 1.20
+/// renamed `type.` to `type:` and `go.itab.` to `go:itab.`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LinkerNames {
+    #[default]
+    Go120,
+    Legacy,
+}
+
+/// What a script applies. Start from [`Export::new`] and set the fields that
+/// apply; the defaults apply function names only.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Export<'a> {
+    pub functions: &'a [Function],
+    /// Recovered types: every struct becomes a C declaration, every named
+    /// type a descriptor label. Prototype types must be in here too.
+    pub types: &'a [Type],
+    /// Go-syntax signature by entry PC, for the function comments.
+    pub signatures: Option<&'a HashMap<u64, String>>,
+    /// Typed prototypes by entry PC, applied where the tool can place them.
+    pub prototypes: Option<&'a HashMap<u64, Prototype>>,
+    pub abi: Abi,
+    pub itabs: &'a [Itab],
+    /// Address of the module's `runtime.moduledata`.
+    pub moduledata: Option<u64>,
+    /// 4 or 8.
+    pub pointer_size: u64,
+    pub linker_names: LinkerNames,
+    /// Named in the header and in the script's output.
+    pub generator: &'a str,
+}
+
+impl<'a> Export<'a> {
+    pub fn new(functions: &'a [Function], generator: &'a str) -> Export<'a> {
+        Export {
+            functions,
+            types: &[],
+            signatures: None,
+            prototypes: None,
+            abi: Abi::Unknown,
+            itabs: &[],
+            moduledata: None,
+            pointer_size: 8,
+            linker_names: LinkerNames::Go120,
+            generator,
+        }
+    }
+}
+
 /// Emit a script that, run inside the target reverse engineering tool,
 /// applies every recovered function name (with file:line as a function
 /// comment) and every recovered struct type (as a C declaration the tool
@@ -18,722 +119,637 @@ pub enum Target {
 ///
 /// Pass `types` as an empty slice to emit functions only. Pass
 /// `signatures = None` to emit bare function names without the recovered
-/// Go-syntax signature in the per-function comment.
+/// Go-syntax signature in the per-function comment. [`write`] takes the full
+/// set of inputs.
 pub fn write_script<W: Write>(
     w: &mut W,
     target: Target,
     funcs: &[Function],
     types: &[Type],
-    signatures: Option<&std::collections::HashMap<u64, String>>,
+    signatures: Option<&HashMap<u64, String>>,
     generator: &str,
 ) -> io::Result<()> {
-    match target {
-        Target::Ida => write_ida(w, funcs, types, signatures, generator),
-        Target::Ghidra => write_ghidra(w, funcs, types, signatures, generator),
-        Target::BinaryNinja => write_binja(w, funcs, types, signatures, generator),
+    let mut export = Export::new(funcs, generator);
+    export.types = types;
+    export.signatures = signatures;
+    // Without a pointer size given, a pointer type's size says it.
+    if let Some(t) = types.iter().find(|t| t.kind == KindName::Pointer) {
+        if t.size == 4 {
+            export.pointer_size = 4;
+        }
     }
+    write(w, target, &export)
 }
 
-fn sig_for(
-    f: &Function,
-    signatures: Option<&std::collections::HashMap<u64, String>>,
-) -> Option<String> {
-    signatures.and_then(|m| m.get(&f.address)).cloned()
-}
+/// Emit the script for `target` from everything in `export`.
+pub fn write<W: Write>(w: &mut W, target: Target, export: &Export<'_>) -> io::Result<()> {
+    let plan = Plan::new(target, export);
+    let tool = match target {
+        Target::Ida => Tool::IDA,
+        Target::Ghidra => Tool::GHIDRA,
+        Target::BinaryNinja => Tool::BINJA,
+    };
+    let generator = export.generator;
 
-fn write_ida<W: Write>(
-    w: &mut W,
-    funcs: &[Function],
-    types: &[Type],
-    signatures: Option<&std::collections::HashMap<u64, String>>,
-    generator: &str,
-) -> io::Result<()> {
+    for line in tool.header {
+        writeln!(w, "{}", line.replace("{generator}", generator))?;
+    }
     writeln!(
         w,
-        "# Generated by {generator}. Run inside IDA: File -> Script File... (Python3)"
-    )?;
-    writeln!(w, "import ida_funcs, ida_name, ida_bytes, ida_typeinf, idc")?;
-    writeln!(w)?;
-    emit_stats_preamble(w)?;
-    writeln!(w, "def _func(addr, name, comment):")?;
-    writeln!(w, "    try:")?;
-    writeln!(w, "        ok = ida_funcs.add_func(addr)")?;
-    writeln!(
-        w,
-        "        ok = ida_name.set_name(addr, name, ida_name.SN_FORCE | ida_name.SN_NOCHECK) and ok"
-    )?;
-    writeln!(w, "        if comment:")?;
-    writeln!(w, "            idc.set_func_cmt(addr, comment, 0)")?;
-    writeln!(w, "        if ok:")?;
-    writeln!(w, "            _stats['func_ok'] += 1")?;
-    writeln!(w, "        else:")?;
-    writeln!(w, "            _stats['func_fail'] += 1")?;
-    writeln!(
-        w,
-        "            _stats['failures'].append(('func', '0x{{:x}} {{}}'.format(addr, name), 'IDA refused add_func or set_name'))"
-    )?;
-    writeln!(w, "    except Exception as e:")?;
-    writeln!(w, "        _stats['func_fail'] += 1")?;
-    writeln!(
-        w,
-        "        _stats['failures'].append(('func', '0x{{:x}} {{}}'.format(addr, name), repr(e)))"
+        "# {} type declarations, {} functions ({} ABI wrapper pairs marked), {} prototypes, {} labels ({} itabs, {} type descriptors, {} moduledata).",
+        plan.decls.len(),
+        plan.functions.len(),
+        plan.abi_pairs,
+        plan.prototypes.len(),
+        plan.labels.len(),
+        plan.n_itabs,
+        plan.n_descriptors,
+        plan.n_moduledata,
     )?;
     writeln!(w)?;
-    writeln!(w, "def _struct(decl):")?;
-    writeln!(w, "    try:")?;
-    writeln!(w, "        til = ida_typeinf.get_idati()")?;
-    writeln!(
-        w,
-        "        rc = ida_typeinf.parse_decls(til, decl, None, ida_typeinf.PT_TYP)"
-    )?;
-    // ida_typeinf.parse_decls returns the number of errors, so 0 means
-    // success. Any positive value indicates the parser rejected at least
-    // one struct in the supplied decl block.
-    writeln!(w, "        if rc == 0:")?;
-    writeln!(w, "            _stats['struct_ok'] += 1")?;
-    writeln!(w, "        else:")?;
-    writeln!(w, "            _stats['struct_fail'] += 1")?;
-    writeln!(
-        w,
-        "            _stats['failures'].append(('struct', decl.split('{{')[0].strip()[:80], 'IDA parse_decls returned {{}} errors'.format(rc)))"
-    )?;
-    writeln!(w, "    except Exception as e:")?;
-    writeln!(w, "        _stats['struct_fail'] += 1")?;
-    writeln!(
-        w,
-        "        _stats['failures'].append(('struct', decl.split('{{')[0].strip()[:80], repr(e)))"
-    )?;
+    w.write_all(tool.imports.as_bytes())?;
+    writeln!(w)?;
+    w.write_all(STATS.as_bytes())?;
+    writeln!(w)?;
+    w.write_all(tool.helpers.as_bytes())?;
     writeln!(w)?;
 
-    for f in funcs {
-        let name = sanitize_label(&f.name);
-        let sig = sig_for(f, signatures);
-        let comment = function_comment(f, sig.as_deref());
+    writeln!(w, "# Type declarations ({})", plan.decls.len())?;
+    for decl in &plan.decls {
         writeln!(
             w,
-            "_func(0x{:x}, {}, {})",
-            f.address,
-            escape_py(&name),
-            escape_py(&comment),
+            "_type({}, {}, {}, {})",
+            py_str(&decl.name),
+            py_str(&decl.text),
+            decl.size,
+            py_str(&decl.go_name),
         )?;
     }
-
-    if !types.is_empty() {
-        let decls = struct_c_decls(types);
-        writeln!(w)?;
-        writeln!(w, "# Recovered struct types ({} total)", decls.len())?;
-        for decl in decls {
-            writeln!(w, "_struct({})", escape_py(&decl))?;
-        }
-    }
-
-    emit_stats_postamble(w, generator)?;
-    Ok(())
-}
-
-fn write_ghidra<W: Write>(
-    w: &mut W,
-    funcs: &[Function],
-    types: &[Type],
-    signatures: Option<&std::collections::HashMap<u64, String>>,
-    generator: &str,
-) -> io::Result<()> {
-    writeln!(
-        w,
-        "# Generated by {generator}. Run inside Ghidra: Window -> Script Manager (Python)."
-    )?;
-    writeln!(w, "# @author Riven Labs")?;
-    writeln!(w, "# @category {generator}")?;
-    writeln!(w, "# @keybinding")?;
-    writeln!(w, "# @menupath Tools.{generator}.Apply recovered symbols")?;
-    writeln!(w, "# @toolbar")?;
-    writeln!(w, "# @runtime PyGhidra")?;
-    writeln!(
-        w,
-        "# @description Apply {generator}-recovered Go function names, file:line comments, and struct types to the current program."
-    )?;
     writeln!(w)?;
-    writeln!(
-        w,
-        "from ghidra.program.model.symbol.SourceType import USER_DEFINED"
-    )?;
-    writeln!(w, "from ghidra.app.util.cparser.C import CParser")?;
-    writeln!(
-        w,
-        "from ghidra.program.model.data import DataTypeConflictHandler"
-    )?;
-    writeln!(w)?;
-    writeln!(w, "fm = currentProgram.getFunctionManager()")?;
-    writeln!(w, "af = currentProgram.getAddressFactory()")?;
-    writeln!(w, "dtm = currentProgram.getDataTypeManager()")?;
-    writeln!(w, "listing = currentProgram.getListing()")?;
-    writeln!(w)?;
-    emit_stats_preamble(w)?;
-    writeln!(w, "def _func(addr, name, comment):")?;
-    writeln!(w, "    label = '0x{{:x}} {{}}'.format(addr, name)")?;
-    writeln!(w, "    try:")?;
-    writeln!(
-        w,
-        "        a = af.getDefaultAddressSpace().getAddress(addr)"
-    )?;
-    writeln!(w, "        f = fm.getFunctionAt(a)")?;
-    writeln!(w, "        if f is None:")?;
-    writeln!(
-        w,
-        "            f = fm.createFunction(name, a, None, USER_DEFINED)"
-    )?;
-    writeln!(w, "        else:")?;
-    writeln!(w, "            f.setName(name, USER_DEFINED)")?;
-    writeln!(w, "        if comment:")?;
-    writeln!(w, "            f.setComment(comment)")?;
-    writeln!(w, "        _stats['func_ok'] += 1")?;
-    writeln!(w, "    except Exception as e:")?;
-    writeln!(w, "        _stats['func_fail'] += 1")?;
-    writeln!(
-        w,
-        "        _stats['failures'].append(('func', label, repr(e)))"
-    )?;
-    writeln!(w)?;
-    writeln!(w, "def _struct(decl):")?;
-    writeln!(w, "    label = decl.split('{{')[0].strip()[:80]")?;
-    writeln!(w, "    try:")?;
-    writeln!(w, "        parser = CParser(dtm)")?;
-    writeln!(w, "        parsed = parser.parse(decl)")?;
-    writeln!(w, "        if parsed is None:")?;
-    writeln!(w, "            _stats['struct_fail'] += 1")?;
-    writeln!(
-        w,
-        "            _stats['failures'].append(('struct', label, 'CParser returned None'))"
-    )?;
-    writeln!(w, "            return")?;
-    writeln!(
-        w,
-        "        dtm.addDataType(parsed, DataTypeConflictHandler.REPLACE_HANDLER)"
-    )?;
-    writeln!(w, "        _stats['struct_ok'] += 1")?;
-    writeln!(w, "    except Exception as e:")?;
-    writeln!(w, "        _stats['struct_fail'] += 1")?;
-    writeln!(
-        w,
-        "        _stats['failures'].append(('struct', label, repr(e)))"
-    )?;
-    writeln!(w)?;
-
-    for f in funcs {
-        let name = sanitize_label(&f.name);
-        let sig = sig_for(f, signatures);
-        let comment = function_comment(f, sig.as_deref());
+    writeln!(w, "# Functions ({})", plan.functions.len())?;
+    for (addr, label, comment) in &plan.functions {
         writeln!(
             w,
-            "_func(0x{:x}, {}, {})",
-            f.address,
-            escape_py(&name),
-            escape_py(&comment),
+            "_func(0x{addr:x}, {}, {})",
+            py_str(label),
+            py_str(comment)
         )?;
     }
-
-    if !types.is_empty() {
-        let decls = struct_c_decls(types);
+    if tool.prototypes {
         writeln!(w)?;
-        writeln!(w, "# Recovered struct types ({} total)", decls.len())?;
-        for decl in decls {
-            writeln!(w, "_struct({})", escape_py(&decl))?;
+        writeln!(w, "# Prototypes ({})", plan.prototypes.len())?;
+        for (addr, decl, params, result, convention) in &plan.prototypes {
+            writeln!(
+                w,
+                "_proto(0x{addr:x}, {}, {params}, {result}, {})",
+                py_str(decl),
+                py_str(convention)
+            )?;
         }
     }
-
-    emit_stats_postamble(w, generator)?;
+    writeln!(w)?;
+    writeln!(w, "# Labels ({})", plan.labels.len())?;
+    for (addr, label) in &plan.labels {
+        writeln!(w, "_label(0x{addr:x}, {})", py_str(label))?;
+    }
+    writeln!(w)?;
+    w.write_all(SUMMARY.replace("{generator}", generator).as_bytes())?;
     Ok(())
 }
 
-fn write_binja<W: Write>(
-    w: &mut W,
-    funcs: &[Function],
-    types: &[Type],
-    signatures: Option<&std::collections::HashMap<u64, String>>,
-    generator: &str,
-) -> io::Result<()> {
-    writeln!(w, "# Generated by {generator}. Run inside Binary Ninja:")?;
-    writeln!(
-        w,
-        "#   bv = binaryninja.load('binary'); exec(open('this.py').read())"
-    )?;
-    writeln!(
-        w,
-        "from binaryninja import Symbol, SymbolType, Type as BNType"
-    )?;
-    writeln!(w)?;
-    emit_stats_preamble(w)?;
-    writeln!(w, "def _func(addr, name, comment):")?;
-    writeln!(w, "    label = '0x{{:x}} {{}}'.format(addr, name)")?;
-    writeln!(w, "    try:")?;
-    writeln!(w, "        bv.add_function(addr)")?;
-    writeln!(
-        w,
-        "        bv.define_user_symbol(Symbol(SymbolType.FunctionSymbol, addr, name))"
-    )?;
-    writeln!(w, "        if comment:")?;
-    writeln!(w, "            f = bv.get_function_at(addr)")?;
-    writeln!(w, "            if f is not None:")?;
-    writeln!(w, "                f.comment = comment")?;
-    writeln!(w, "        _stats['func_ok'] += 1")?;
-    writeln!(w, "    except Exception as e:")?;
-    writeln!(w, "        _stats['func_fail'] += 1")?;
-    writeln!(
-        w,
-        "        _stats['failures'].append(('func', label, repr(e)))"
-    )?;
-    writeln!(w)?;
-    writeln!(w, "def _struct(decl):")?;
-    writeln!(w, "    label = decl.split('{{')[0].strip()[:80]")?;
-    writeln!(w, "    try:")?;
-    writeln!(w, "        types = bv.parse_types_from_string(decl)")?;
-    writeln!(w, "        for name, typ in types.types.items():")?;
-    writeln!(w, "            bv.define_user_type(name, typ)")?;
-    writeln!(w, "        _stats['struct_ok'] += 1")?;
-    writeln!(w, "    except Exception as e:")?;
-    writeln!(w, "        _stats['struct_fail'] += 1")?;
-    writeln!(
-        w,
-        "        _stats['failures'].append(('struct', label, repr(e)))"
-    )?;
-    writeln!(w)?;
+/// Everything a script will emit, decided before any of it is written so
+/// the header counts are the emitted ones.
+struct Plan {
+    decls: Vec<Decl>,
+    /// (address, label, comment)
+    functions: Vec<(u64, String, String)>,
+    abi_pairs: usize,
+    /// (address, C declaration, parameter storage, result storage,
+    /// convention), the storage as Python literals.
+    prototypes: Vec<(u64, String, String, String, String)>,
+    labels: Vec<(u64, String)>,
+    n_itabs: usize,
+    n_descriptors: usize,
+    n_moduledata: usize,
+}
 
-    for f in funcs {
-        let name = sanitize_label(&f.name);
-        let sig = sig_for(f, signatures);
-        let comment = function_comment(f, sig.as_deref());
-        writeln!(
-            w,
-            "_func(0x{:x}, {}, {})",
-            f.address,
-            escape_py(&name),
-            escape_py(&comment),
-        )?;
-    }
+impl Plan {
+    fn new(target: Target, export: &Export<'_>) -> Plan {
+        let dialect = match target {
+            Target::Ida => Dialect::Ida,
+            Target::Ghidra => Dialect::Ghidra,
+            Target::BinaryNinja => Dialect::BinaryNinja,
+        };
+        let label = |name: &str| match target {
+            Target::Ida => sanitize_label(name),
+            Target::Ghidra => ghidra_label(name),
+            Target::BinaryNinja => name.to_string(),
+        };
 
-    if !types.is_empty() {
-        let decls = struct_c_decls(types);
-        writeln!(w)?;
-        writeln!(w, "# Recovered struct types ({} total)", decls.len())?;
-        for decl in decls {
-            writeln!(w, "_struct({})", escape_py(&decl))?;
+        let mut ctypes = CTypes::new(export.types, export.pointer_size, dialect);
+        let mut decls = ctypes.declarations(export.types);
+
+        let abi_names = abi_wrapper_names(export.functions);
+        let mut functions = Vec::with_capacity(export.functions.len());
+        for f in export.functions {
+            let (go_label, note) = match abi_names.get(&f.address) {
+                Some((name, note)) => (name.as_str(), Some(note.as_str())),
+                None => (f.name.as_str(), None),
+            };
+            let signature = export
+                .signatures
+                .and_then(|m| m.get(&f.address))
+                .map(String::as_str);
+            let comment = function_comment(f, signature, note);
+            functions.push((f.address, label(go_label), comment));
+        }
+
+        let mut prototypes = Vec::new();
+        let can_place = target == Target::Ghidra
+            && matches!(export.abi, Abi::Stack | Abi::Amd64Register)
+            && matches!(export.pointer_size, 4 | 8);
+        if let (true, Some(protos)) = (can_place, export.prototypes) {
+            let convention = match export.abi {
+                Abi::Amd64Register => "abi-internal",
+                _ => "abi0",
+            };
+            let mut tuples = abi::ResultTuples::default();
+            let mut pcs: Vec<u64> = export.functions.iter().map(|f| f.address).collect();
+            pcs.sort_unstable();
+            pcs.dedup();
+            for pc in pcs {
+                let Some(proto) = protos.get(&pc) else {
+                    continue;
+                };
+                let Some(placed) = abi::place(proto, export.abi, &mut ctypes, &mut tuples) else {
+                    continue;
+                };
+                let args: Vec<String> = placed
+                    .params
+                    .iter()
+                    .map(|(name, ctype, _)| format!("{ctype} {name}"))
+                    .collect();
+                let ret = match &placed.result {
+                    Some((ctype, _)) => ctype.as_str(),
+                    None => "void",
+                };
+                let decl = format!("{ret} f({});", args.join(", "));
+                let params: Vec<String> = placed
+                    .params
+                    .iter()
+                    .map(|(name, _, storage)| {
+                        format!("({}, {})", py_str(name), py_storage(storage))
+                    })
+                    .collect();
+                let result = match &placed.result {
+                    Some((_, storage)) => py_storage(storage),
+                    None => "None".to_string(),
+                };
+                prototypes.push((
+                    pc,
+                    decl,
+                    format!("[{}]", params.join(", ")),
+                    result,
+                    convention.to_string(),
+                ));
+            }
+            decls.extend(tuples.decls);
+        }
+
+        let (type_prefix, itab_prefix) = match export.linker_names {
+            LinkerNames::Go120 => ("type:", "go:itab."),
+            LinkerNames::Legacy => ("type.", "go.itab."),
+        };
+        let mut labels = Vec::new();
+        for itab in export.itabs {
+            let name = format!(
+                "{itab_prefix}{},{}",
+                itab.concrete_name, itab.interface_name
+            );
+            labels.push((itab.addr, label(&name)));
+        }
+        let n_itabs = labels.len();
+        for t in export.types {
+            if t.name.is_empty() {
+                continue;
+            }
+            labels.push((t.addr, label(&format!("{type_prefix}{}", t.name))));
+        }
+        let n_descriptors = labels.len() - n_itabs;
+        if let Some(addr) = export.moduledata {
+            labels.push((addr, label("runtime.firstmoduledata")));
+        }
+        let n_moduledata = labels.len() - n_itabs - n_descriptors;
+
+        Plan {
+            decls,
+            functions,
+            abi_pairs: abi_names.len() / 2,
+            prototypes,
+            labels,
+            n_itabs,
+            n_descriptors,
+            n_moduledata,
         }
     }
-
-    emit_stats_postamble(w, generator)?;
-    Ok(())
 }
 
-/// Emit the shared Python preamble that initializes the per-script
-/// success/failure counters. Every writer calls this once before the
-/// per-symbol _func() and _struct() calls so the helpers have a place
-/// to record what landed and what did not.
-fn emit_stats_preamble<W: Write>(w: &mut W) -> io::Result<()> {
-    writeln!(w, "_stats = {{")?;
-    writeln!(w, "    'func_ok': 0,")?;
-    writeln!(w, "    'func_fail': 0,")?;
-    writeln!(w, "    'struct_ok': 0,")?;
-    writeln!(w, "    'struct_fail': 0,")?;
-    writeln!(w, "    'failures': [],")?;
-    writeln!(w, "}}")?;
-    writeln!(w)?;
-    Ok(())
-}
-
-/// Emit the shared Python postamble that prints honest counts and a
-/// per-failure breakdown. Called once at the bottom of every writer
-/// after the last _func() / _struct() call.
-fn emit_stats_postamble<W: Write>(w: &mut W, generator: &str) -> io::Result<()> {
-    writeln!(w)?;
-    writeln!(w, "_func_total = _stats['func_ok'] + _stats['func_fail']")?;
-    writeln!(
-        w,
-        "_struct_total = _stats['struct_ok'] + _stats['struct_fail']"
-    )?;
-    writeln!(
-        w,
-        "print('{generator}: applied {{}}/{{}} symbols ({{}} failed)'.format(_stats['func_ok'], _func_total, _stats['func_fail']))"
-    )?;
-    writeln!(
-        w,
-        "print('{generator}: applied {{}}/{{}} struct types ({{}} failed)'.format(_stats['struct_ok'], _struct_total, _stats['struct_fail']))"
-    )?;
-    // Limit the per-failure dump to keep the Script Manager output
-    // readable; surface enough to start debugging without dumping
-    // thousands of lines on a bad export.
-    writeln!(w, "if _stats['failures']:")?;
-    writeln!(
-        w,
-        "    print('{generator}: first {{}} failures:'.format(min(20, len(_stats['failures']))))"
-    )?;
-    writeln!(w, "    for kind, key, reason in _stats['failures'][:20]:")?;
-    writeln!(
-        w,
-        "        print('  {{}}  {{}}  {{}}'.format(kind, key, reason))"
-    )?;
-    writeln!(w, "    if len(_stats['failures']) > 20:")?;
-    writeln!(
-        w,
-        "        print('  ... and {{}} more (see _stats[\"failures\"] for the full list)'.format(len(_stats['failures']) - 20))"
-    )?;
-    Ok(())
-}
-
-/// Sanitize a Go symbol name into a label the disassembler will accept.
-/// Go names contain `.`, `(`, `)`, `*`, `[`, `]`, `/`, `,`, `<-`, etc.
-/// IDA accepts most of these; Ghidra is stricter. We map the universally
-/// rejected characters to `_` and keep `.` since both tools tolerate it.
-fn sanitize_label(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for ch in name.chars() {
-        match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '.' | '$' => out.push(ch),
-            // Replace structural chars with underscore. The original full name
-            // ends up in the function comment so nothing is lost.
-            '(' | ')' | '[' | ']' | '*' | '/' | ',' | ' ' | '-' | '<' | '>' | '{' | '}' | ':'
-            | ';' | '"' | '\'' | '?' | '!' | '#' | '@' | '\\' | '+' | '=' | '&' | '|' | '^'
-            | '~' | '%' => out.push('_'),
-            _ => out.push('_'),
-        }
+/// The label and comment note of each function in an ABI wrapper pair. Go
+/// 1.17 and later compile a wrapper between the stack ABI (ABI0, assembly)
+/// and the register ABI (ABIInternal, Go) wherever one calls the other, and
+/// the pclntab names it after its target. The wrapper is the one whose file
+/// is `<autogenerated>`. The linker's symbol table calls the ABI0 side
+/// `name.abi0`: the wrapper when the target is Go, the target when it is
+/// assembly.
+fn abi_wrapper_names(functions: &[Function]) -> HashMap<u64, (String, String)> {
+    let mut by_name: HashMap<&str, Vec<&Function>> = HashMap::new();
+    for f in functions {
+        by_name.entry(f.name.as_str()).or_default().push(f);
     }
-    // Disassemblers reject labels starting with a digit.
-    if out
-        .chars()
-        .next()
-        .map(|c| c.is_ascii_digit())
-        .unwrap_or(false)
-    {
-        out.insert(0, '_');
+    let is_generated = |f: &Function| f.file.as_deref() == Some("<autogenerated>");
+    let mut res = HashMap::new();
+    for (name, group) in by_name {
+        let [a, b] = group.as_slice() else {
+            continue;
+        };
+        let (wrapper, target) = match (is_generated(a), is_generated(b)) {
+            (true, false) => (*a, *b),
+            (false, true) => (*b, *a),
+            _ => continue,
+        };
+        let target_is_asm = target.file.as_deref().is_some_and(|f| f.ends_with(".s"));
+        let abi0 = format!("{name}.abi0");
+        let (wrapper_name, wrapper_note, target_name, target_note) = if target_is_asm {
+            (
+                name.to_string(),
+                format!(
+                    "ABIInternal wrapper of the assembly (ABI0) body at 0x{:x}",
+                    target.address
+                ),
+                abi0,
+                format!(
+                    "assembly (ABI0) body; its ABIInternal wrapper is at 0x{:x}",
+                    wrapper.address
+                ),
+            )
+        } else {
+            (
+                abi0,
+                format!("ABI0 wrapper of the Go body at 0x{:x}", target.address),
+                name.to_string(),
+                format!("Go body; its ABI0 wrapper is at 0x{:x}", wrapper.address),
+            )
+        };
+        res.insert(wrapper.address, (wrapper_name, wrapper_note));
+        res.insert(target.address, (target_name, target_note));
     }
-    if out.is_empty() {
-        out.push('_');
-    }
-    out
+    res
 }
 
-/// A C identifier for a Go name, for the declarations the tools' C parsers
-/// read. Those accept letters, digits and `_` only, so `.` and the rest of
-/// Go's punctuation map to `_`. A leading digit gets a `_` prefix and a C
-/// keyword a `_` suffix.
-fn c_identifier(name: &str) -> String {
-    let mut out: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
-        out.insert(0, '_');
-    }
-    escape_c_field_name(&out)
-}
-
-/// Per-function comment: "go: <full name>\n<file>:<line>".
-fn function_comment(f: &Function, signature: Option<&str>) -> String {
-    let mut s = format!("go: {}", f.name);
+/// The function comment: `go: <full name><signature>`, then the ABI note
+/// and `<file>:<line>` when known.
+fn function_comment(f: &Function, signature: Option<&str>, note: Option<&str>) -> String {
+    let mut res = format!("go: {}", f.name);
     if let Some(sig) = signature {
-        s.push_str(sig);
+        res.push_str(sig);
+    }
+    if let Some(note) = note {
+        res.push('\n');
+        res.push_str(note);
     }
     if let Some(file) = &f.file {
-        s.push('\n');
-        s.push_str(file);
+        res.push('\n');
+        res.push_str(file);
         if let Some(line) = f.start_line {
-            s.push(':');
-            s.push_str(&line.to_string());
+            res.push(':');
+            res.push_str(&line.to_string());
         }
     }
-    s
+    res
 }
 
-/// Produce C struct declarations for every recovered Go struct type.
-/// Fields whose types we can't easily express in C (other structs, slices,
-/// interfaces) become opaque byte arrays of the right size so the layout
-/// stays correct in the disassembler's struct view.
-/// C keywords and Ghidra-CParser reserved words that would collide with a
-/// Go field name. Any field whose sanitized name lands in this set gets a
-/// trailing underscore so the C parser doesn't reject the whole struct.
-///
-/// The collision is real: `runtime.boundsError` has a Go field named
-/// `signed bool`, which renders as `unsigned char signed;` and breaks the
-/// parse silently. Same story for any Go type with a field named after a
-/// C type-specifier or storage-class keyword.
-fn is_c_reserved(name: &str) -> bool {
-    matches!(
-        name,
-        "auto"
-            | "break"
-            | "case"
-            | "char"
-            | "const"
-            | "continue"
-            | "default"
-            | "do"
-            | "double"
-            | "else"
-            | "enum"
-            | "extern"
-            | "float"
-            | "for"
-            | "goto"
-            | "if"
-            | "inline"
-            | "int"
-            | "long"
-            | "register"
-            | "restrict"
-            | "return"
-            | "short"
-            | "signed"
-            | "sizeof"
-            | "static"
-            | "struct"
-            | "switch"
-            | "typedef"
-            | "union"
-            | "unsigned"
-            | "void"
-            | "volatile"
-            | "while"
-            | "_Alignas"
-            | "_Alignof"
-            | "_Atomic"
-            | "_Bool"
-            | "_Complex"
-            | "_Generic"
-            | "_Imaginary"
-            | "_Noreturn"
-            | "_Static_assert"
-            | "_Thread_local"
-    )
+/// Storage as a Python list, most significant piece first, the order Ghidra
+/// takes for a value split over several registers. A register piece is
+/// `('RAX', 8)`, a stack piece `(16, 8)`.
+fn py_storage(storage: &abi::Storage) -> String {
+    let pieces: Vec<String> = storage
+        .iter()
+        .rev()
+        .map(|piece| match piece {
+            abi::Piece::Register(reg, size) => format!("('{reg}', {size})"),
+            abi::Piece::Stack(offset, size) => format!("({offset}, {size})"),
+        })
+        .collect();
+    format!("[{}]", pieces.join(", "))
 }
 
-/// Escape a field name that would otherwise collide with a C reserved
-/// keyword. Suffix with `_`. The original Go field name is preserved in
-/// the recovered function comment elsewhere; this is only the C-decl
-/// identifier used by the disassembler's parser.
-fn escape_c_field_name(name: &str) -> String {
-    if is_c_reserved(name) {
-        format!("{name}_")
-    } else {
-        name.to_string()
+/// Sanitize a Go symbol name into a label IDA accepts. Go names contain `.`,
+/// `(`, `)`, `*`, `[`, `]`, `/`, `,`, spaces and more; IDA keeps `.` and `$`
+/// and rejects the rest, which map to `_`. The full name stays in the
+/// function comment.
+fn sanitize_label(name: &str) -> String {
+    let mut res: String = name
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '.' | '$' => c,
+            _ => '_',
+        })
+        .collect();
+    if res.is_empty() || res.starts_with(|c: char| c.is_ascii_digit()) {
+        res.insert(0, '_');
     }
+    res
 }
 
-fn struct_c_decls(types: &[Type]) -> Vec<String> {
-    let by_addr: std::collections::HashMap<u64, &Type> =
-        types.iter().map(|t| (t.addr, t)).collect();
-    let mut decls = Vec::new();
-    let mut emitted_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for t in types {
-        let KindData::Struct { fields } = &t.kind_data else {
-            continue;
-        };
-        // Two Go types can map to one identifier: `sync.Mutex` and
-        // `internal/sync.Mutex` share a name, and `a.b_c` and `a_b.c` share
-        // an identifier. The later one takes the Go type hash as a suffix,
-        // which is the same in every build of the type.
-        let mut c_name = c_identifier(&t.name);
-        if !emitted_names.insert(c_name.clone()) {
-            c_name = format!("{c_name}_{:08x}", t.hash);
-            if !emitted_names.insert(c_name.clone()) {
-                continue;
-            }
-        }
-        let mut decl = format!("struct {} {{\n", c_name);
-        let mut next_offset = 0u64;
-        let mut emitted = 0usize;
-        for (idx, field) in fields.iter().enumerate() {
-            let fsize = field_size(field, &by_addr);
-            // Zero-size fields (Go marker types like sys.NotInHeap, struct{})
-            // would render as `unsigned char foo[0];` which some C parsers
-            // (including Ghidra's CParser on some versions) reject. Skip them.
-            if fsize == 0 {
-                continue;
-            }
-            // Pad to the field's offset if Go inserted alignment padding.
-            if field.offset > next_offset {
-                let pad = field.offset - next_offset;
-                decl.push_str(&format!("    unsigned char _pad_{idx}[{pad}];\n"));
-                next_offset = field.offset;
-            }
-            let (prefix, suffix) = c_type_for_field(field, &by_addr);
-            let fname = c_identifier(&field.name);
-            let fname = if fname == "_" {
-                format!("_anon_{idx}")
+/// A Go name as a Ghidra label. Ghidra takes Go's punctuation as is and
+/// rejects whitespace, which only anonymous struct types in generic shapes
+/// (`go.shape.struct { X int }`) put in a name.
+fn ghidra_label(name: &str) -> String {
+    let res: String = name
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() || c.is_control() {
+                '_'
             } else {
-                fname
-            };
-            decl.push_str(&format!("    {prefix} {fname}{suffix};\n"));
-            next_offset += fsize;
-            emitted += 1;
-        }
-        if next_offset < t.size {
-            let tail = t.size - next_offset;
-            decl.push_str(&format!("    unsigned char _tail[{tail}];\n"));
-        }
-        // Empty structs would emit `struct foo {};` which Ghidra rejects.
-        if emitted == 0 && t.size == 0 {
-            // Zero-size struct (Go's `struct{}` family). Skip; nothing to model.
-            continue;
-        }
-        decl.push_str("};\n");
-        decls.push(decl);
+                c
+            }
+        })
+        .collect();
+    if res.is_empty() {
+        return "_".to_string();
     }
-    decls
+    res
 }
 
-fn field_size(field: &StructField, by_addr: &std::collections::HashMap<u64, &Type>) -> u64 {
-    by_addr.get(&field.typ).map(|t| t.size).unwrap_or(8)
-}
-
-/// Map a Go field to a C type that has the right byte size. We don't try to
-/// preserve semantic types (the field's "real" type is in the unstrip JSON);
-/// we only need correct sizing so the disassembler's struct view shows
-/// field-aligned offsets.
-/// Returns `(type_prefix, suffix)` so callers can emit `<prefix> <name><suffix>`.
-/// C array fields look like `unsigned char field[16];` (suffix is `[16]`);
-/// most other types have empty suffix.
-fn c_type_for_field(
-    field: &StructField,
-    by_addr: &std::collections::HashMap<u64, &Type>,
-) -> (String, String) {
-    let Some(t) = by_addr.get(&field.typ) else {
-        return ("void *".into(), String::new());
-    };
-    match t.kind {
-        KindName::Bool | KindName::Uint8 | KindName::Int8 => {
-            ("unsigned char".into(), String::new())
-        }
-        KindName::Int16 | KindName::Uint16 => ("unsigned short".into(), String::new()),
-        KindName::Int32 | KindName::Uint32 | KindName::Float32 => {
-            ("unsigned int".into(), String::new())
-        }
-        // int, uint and uintptr are the pointer width: 4 bytes on 386.
-        KindName::Int | KindName::Uint | KindName::Uintptr if t.size == 4 => {
-            ("unsigned int".into(), String::new())
-        }
-        KindName::Int64
-        | KindName::Uint64
-        | KindName::Float64
-        | KindName::Int
-        | KindName::Uint
-        | KindName::Uintptr => ("unsigned long long".into(), String::new()),
-        KindName::Pointer
-        | KindName::UnsafePointer
-        | KindName::Chan
-        | KindName::Map
-        | KindName::Func => ("void *".into(), String::new()),
-        // Sized aggregates become opaque byte arrays. Disassembler still
-        // sees the right struct layout, and the field name preserves intent.
-        _ => ("unsigned char".into(), format!("[{}]", t.size)),
-    }
-}
-
-/// Python single-quoted string literal with `\` and `'` escaped. Go symbol
-/// names can contain `()`, `[]`, `*`, and other punctuation but no quotes;
-/// escaping `'`, `\`, and newlines (for multi-line comments) is sufficient.
-fn escape_py(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
+/// A Python single-quoted string literal. Go names hold no quotes, but
+/// comments and declarations span lines and file paths hold backslashes.
+fn py_str(s: &str) -> String {
+    let mut res = String::with_capacity(s.len() + 2);
+    res.push('\'');
     for c in s.chars() {
         match c {
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
-            c => out.push(c),
+            '\\' => res.push_str("\\\\"),
+            '\'' => res.push_str("\\'"),
+            '\n' => res.push_str("\\n"),
+            '\r' => res.push_str("\\r"),
+            '\t' => res.push_str("\\t"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                res.push_str(&format!("\\x{:02x}", c as u32))
+            }
+            c => res.push(c),
         }
     }
-    out.push('\'');
-    out
+    res.push('\'');
+    res
 }
+
+/// The per-tool parts of a script.
+struct Tool {
+    header: &'static [&'static str],
+    imports: &'static str,
+    helpers: &'static str,
+    prototypes: bool,
+}
+
+impl Tool {
+    const IDA: Tool = Tool {
+        header: &[
+            "# Generated by {generator}. Run inside IDA: File -> Script file... (IDAPython 3).",
+        ],
+        imports: IDA_IMPORTS,
+        helpers: IDA_HELPERS,
+        prototypes: false,
+    };
+    const GHIDRA: Tool = Tool {
+        header: &[
+            "# Generated by {generator}. Run inside Ghidra with PyGhidra (Ghidra 12 runs Python",
+            "# scripts only through PyGhidra: support/pyghidraRun, or pyghidraRun -H for headless).",
+            "# @author Riven Labs",
+            "# @category {generator}",
+            "# @keybinding",
+            "# @menupath Tools.{generator}.Apply recovered symbols",
+            "# @toolbar",
+            "# @runtime PyGhidra",
+            "# @description Apply {generator}-recovered Go types, function names, prototypes and labels to the current program.",
+        ],
+        imports: GHIDRA_IMPORTS,
+        helpers: GHIDRA_HELPERS,
+        prototypes: true,
+    };
+    const BINJA: Tool = Tool {
+        header: &[
+            "# Generated by {generator}. Run inside Binary Ninja's Python console with `bv` set:",
+            "#   exec(open('this.py').read())",
+        ],
+        imports: BINJA_IMPORTS,
+        helpers: BINJA_HELPERS,
+        prototypes: false,
+    };
+}
+
+/// Counters every script shares, and the failure recorder.
+const STATS: &str = r#"_stats = {}
+_failures = []
+
+def _ok(kind):
+    _stats.setdefault(kind, [0, 0])[0] += 1
+
+def _fail(kind, key, reason):
+    _stats.setdefault(kind, [0, 0])[1] += 1
+    _failures.append((kind, key, reason))
+"#;
+
+const IDA_IMPORTS: &str = r#"import ida_funcs, ida_name, ida_typeinf, idc
+"#;
+
+const IDA_HELPERS: &str = r#"_til = ida_typeinf.get_idati()
+_parse_flags = ida_typeinf.HTI_DCL | getattr(ida_typeinf, 'HTI_PAK1', 0)
+
+def _type(name, decl, size, go_name):
+    try:
+        errors = ida_typeinf.parse_decls(_til, decl, None, _parse_flags)
+        if errors != 0:
+            _fail('type', name, 'parse_decls reported {} errors'.format(errors))
+            return
+        tif = ida_typeinf.tinfo_t()
+        if not tif.get_named_type(_til, name):
+            _fail('type', name, 'not found after parsing')
+            return
+        if tif.get_size() != size:
+            _fail('type', name, 'parsed size {} differs from the recorded {}'.format(tif.get_size(), size))
+            return
+        _ok('type')
+    except Exception as e:
+        _fail('type', name, repr(e))
+
+def _func(addr, name, comment):
+    try:
+        ida_funcs.add_func(addr)
+        if not ida_name.set_name(addr, name, ida_name.SN_NOCHECK | ida_name.SN_FORCE):
+            _fail('func', '0x{:x} {}'.format(addr, name), 'set_name refused')
+            return
+        if comment:
+            idc.set_func_cmt(addr, comment, 0)
+        _ok('func')
+    except Exception as e:
+        _fail('func', '0x{:x} {}'.format(addr, name), repr(e))
+
+def _label(addr, name):
+    try:
+        if not ida_name.set_name(addr, name, ida_name.SN_NOCHECK | ida_name.SN_FORCE):
+            _fail('label', '0x{:x} {}'.format(addr, name), 'set_name refused')
+            return
+        _ok('label')
+    except Exception as e:
+        _fail('label', '0x{:x} {}'.format(addr, name), repr(e))
+"#;
+
+const GHIDRA_IMPORTS: &str = r#"from java.util import ArrayList
+from ghidra.app.util.cparser.C import CParser
+from ghidra.program.model.data import DataTypeConflictHandler, VoidDataType
+from ghidra.program.model.listing import Function, ParameterImpl, ReturnParameterImpl, VariableStorage
+from ghidra.program.model.pcode import Varnode
+from ghidra.program.model.symbol import SourceType
+"#;
+
+const GHIDRA_HELPERS: &str = r#"_program = currentProgram
+_dtm = _program.getDataTypeManager()
+_fm = _program.getFunctionManager()
+_conventions = [c.getName() for c in _program.getCompilerSpec().getCallingConventions()]
+
+def _type(name, decl, size, go_name):
+    try:
+        parsed = CParser(_dtm).parse(decl)
+        if parsed is None:
+            _fail('type', name, 'CParser returned None')
+            return
+        added = _dtm.addDataType(parsed, DataTypeConflictHandler.REPLACE_HANDLER)
+        if added.getName() != name:
+            _fail('type', name, 'added as {}'.format(added.getName()))
+            return
+        if added.getLength() != size:
+            _fail('type', name, 'parsed size {} differs from the recorded {}'.format(added.getLength(), size))
+            return
+        added.setDescription('go: ' + go_name)
+        _ok('type')
+    except Exception as e:
+        _fail('type', name, repr(e))
+
+def _func(addr, name, comment):
+    key = '0x{:x} {}'.format(addr, name)
+    try:
+        a = toAddr(addr)
+        f = _fm.getFunctionAt(a)
+        if f is None:
+            disassemble(a)
+            f = createFunction(a, name)
+            if f is None:
+                _fail('func', key, 'createFunction returned None')
+                return
+        else:
+            f.setName(name, SourceType.USER_DEFINED)
+        if comment:
+            f.setComment(comment)
+        _ok('func')
+    except Exception as e:
+        _fail('func', key, repr(e))
+
+def _storage(pieces):
+    # Most significant piece first. ('RAX', 8) is the low 8 bytes of a
+    # register, (16, 8) is 8 bytes at entry SP + 16.
+    if len(pieces) == 1 and not isinstance(pieces[0][0], str):
+        return VariableStorage(_program, pieces[0][0], pieces[0][1])
+    varnodes = []
+    for where, size in pieces:
+        if isinstance(where, str):
+            varnodes.append(Varnode(_program.getRegister(where).getAddress(), size))
+        else:
+            varnodes.append(Varnode(_program.getAddressFactory().getStackSpace().getAddress(where), size))
+    return VariableStorage(_program, *varnodes)
+
+def _proto(addr, decl, params, result, convention):
+    key = '0x{:x}'.format(addr)
+    try:
+        f = _fm.getFunctionAt(toAddr(addr))
+        if f is None:
+            _fail('proto', key, 'no function')
+            return
+        parsed = CParser(_dtm).parse(decl)
+        args = parsed.getArguments()
+        if len(args) != len(params):
+            _fail('proto', key, 'parsed {} arguments, expected {}'.format(len(args), len(params)))
+            return
+        plist = ArrayList()
+        for arg, (name, pieces) in zip(args, params):
+            plist.add(ParameterImpl(name, arg.getDataType(), _storage(pieces), _program))
+        if result is None:
+            ret = ReturnParameterImpl(VoidDataType.dataType, VariableStorage.VOID_STORAGE, _program)
+        else:
+            ret = ReturnParameterImpl(parsed.getReturnType(), _storage(result), _program)
+        if convention not in _conventions:
+            convention = f.getCallingConventionName()
+        f.updateFunction(convention, ret, plist, Function.FunctionUpdateType.CUSTOM_STORAGE, True, SourceType.USER_DEFINED)
+        _ok('proto')
+    except Exception as e:
+        _fail('proto', key, repr(e))
+
+def _label(addr, name):
+    try:
+        createLabel(toAddr(addr), name, True, SourceType.USER_DEFINED)
+        _ok('label')
+    except Exception as e:
+        _fail('label', '0x{:x} {}'.format(addr, name), repr(e))
+"#;
+
+const BINJA_IMPORTS: &str = r#"from binaryninja import Symbol, SymbolType
+"#;
+
+const BINJA_HELPERS: &str = r#"def _type(name, decl, size, go_name):
+    try:
+        parsed = bv.parse_types_from_string(decl)
+        for type_name, typ in parsed.types.items():
+            bv.define_user_type(type_name, typ)
+        typ = bv.get_type_by_name(name)
+        if typ is None:
+            _fail('type', name, 'not found after parsing')
+            return
+        if typ.width != size:
+            _fail('type', name, 'parsed size {} differs from the recorded {}'.format(typ.width, size))
+            return
+        _ok('type')
+    except Exception as e:
+        _fail('type', name, repr(e))
+
+def _func(addr, name, comment):
+    try:
+        bv.add_function(addr)
+        bv.define_user_symbol(Symbol(SymbolType.FunctionSymbol, addr, name))
+        if comment:
+            f = bv.get_function_at(addr)
+            if f is not None:
+                f.comment = comment
+        _ok('func')
+    except Exception as e:
+        _fail('func', '0x{:x} {}'.format(addr, name), repr(e))
+
+def _label(addr, name):
+    try:
+        bv.define_user_symbol(Symbol(SymbolType.DataSymbol, addr, name))
+        _ok('label')
+    except Exception as e:
+        _fail('label', '0x{:x} {}'.format(addr, name), repr(e))
+"#;
+
+/// The closing report every script prints.
+const SUMMARY: &str = r#"for _kind, _title in (('type', 'type declarations'), ('func', 'functions'), ('proto', 'prototypes'), ('label', 'labels')):
+    _ok_n, _fail_n = _stats.get(_kind, [0, 0])
+    print('{generator}: applied {}/{} {} ({} failed)'.format(_ok_n, _ok_n + _fail_n, _title, _fail_n))
+for _kind, _key, _reason in _failures[:20]:
+    print('{generator}: failed {} {}: {}'.format(_kind, _key, _reason))
+if len(_failures) > 20:
+    print('{generator}: and {} more failures'.format(len(_failures) - 20))
+print('{generator}: done, {} failures'.format(len(_failures)))
+"#;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escapes_quotes_and_backslashes() {
-        assert_eq!(escape_py("a'b"), "'a\\'b'");
-        assert_eq!(escape_py("a\\b"), "'a\\\\b'");
-    }
-
-    #[test]
-    fn passes_normal_go_names() {
-        assert_eq!(escape_py("main.main"), "'main.main'");
-        assert_eq!(escape_py("(*os.File).Read"), "'(*os.File).Read'");
-    }
-
-    #[test]
-    fn sanitize_label_handles_go_punctuation() {
-        assert_eq!(sanitize_label("main.main"), "main.main");
-        assert_eq!(sanitize_label("(*os.File).Read"), "__os.File_.Read");
-        assert_eq!(
-            sanitize_label("main.Set[go.shape.string]"),
-            "main.Set_go.shape.string_"
-        );
-        assert_eq!(sanitize_label("123main"), "_123main");
-    }
-
-    #[test]
-    fn escapes_newlines_in_comments() {
-        assert_eq!(escape_py("a\nb"), "'a\\nb'");
-    }
-    #[test]
-    fn struct_declarations_use_unique_c_identifiers() {
-        let structure = |addr: u64, name: &str, hash: u32| Type {
-            addr,
-            name: name.to_string(),
-            kind: KindName::Struct,
-            size: 8,
-            hash,
-            kind_data: KindData::Struct {
-                fields: vec![StructField {
-                    name: "signed".into(),
-                    typ: 0,
-                    ..Default::default()
-                }],
-            },
-            ..Default::default()
-        };
-        let types = vec![
-            structure(0x10, "main.Config", 1),
-            structure(0x20, "sync.Mutex", 2),
-            structure(0x30, "sync.Mutex", 3),
-            structure(0x40, "a.b_c", 4),
-            structure(0x50, "a_b.c", 5),
-            structure(0x60, "main.Set[go.shape.string]", 6),
-        ];
-        let heads: Vec<String> = struct_c_decls(&types)
-            .iter()
-            .map(|d| d.split('{').next().unwrap().trim().to_string())
-            .collect();
-        assert_eq!(
-            heads,
-            [
-                "struct main_Config",
-                "struct sync_Mutex",
-                "struct sync_Mutex_00000003",
-                "struct a_b_c",
-                "struct a_b_c_00000005",
-                "struct main_Set_go_shape_string_",
-            ]
-        );
-        let decls = struct_c_decls(&types);
-        assert!(
-            decls[0].contains("void * signed_;"),
-            "a field named after a C keyword is renamed: {}",
-            decls[0]
-        );
-    }
-
-    #[test]
-    fn c_identifiers_hold_only_letters_digits_and_underscores() {
-        assert_eq!(c_identifier("errors.errorString"), "errors_errorString");
-        assert_eq!(c_identifier("*main.T"), "_main_T");
-        assert_eq!(c_identifier("1x"), "_1x");
-        assert_eq!(c_identifier("int"), "int_");
-        assert_eq!(c_identifier("café.T"), "caf__T");
-    }
-}
+mod tests;
