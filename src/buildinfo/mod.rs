@@ -34,6 +34,10 @@ pub struct Replace {
     pub to: Module,
 }
 
+/// One `build` line: `-buildmode`, `-ldflags`, `CGO_ENABLED`, `GOOS`,
+/// `vcs.revision` and so on. The key is as recorded, with the leading dash of
+/// a flag, and a quoted value is unquoted, as `debug.ParseBuildInfo` and
+/// `go version -m` give them.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct Setting {
@@ -46,6 +50,16 @@ const FLAG_VARINT_STRINGS: u8 = 2;
 const FLAG_BIG_ENDIAN: u8 = 1;
 
 impl BuildInfo {
+    /// The value of the build setting `key` (`GOOS`, `CGO_ENABLED`,
+    /// `vcs.revision`), if the build recorded it. Go records settings from
+    /// 1.18 on.
+    pub fn setting(&self, key: &str) -> Option<&str> {
+        self.settings
+            .iter()
+            .find(|s| s.key == key)
+            .map(|s| s.value.as_str())
+    }
+
     pub fn parse(bin: &GoBinary) -> Result<Self> {
         let header_offset = find_buildinfo(&bin.bytes)
             .ok_or_else(|| Error::BuildInfo("buildinfo header not found".into()))?;
@@ -145,7 +159,7 @@ fn decode_pointers(
     // modinfo blob is a few KiB; the cap only stops a corrupt length.
     const MAX_STRING: u64 = 16 << 20;
     let read_string = |addr: u64| -> Result<&[u8]> {
-        let hdr = bin.read_at_addr(addr, 2 * ptrsize).ok_or_else(|| {
+        let hdr = bin.read_loaded(addr, 2 * ptrsize).ok_or_else(|| {
             Error::BuildInfo(format!("buildinfo string header at 0x{addr:x} unmapped"))
         })?;
         let data = read_ptr(hdr).unwrap_or(0);
@@ -158,7 +172,7 @@ fn decode_pointers(
                 "buildinfo string length {len} unreasonably large"
             )));
         }
-        bin.read_at_addr(data, len as usize).ok_or_else(|| {
+        bin.read_loaded(data, len as usize).ok_or_else(|| {
             Error::BuildInfo(format!(
                 "buildinfo string data at 0x{data:x} ({len} bytes) unmapped"
             ))
@@ -258,8 +272,10 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
 ///   mod\t<module path>\t<version>\t<h1 sum>
 ///   dep\t<module path>\t<version>\t<h1 sum>
 ///   =>\t<replacement path>\t<version>\t<h1 sum>
-///   build\t<setting key>\t<setting value>      (in newer formats)
-///   build\t-<key>=<value>                       (in older formats)
+///   build\t<key>=<value>                        (Go 1.18 and later)
+///
+/// A build key or value with a space, tab, newline or quote in it is written
+/// as a Go string literal (`-ldflags="-s -w"`).
 ///
 /// Wrapped in `\xa1\xa2\xa3\xa4 ... \xa4\xa3\xa2\xa1` markers we strip.
 fn parse_modinfo(trimmed: &str) -> BuildInfo {
@@ -303,23 +319,89 @@ fn parse_modinfo(trimmed: &str) -> BuildInfo {
                 }
             }
             "build" => {
-                // Modern format: `build\t<key>\t<value>`. Older: `build\t-key=value`.
-                let rest = parts.next().unwrap_or("");
-                let value = parts.next();
-                let (k, v) = match value {
-                    Some(v) => (rest.to_string(), v.to_string()),
-                    None => match rest.split_once('=') {
-                        Some((k, v)) => (k.trim_start_matches('-').to_string(), v.to_string()),
-                        None => (rest.trim_start_matches('-').to_string(), String::new()),
-                    },
-                };
-                info.settings.push(Setting { key: k, value: v });
+                // The setting is the rest of the line: a quoted key or value
+                // has no raw tab, but `splitn` would still cut a bare one.
+                let rest = line.strip_prefix("build\t").unwrap_or("");
+                let (key, value) = split_setting(rest);
+                info.settings.push(Setting { key, value });
             }
             _ => {}
         }
     }
 
     info
+}
+
+/// Splits `key=value` the way `debug.ParseBuildInfo` does: a key that starts
+/// with a quote runs to its closing quote, any other to the first `=`; either
+/// side may be a quoted Go string.
+fn split_setting(line: &str) -> (String, String) {
+    let key_end = if line.starts_with('"') {
+        quoted_len(line).unwrap_or(0)
+    } else {
+        line.find('=').unwrap_or(line.len())
+    };
+    let key = &line[..key_end];
+    let value = line[key_end..].strip_prefix('=').unwrap_or("");
+    (unquote(key), unquote(value))
+}
+
+/// Byte length of the Go string literal at the start of `s`, quotes included.
+fn quoted_len(s: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (i, c) in s.char_indices().skip(1) {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return Some(i + 1),
+            _ => (),
+        }
+    }
+    None
+}
+
+/// `strconv.Unquote` for the escapes `strconv.Quote` writes. Text that is not
+/// one complete literal comes back unchanged.
+fn unquote(s: &str) -> String {
+    if !s.starts_with('"') || quoted_len(s) != Some(s.len()) {
+        return s.to_string();
+    }
+    let body = &s[1..s.len() - 1];
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let escaped = match chars.next() {
+            Some('n') => Some('\n'),
+            Some('t') => Some('\t'),
+            Some('r') => Some('\r'),
+            Some('a') => Some('\u{7}'),
+            Some('b') => Some('\u{8}'),
+            Some('f') => Some('\u{c}'),
+            Some('v') => Some('\u{b}'),
+            Some(c @ ('\\' | '"' | '\'')) => Some(c),
+            Some('x') => hex_char(&mut chars, 2),
+            Some('u') => hex_char(&mut chars, 4),
+            Some('U') => hex_char(&mut chars, 8),
+            _ => None,
+        };
+        match escaped {
+            Some(c) => out.push(c),
+            None => return s.to_string(),
+        }
+    }
+    out
+}
+
+fn hex_char(chars: &mut std::str::Chars<'_>, digits: usize) -> Option<char> {
+    let hex: String = chars.by_ref().take(digits).collect();
+    if hex.len() != digits {
+        return None;
+    }
+    char::from_u32(u32::from_str_radix(&hex, 16).ok()?)
 }
 
 fn read_module<'a>(parts: &mut impl Iterator<Item = &'a str>) -> Module {
@@ -409,6 +491,30 @@ mod tests {
     }
 
     #[test]
+    fn pre_118_string_headers_resolve_through_the_segments() {
+        // The section map names nothing at the string headers' addresses, as
+        // when a section header was removed. The one PT_LOAD maps the file at
+        // 0x400000, so the image's 0x1000-based pointers are moved there.
+        let image = pointer_format_image(8, false, "");
+        let mut elf = crate::gobin::segments::tests::elf64_bogus_shoff(0x2000);
+        let at = 0x1000;
+        elf[at..at + image.bytes.len()].copy_from_slice(&image.bytes);
+        for field in [16, 24, 32, 48] {
+            let slot = &mut elf[at + field..at + field + 8];
+            let addr = u64::from_le_bytes(slot.try_into().unwrap());
+            slot.copy_from_slice(&(addr - 0x1000 + 0x401000).to_le_bytes());
+        }
+        let bin = GoBinary {
+            bytes: elf,
+            sections: Vec::new(),
+            ..image
+        };
+        assert!(bin.read_at_addr(0x401000, 8).is_none());
+        let info = BuildInfo::parse(&bin).expect("read through the PT_LOAD");
+        assert_eq!(info.go_version, "go1.17.13");
+    }
+
+    #[test]
     fn parses_pre_118_pointer_format_at_both_widths_and_orders() {
         // The 16-byte sentinels frame the modinfo body, which ends in a newline.
         let modinfo = format!(
@@ -440,12 +546,42 @@ mod tests {
     }
 
     #[test]
-    fn parses_old_format_build_setting() {
-        let raw = "build\t-compiler=gc\nbuild\t-trimpath=true\n";
+    fn build_settings_read_as_go_version_m_prints_them() {
+        let raw = concat!(
+            "build\t-compiler=gc\n",
+            "build\t-ldflags=\"-s -w -X main.v=\\\"1\\\"\"\n",
+            "build\tDefaultGODEBUG=panicnil=1,tls10server=1\n",
+            "build\t\"we=ird\"=x\n",
+            "build\tvcs.modified=true\n",
+        );
         let info = parse_modinfo(raw);
-        assert_eq!(info.settings.len(), 2);
-        assert_eq!(info.settings[0].key, "compiler");
-        assert_eq!(info.settings[0].value, "gc");
+        let pairs: Vec<(&str, &str)> = info
+            .settings
+            .iter()
+            .map(|s| (s.key.as_str(), s.value.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("-compiler", "gc"),
+                ("-ldflags", "-s -w -X main.v=\"1\""),
+                ("DefaultGODEBUG", "panicnil=1,tls10server=1"),
+                ("we=ird", "x"),
+                ("vcs.modified", "true"),
+            ],
+            "flags keep their dash, a value splits at the first `=`, quotes come off"
+        );
+        assert_eq!(info.setting("vcs.modified"), Some("true"));
+        assert_eq!(info.setting("GOOS"), None);
+    }
+
+    #[test]
+    fn unquote_leaves_text_that_is_not_one_literal() {
+        assert_eq!(unquote("\"a\\x41\\u00e9\\n\""), "aA\u{e9}\n");
+        assert_eq!(unquote("\"open"), "\"open");
+        assert_eq!(unquote("\"a\" \"b\""), "\"a\" \"b\"");
+        assert_eq!(unquote("\"bad \\q\""), "\"bad \\q\"");
+        assert_eq!(unquote("plain"), "plain");
     }
 
     #[test]

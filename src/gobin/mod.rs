@@ -224,6 +224,28 @@ impl GoBinary {
         Some(&self.bytes[start_off..end_off])
     }
 
+    /// [`Self::read_at_addr`], falling back on an ELF to the PT_LOAD segments,
+    /// the mapping the loader and Go's `debug/buildinfo` use. A section table
+    /// can leave out bytes a segment maps: a section header that was removed or
+    /// rewritten, or data the section map gives no file bytes.
+    pub fn read_loaded(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        if let Some(bytes) = self.read_at_addr(addr, len) {
+            return Some(bytes);
+        }
+        if self.container != Container::Elf {
+            return None;
+        }
+        let seg = segments::read(&self.bytes)?;
+        let (loads, _) = segments::sections_from_loads(&seg.loads);
+        let load = loads.iter().find(|s| s.contains_addr(addr))?;
+        let start = load.file_offset_of(addr)?;
+        let end = start.checked_add(len)?;
+        if end > load.file_offset.saturating_add(load.file_size) || end > self.bytes.len() {
+            return None;
+        }
+        Some(&self.bytes[start..end])
+    }
+
     /// The executable bytes at `addr`, up to `max` of them, clamped to the end of
     /// the containing text section's backing bytes. None when `addr` is not inside
     /// an executable section. Unlike [`Self::read_at_addr`], it confirms the
