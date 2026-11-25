@@ -1,3 +1,5 @@
+mod uncommon;
+
 use serde::Serialize;
 
 use crate::error::Error;
@@ -5,21 +7,44 @@ use crate::gobin::GoBinary;
 use crate::moduledata::{read_name_len, ModuleData};
 use crate::Result;
 
-/// A recovered Go type. v1 captures the universally-present header fields
-/// (size, kind, hash, name). Kind-specific decoding for slices, pointers,
-/// structs, and maps lives in [`KindData`]; we attempt those opportunistically
-/// and fall through to `Other` on failure rather than aborting a whole pass.
+pub use uncommon::Method;
+
+/// A recovered Go type: the `_type` header, the package and method table from
+/// its `UncommonType`, and the kind-specific record in [`KindData`]. Each
+/// kind-specific part is decoded best-effort and left empty when it does not
+/// read, rather than failing the whole pass.
 #[derive(Debug, Clone, Default, Serialize)]
 #[non_exhaustive]
 pub struct Type {
     pub addr: u64,
+    /// The type as `reflect.Type.String()` gives it: `main.Node`,
+    /// `*main.Node`, `map[string]int`. A package appears by its name, so two
+    /// types can share this string; `pkg_path` tells them apart.
     pub name: String,
+    /// Import path of the package that defines a named type (`sync`,
+    /// `internal/sync`, `main`), from its `UncommonType`, as
+    /// `reflect.Type.PkgPath()` gives it. Empty for unnamed and predeclared
+    /// types.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pkg_path: String,
+    /// A defined type (`TFlagNamed`): `main.Node`, `int` and `error` are,
+    /// `*main.Node`, `[]int` and `struct { ... }` are not.
+    pub named: bool,
     pub kind: KindName,
     pub size: u64,
     pub ptr_bytes: u64,
+    /// Alignment of a variable of this type (`Align_`).
+    pub align: u8,
+    /// Alignment of a struct field of this type (`FieldAlign_`).
+    pub field_align: u8,
     pub hash: u32,
     pub tflag: u8,
     pub kind_data: KindData,
+    /// The method table of the `UncommonType`, every method including the
+    /// unexported ones. Empty when the type has none or the table does not
+    /// read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<Method>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq, Hash)]
@@ -557,6 +582,8 @@ pub(crate) fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<T
     let h = 2 * ps;
     let hash = u32::from_le_bytes(buf[h..h + 4].try_into().unwrap());
     let tflag = buf[h + 4];
+    let align = buf[h + 5];
+    let field_align = buf[h + 6];
     let kind_byte = buf[h + 7];
     let s = 4 * ps + 8;
     let str_off = i32::from_le_bytes(buf[s..s + 4].try_into().unwrap());
@@ -574,16 +601,57 @@ pub(crate) fn parse_type(bin: &GoBinary, md: &ModuleData, addr: u64) -> Result<T
 
     let kind_data = decode_kind(bin, md, addr, kind, tflag).unwrap_or(KindData::None);
 
+    let named = tflag & TFLAG_NAMED != 0;
+    let uncommon = if tflag & TFLAG_UNCOMMON != 0 {
+        uncommon::uncommon_addr(bin, md, addr, kind)
+    } else {
+        None
+    };
+    let (pkg_path, methods) = match uncommon {
+        Some(uncommon) => {
+            // reflect reports a package only for named types; the block of an
+            // unnamed `*T` repeats T's.
+            let pkg_path = if named {
+                uncommon::read_pkg_path(bin, md, uncommon).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let methods = uncommon::read_methods(bin, md, uncommon, &name).unwrap_or_default();
+            (pkg_path, methods)
+        }
+        None => (String::new(), Vec::new()),
+    };
+
     Ok(Type {
         addr,
         name,
+        pkg_path,
+        named,
         kind,
         size,
         ptr_bytes,
+        align,
+        field_align,
         hash,
         tflag,
         kind_data,
+        methods,
     })
+}
+
+/// The method table of `t`'s `UncommonType`, failing when the table is not
+/// well formed (see [`Method`]). Empty when `t` has no block.
+pub(crate) fn read_methods(bin: &GoBinary, md: &ModuleData, t: &Type) -> Result<Vec<Method>> {
+    if t.tflag & TFLAG_UNCOMMON == 0 {
+        return Ok(Vec::new());
+    }
+    let uncommon = uncommon::uncommon_addr(bin, md, t.addr, t.kind).ok_or_else(|| {
+        Error::TypeRecovery(format!(
+            "kind {:?} has no known record size; cannot locate the uncommon block (type {})",
+            t.kind, t.name
+        ))
+    })?;
+    uncommon::read_methods(bin, md, uncommon, &t.name)
 }
 
 /// Public re-export of name resolution for other modules (itabs, funcsig). The
@@ -684,7 +752,8 @@ pub(crate) const TFLAG_UNCOMMON: u8 = 1;
 /// set on a Type, the leading `*` is NOT part of the type's actual name
 /// and must be stripped when displaying.
 pub(crate) const TFLAG_EXTRA_STAR: u8 = 1 << 1;
-const UNCOMMON_TYPE_SIZE: usize = 16;
+/// TFlagNamed (= 1 << 2): the type is a defined type. Present since Go 1.7.
+pub(crate) const TFLAG_NAMED: u8 = 1 << 2;
 
 fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
     let buf = bin
@@ -733,7 +802,7 @@ fn decode_func(bin: &GoBinary, extra_addr: u64, tflag: u8) -> Result<KindData> {
     let ps = bin.pointer_size();
     let params_offset = 4usize.next_multiple_of(ps)
         + if tflag & TFLAG_UNCOMMON != 0 {
-            UNCOMMON_TYPE_SIZE
+            uncommon::UNCOMMON_TYPE_SIZE
         } else {
             0
         };
