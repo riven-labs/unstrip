@@ -1,33 +1,29 @@
-//! Recover printable string literals from a Go binary's read-only data
-//! regions.
+//! Strings in a Go binary's read-only data, two ways.
 //!
-//! This is the Go-string-table walker the field test asked for. Real
-//! `strings(1)` on a stripped Go ELF returns 30 KB+ of noise: struct
-//! field name fragments, function-name tail bytes, mangled type
-//! metadata, garbled identifiers. Filtering by Go's known read-only
-//! sections (`.rodata` / `.noptrdata` on ELF; `__TEXT.__rodata` /
-//! `__DATA.__noptrdata` on Mach-O; `.rdata` on PE) cuts ~95% of that
-//! noise out, because the literal-bearing region the compiler emits is
-//! one contiguous span per binary.
+//! [`literals`] recovers the exact string literals the program uses, each
+//! as `(address, length, bytes)` with the functions that use it. Go packs
+//! literals end to end with no terminator, so their bounds come from the
+//! code and data that pair a pointer with a length; see the `literals`
+//! module for what counts as proof. This is what `--strings` prints.
 //!
-//! Scope (v1.0): printable-ASCII run extraction inside read-only
-//! sections, configurable minimum length, optional substring filter.
-//! Not in v1.0: regex filter (substring is consistent with every other
-//! unstrip subcommand's `--filter`), classification taxonomy
-//! (urls vs paths vs usage strings; out of scope per the v1.0 scope
-//! call), entropy scoring, cross-ref to xrefs. These belong in v1.2 if
-//! field demand materializes.
+//! [`extract`] is the older walker: printable runs inside the read-only
+//! sections (`.rodata` and `.noptrdata` on ELF, `__rodata` and
+//! `__noptrdata` on Mach-O, `.rdata` on PE). A run often holds a dozen
+//! literals glued together, but it needs no instruction scanner, so it
+//! also works on 386. `--strings --strings-runs` prints it.
 //!
-//! On garble-default binaries the Go string table is preserved verbatim
-//! by design: garble's name obfuscator does not rewrite string
-//! literals (literal encryption is the separate `-literals` mode).
-//! This walker is what closes the identification gap the field test
-//! flagged - shfmt's `usage: shfmt [flags] [path ...]` survives garble
-//! default mode untouched and surfaces here.
+//! Garble's default mode leaves literals alone (encrypting them is its
+//! separate `-literals` mode), so both survive it.
+
+mod arm64;
+mod literals;
+mod x86;
 
 use serde::Serialize;
 
 use crate::gobin::{GoBinary, SectionKind};
+
+pub use literals::{literals, Dropped, Header, Literal, Literals, Origin, Site, Use};
 
 /// One recovered printable run, anchored to its link-time VA so callers
 /// can cross-reference into xrefs / disasm.
@@ -45,8 +41,8 @@ pub struct GoString {
 }
 
 /// Options controlling extraction. `Options::default()` returns runs
-/// of length >= 8 with no substring filter; this is the v1.0 default
-/// for `--strings` invoked with no flags.
+/// of length >= 8 with no substring filter, what `--strings --strings-runs`
+/// prints with no other flag.
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Minimum printable-run length. Below this, runs are dropped to
@@ -110,7 +106,7 @@ pub fn extract(bin: &GoBinary, opts: &Options) -> Vec<GoString> {
 /// 0x20..=0x7E except `\t`, `\n`, `\r` which are not included to keep
 /// runs compact and grep-friendly). The substring filter applies after
 /// the run is otherwise accepted, so a 200-char run containing the
-/// needle is kept whole, not truncated to just the matching span - the
+/// needle is kept whole, not cut down to the matching span: the
 /// surrounding text is part of the identification signal.
 fn extract_runs(
     slice: &[u8],
