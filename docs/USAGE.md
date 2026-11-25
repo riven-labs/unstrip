@@ -18,7 +18,11 @@ Each flag below picks a single analysis. They are mutually exclusive in spirit; 
 
 ### `--info`
 
-Container, Go version, pclntab geometry, garble heuristic verdict. The fastest "what is this binary?" answer. Reads only what's needed to identify the file; cheap to run on a queue of suspicious binaries.
+The first answer about a binary. It opens with a triage summary: the Go release, read from the build info as `go version` reads it; the build ID (`go tool buildid`); the main module and its version; GOOS/GOARCH; `CGO_ENABLED`; the VCS revision, commit time and `(modified)` flag; and the garble verdict, the one `--detect-garble` gives, with the signals that fired. Go records GOOS, GOARCH, `CGO_ENABLED` and the VCS stamp as build settings from Go 1.18; before that GOOS/GOARCH come from the name of the linker's entry point (`_rt0_amd64_linux`), and the platform line says `(from the entry point name)`. A line the binary has nothing for is left out. Then the container, where the pclntab sits, its header facts, and the section map. Cheap to run on a queue of suspicious binaries.
+
+When the file has no Go metadata, `--info` prints the reason instead of a bare error, with the container, file size and entropy the probe saw, and exits 1: packed (UPX by its `UPX!` header or section names, other packers by section names, or a high-entropy layout), truncated (the file is shorter than its headers say), a Go program carried as data, not a Go program, or not an ELF, PE or Mach-O file. Every other mode's error names the same reason.
+
+`--format json` gives the same fields: `go_version`, `build_id`, `main_module`, `goos`, `goarch`, `platform_from` (`build_info`, `entry_point` or `container`), `cgo_enabled`, `vcs`, and `garble`, the object `--detect-garble --format json` prints. For a file without Go metadata it prints `reason`, `detail`, `container`, `arch`, `file_size`, `file_entropy` and `packer`.
 
 ### `--buildinfo`
 
@@ -26,7 +30,7 @@ Parses the buildinfo blob that `runtime/debug.ReadBuildInfo` reads. Outputs the 
 
 ### `--types`
 
-Walks the typelinks table plus references reachable from it, prints recovered type names with kind and size, struct fields and interface methods. By default it omits primitive leaves (`uint8`, `int32`, ...) and other catalog padding; pass `--types-full` if you want one-for-one parity with GoReSym's count.
+Walks the typelinks table plus references reachable from it, prints recovered type names with kind and size, struct fields and interface methods. It lists the types the typelinks walk reaches, each once; on the builds `--format goresym` was checked on, those were the distinct types GoReSym lists, at the same addresses (GoReSym repeats a type each time its walk reaches it). Pass `--types-full` to also scan the types region for descriptors no walk reaches.
 
 Types print in Go syntax, as `reflect.Type.String()` gives them: a field as `+0018  Items []main.Item` with its offset and struct tag, an embedded field as its bare type, an interface method as `Handle([]uint8) ([]uint8, error)`. When two named types share a name in different packages (from Go 1.24 `sync.Mutex` holds an `internal/sync.Mutex`), both print with their import path, and so does every type that mentions one (`[]*internal/sync.Mutex`). A reference to a type outside the recovered set prints as `type@0x...`.
 
@@ -146,11 +150,30 @@ These flags only make sense alongside one of the analysis modes above.
 
 ## Output
 
-- `-f, --format <FORMAT>`: `text` (default), `json`, `ida`, `ghidra`, `binja`. The disassembler formats emit a runnable script. `--format ghidra > apply.py` produces a Ghidra script (PyGhidra) that creates functions, sets names, attaches the Go name, signature and `file:line` as comments, declares typed struct types at the recorded field offsets, applies method prototypes with Go ABI storage, and labels itabs, type descriptors and moduledata. The IDA and Binary Ninja scripts do the same without prototypes. Each script prints its counts and `unstrip: done, N failures`.
+- `-f, --format <FORMAT>`: `text` (default), `json`, `ida`, `ghidra`, `binja`, `goresym`. `goresym` is GoReSym's JSON for the whole binary; see [below](#--format-goresym). The disassembler formats emit a runnable script. `--format ghidra > apply.py` produces a Ghidra script (PyGhidra) that creates functions, sets names, attaches the Go name, signature and `file:line` as comments, declares typed struct types at the recorded field offsets, applies method prototypes with Go ABI storage, and labels itabs, type descriptors and moduledata. The IDA and Binary Ninja scripts do the same without prototypes. Each script prints its counts and `unstrip: done, N failures`.
 - `--filter <STRING>`: substring filter. With `--types` matches type name, or the name with its import path; with `--itabs` matches interface name, concrete name, or any interface-method name (method-column matching is where the signal usually lives in garble-default binaries); otherwise matches function name.
 - `--show <value|pointer|both>`: hides or shows the `pkg.(*T).M` wrappers Go's compiler generates for value-receiver methods, which the binary marks as wrappers (file `<autogenerated>`). Methods declared on `*T` are not wrappers. `both` (default) shows everything. `value` hides the wrappers, except in the default listing those an itab dispatches through. `pointer` shows only the wrappers. Applies to the default listing, `--itabs` (an itab whose every slot is a wrapper), and `--xrefs`.
 - `--no-garble-warning`: suppress the auto garble warning that fires on `--info`/`--buildinfo` when the heuristic returns confidence >= 0.9. Useful for CI that treats stderr as fatal.
 - `--no-signatures`: skip method-signature recovery. The default listing appends a Go-syntax signature (`(_0 []uint8) (int, error)`) to every method on a type the Go linker emitted a `_type` record for (every interface-method implementation, plus any type reached through reflection or stored as `any`). Methods on types the linker elided for dead-code reasons stay bare; pass this flag to drop signatures everywhere for diff-friendly output or the smallest column width.
+
+### `--format goresym`
+
+Prints the whole binary in the JSON schema of [GoReSym](https://github.com/mandiant/GoReSym) (`ExtractMetadata` in its `main.go`, master `fa3f0577`), as `GoReSym -t -d -p` fills it: `Version`, `BuildId`, `Arch`, `OS`, `TabMeta`, `ModuleMeta`, `Types`, `Interfaces`, `BuildInfo`, `Files`, `UserFunctions`, `StdFunctions`, `Strings`, with GoReSym's field names, nesting, JSON types and four-space indent. A script or pipeline written for GoReSym output reads it, including GoReSym's IDA and Ghidra rename scripts. Add `--strings` to fill `Strings` from the literals `--strings` proves (amd64 and arm64; empty on 386). It does not combine with the analysis modes. When the file does not read, it prints GoReSym's `{"error": "Failed to parse file: ..."}` with the reason and exits 1.
+
+Checked against GoReSym master `fa3f0577` (`GoReSym -t -d -p`, field by field) on 31 builds of one program (Go 1.13, 1.14, 1.15, 1.16, 1.17, 1.18, 1.20 and 1.26; linux amd64, arm64 and 386, windows amd64) and 18 of the testdata fixtures (Go 1.5 to 1.26, Linux, Windows and macOS, amd64, arm64, 386 and s390x, PIE, a cobra program, a garbled build). GoReSym read none of a garble v0.18.0 build of the program and a Go 1.2 Windows fixture ("no valid pclntab found"); unstrip reads both. Equal on every build where both read the part: `BuildId`, `Arch`, `TabMeta`, `ModuleMeta` addresses and lengths, `BuildInfo`, the `Files` set, and every function's `Start`, `End`, `FullName` and `PackageName`; `Version` and `OS` on every build that is not garbled. `Types` and `Interfaces` hold the same types at the same addresses with the same `CStr`, and the same `Str` and `Kind` except as listed below. What unstrip fills differently:
+
+- No `FileType` field: GoReSym `fa3f0577` has none.
+- `Version` is empty when the build info holds no Go release; GoReSym copies what is there (`unknown` on a garbled build) or the first `go1.` string in the file.
+- `OS` and `Arch` come from the build settings, then the entry point's name, then the container. On the garbled build GoReSym left `OS` empty and unstrip gave `linux`.
+- `ModuleMeta.Typelinks.Capacity` and `ITablinks.Capacity` are the capacities recorded in the moduledata; GoReSym writes 0.
+- `Types` and `Interfaces` list each type once. GoReSym repeats a type each time its walk reaches it: 3,412 to 23,888 entries for 518 to 2,275 distinct types on the builds above that have types.
+- `Str` is the type's name as `reflect` gives it. GoReSym rewrites a channel type to `chan(T)`, dropping its direction (`<-chan error` becomes `chan(error)`) and a named channel type's name (`main.Pipe` becomes `chan(int)`).
+- `Kind` is `Float64` for `float64`; GoReSym writes `Invalid`.
+- `Reconstructed` is the Go declaration of a struct or interface type, one field or method per line, and is absent for other kinds. GoReSym fills more kinds in its own layout. `CReconstructed` is absent: GoReSym's IDA script imports C types only from types that have it, and still names every type and function.
+- `UserFunctions` and `StdFunctions` hold the same functions as GoReSym's, split differently: a package is standard when its first path element is a directory of the Go source tree. GoReSym's fixed list misses packages added since it was made (`internal/runtime/...`, `internal/strconv`, `internal/sync`), so it lists their functions as user functions: up to 373 per build here.
+- `Files` is in file-table order; GoReSym's order is a Go map's.
+- Go 1.5 and 1.6: `ModuleMeta` is zero and `Types` and `Interfaces` are `null`, since unstrip reads types from Go 1.7. GoReSym reads them.
+- Big-endian binaries (s390x, ppc64, mips): `Types` and `Interfaces` are `null`, since the type reader is little-endian only. GoReSym reads them.
 
 ---
 

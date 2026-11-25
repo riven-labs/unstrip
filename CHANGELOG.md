@@ -88,6 +88,39 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   reads the inline tree of a Go 1.18+ binary when its `Pclntab` has the
   gofunc.
 
+- `--info` opens with a triage summary: the Go release (from the build
+  info), the build ID, the main module and its version, GOOS/GOARCH,
+  `CGO_ENABLED`, the VCS revision, time and modified flag, and the garble
+  verdict `--detect-garble` gives. Before Go 1.18, which records no build
+  settings, GOOS/GOARCH come from the entry point's name
+  (`_rt0_amd64_linux`), and the line says so. `--format json` carries the
+  same fields. Checked against `go version -m` and `go tool buildid` (Go
+  1.26.8) on 33 builds of one program: Go 1.13, 1.14, 1.15, 1.16, 1.17,
+  1.18, 1.20 and 1.26 for linux amd64, arm64 and 386 and windows amd64 (Go
+  1.16 and 1.17 linux only), a Go 1.26 build with `CGO_ENABLED=1`, one from
+  a modified tree, and a garble v0.18.0 build. Every field matched, and the
+  garble verdict was the one `--detect-garble` gave.
+- When a file has no Go metadata, `--info` prints why instead of a bare
+  error, and every other mode's error says it too: packed (UPX by its
+  `UPX!` header or section names, other packers by section names, or a
+  high-entropy layout), truncated (the file is shorter than its headers
+  say), a Go program carried as data, not a Go program, or not an ELF, PE
+  or Mach-O file. `--format json` prints the reason, the container, the
+  file size and entropy. Library: `triage::diagnose`.
+- `--format goresym` prints the whole binary as GoReSym's JSON
+  (`GoReSym -t -d -p`, master `fa3f0577`): the same field names, nesting
+  and JSON types, so a script or pipeline written for GoReSym reads it.
+  `--strings` adds `Strings` from the proven literals. docs/USAGE.md lists
+  the fields unstrip fills differently.
+- The function listing gives each function's size, and `--format json` its
+  `size` and `end`. `Function::size` is the distance to the next functab
+  entry, the end `debug/gosym` reports.
+- Library: `triage::triage` and `triage::Triage`, `triage::build_id`,
+  `triage::entry_point_platform`, `goresym::document`, `Pclntab::files`
+  (the file table as `debug/gosym` lists it), `BuildInfo::setting`,
+  `GoBinary::read_loaded`, and `output::go_version_from` for a caller that
+  parsed the build info already.
+
 ### Changed
 
 - `--addr` and `--addr-file` print a PC in inlined code as a line with the
@@ -138,6 +171,14 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 - Every script ends with a count per kind and `unstrip: done, N failures`.
   The declaration helper is `_type(name, decl, size, go_name)`; it was
   `_struct(decl)`.
+- `--info --format json` gives the garble verdict as `garble`, the object
+  `--detect-garble --format json` prints. `garble_magic_rewritten`,
+  `garble_version_overwritten`, `garble_hashed_names` and `garble_verdict`
+  are gone: they came from a second, older rule that could disagree with
+  `--detect-garble` on the same file.
+- Build settings keep their key as recorded and drop the quotes around a
+  quoted value, as `go version -m` prints them: `-buildmode exe` and
+  `-ldflags -s -w`, which were `buildmode exe` and `ldflags "-s -w"`.
 
 ### Fixed
 
@@ -154,6 +195,20 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   ("Function body must contain the entrypoint"), so 2136 of 2137 functions
   failed on a Go 1.26 build. It disassembles the entry and lets Ghidra find
   the body.
+- `--info` and `--detect-garble` could give different garble verdicts for
+  one file. Both use `garble::assess` now.
+- A UPX-packed file gave "no pclntab section found and magic scan turned up
+  nothing". It now says it is packed with UPX and that `upx -d` unpacks it.
+  An ELF packed by UPX has no section table, so the probe also reads UPX's
+  `UPX!` header.
+- `--buildinfo` on a Go 1.13 to 1.17 binary read the version's string header
+  through the section table only, and failed with "string header unmapped"
+  when no section covered it. It falls back to the PT_LOAD segments, as Go's
+  `debug/buildinfo` reads it. Go 1.13 to 1.15 builds failed before the
+  pclntab reader learned their table; on the builds above `--buildinfo` and
+  `--info` read all of them.
+- `--reflect-names --format json` printed text when the binary has no
+  reflected-name table. It prints `{}`.
 
 ## [2.1.0] - 2026-11-25
 
