@@ -302,6 +302,17 @@ impl<'a> Pclntab<'a> {
         matches!(self.magic, MAGIC_1_20 | MAGIC_1_18 | MAGIC_1_16 | MAGIC_1_2)
     }
 
+    /// Whether the table has the Go 1.18 and later shape, which a
+    /// garble-rewritten magic keeps.
+    pub(crate) fn is_go118_or_later(&self) -> bool {
+        self.layout == Layout::Modern
+    }
+
+    /// Whether the table has the Go 1.16 and 1.17 shape.
+    pub(crate) fn is_go116_or_go117(&self) -> bool {
+        self.layout == Layout::Pre118
+    }
+
     pub fn nfunc(&self) -> u64 {
         self.nfunc
     }
