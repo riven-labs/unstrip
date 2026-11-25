@@ -235,7 +235,8 @@ pub fn recover_with_mode(bin: &GoBinary, md: &ModuleData, mode: Mode) -> Result<
 /// Whether the binary stores struct field offsets the Go 1.18 way, when its
 /// version says: the pclntab magic for Go 1.16-1.17 (old) and 1.20+ (new),
 /// the buildinfo version between them (1.18 and 1.19 share a magic). None
-/// when neither tells (a wiped buildinfo on a 1.18/1.19 magic).
+/// when neither tells (a wiped buildinfo on a 1.18/1.19 magic, or the Go 1.2
+/// magic, which Go 1.7 and 1.8 with plain offsets share with 1.9 to 1.15).
 fn offset_embed_era(bin: &GoBinary, md: &ModuleData) -> Option<bool> {
     let magic = bin
         .read_at_addr(md.pc_header_addr, 4)
@@ -795,8 +796,17 @@ fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<Kin
         let typ = le_word(buf, off + ps, ps);
         let offset = le_word(buf, off + 2 * ps, ps);
 
-        let (name, embedded, tag) =
-            read_name_full(bin, md, name_ptr).unwrap_or((String::new(), false, String::new()));
+        // Go 1.7 and 1.8 have no embedded flag: an embedded field is the one
+        // whose name is empty, and reflect names it after its type, through a
+        // pointer, without the package.
+        let (name, embedded, tag) = match read_name_full(bin, md, name_ptr) {
+            Ok((name, _, tag)) if name.is_empty() => {
+                let name = embedded_field_name(bin, md, typ).unwrap_or_default();
+                (name, true, tag)
+            }
+            Ok(full) => full,
+            Err(_) => (String::new(), false, String::new()),
+        };
         fields.push(StructField {
             name,
             typ,
@@ -807,6 +817,24 @@ fn decode_struct(bin: &GoBinary, md: &ModuleData, extra_addr: u64) -> Result<Kin
     }
     let _ = md;
     Ok(KindData::Struct { fields })
+}
+
+/// The name reflect gives an embedded field of type `typ`: the type's name
+/// without its package, through one pointer (`*os.file` gives `file`).
+fn embedded_field_name(bin: &GoBinary, md: &ModuleData, typ: u64) -> Option<String> {
+    let ps = bin.pointer_size();
+    let head = bin.read_at_addr(typ, type_header_size(ps))?;
+    let typ = if KindName::from_byte(head[2 * ps + 7]) == KindName::Pointer {
+        read_uptr(bin, typ + type_header_size(ps) as u64).ok()?
+    } else {
+        typ
+    };
+    let head = bin.read_at_addr(typ, type_header_size(ps))?;
+    let s = 4 * ps + 8;
+    let str_off = i32::from_le_bytes(head[s..s + 4].try_into().ok()?);
+    let name = read_name(bin, md, md.types.wrapping_add(str_off as i64 as u64)).ok()?;
+    let name = name.trim_start_matches('*');
+    Some(name.rsplit('.').next()?.to_string())
 }
 
 /// Read a struct field's name encoding: its name, the embedded flag, and the

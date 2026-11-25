@@ -98,7 +98,15 @@ fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64, fun_off: u64) -> Resul
 
     let inter_ptr = rd_ptr(buf, 0, ps, le).unwrap_or(0);
     let type_ptr = rd_ptr(buf, ps, ps, le).unwrap_or(0);
-    let hash = rd_u32(buf, 2 * ps, le).unwrap_or(0);
+    // Go 1.7 to 1.9 hold `link` at 2*ps (and 1.7, 1.8 no hash at all). The
+    // itab hash is a copy of the concrete type's, so read it from there.
+    let hash = if fun_off == 3 * ps as u64 + 8 {
+        bin.read_at_addr(type_ptr, 2 * ps + 4)
+            .and_then(|t| rd_u32(t, 2 * ps, le))
+            .unwrap_or(0)
+    } else {
+        rd_u32(buf, 2 * ps, le).unwrap_or(0)
+    };
 
     let interface_name =
         read_type_name(bin, md, inter_ptr).unwrap_or_else(|_| format!("iface@0x{inter_ptr:x}"));
@@ -115,12 +123,31 @@ fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64, fun_off: u64) -> Resul
     let mut populated_methods = Vec::new();
     let mut incomplete = false;
     let fun_base = addr + fun_off;
-    for (i, name) in methods.iter().enumerate() {
+    // Go 1.7 to 1.9 (the only itabs with `fun` at 3*ps+8) leave every slot
+    // zero in the file: `additab` fills them at start-up from the concrete
+    // type's method table, matching each interface method by name and type.
+    // Do the same, or every itab of those releases reads as incomplete.
+    let runtime_filled = if fun_off == 3 * ps as u64 + 8 {
+        types::parse_type(bin, md, type_ptr)
+            .and_then(|t| crate::funcsig::methods_for_type(bin, md, &t))
+            .ok()
+    } else {
+        None
+    };
+    for (i, (name, typ)) in methods.iter().enumerate() {
         let slot_addr = fun_base + (i as u64) * ps as u64;
-        let concrete_fn = match bin.read_at_addr(slot_addr, ps) {
+        let mut concrete_fn = match bin.read_at_addr(slot_addr, ps) {
             Some(b) => rd_ptr(b, 0, ps, le).unwrap_or(0),
             None => break,
         };
+        if concrete_fn == 0 {
+            if let Some(table) = &runtime_filled {
+                concrete_fn = table
+                    .iter()
+                    .find(|m| m.name == *name && m.mtyp_addr == *typ)
+                    .map_or(0, |m| m.ifn_pc);
+            }
+        }
         if concrete_fn == 0 {
             incomplete = true;
         }
@@ -131,8 +158,9 @@ fn parse_itab(bin: &GoBinary, md: &ModuleData, addr: u64, fun_off: u64) -> Resul
     }
 
     // If we couldn't enumerate methods (interface decode failed), still
-    // check the first slot as a degraded "incomplete" signal.
-    if populated_methods.is_empty() {
+    // check the first slot as a degraded "incomplete" signal. Not on Go 1.7 to
+    // 1.9, whose slots are zero in every itab.
+    if populated_methods.is_empty() && fun_off != 3 * ps as u64 + 8 {
         if let Some(b) = bin.read_at_addr(fun_base, ps) {
             if rd_ptr(b, 0, ps, le).unwrap_or(0) == 0 {
                 incomplete = true;
@@ -167,7 +195,7 @@ fn read_interface_method_names(
     bin: &GoBinary,
     md: &ModuleData,
     inter_addr: u64,
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, u64)>> {
     if inter_addr < md.types || inter_addr >= md.etypes {
         return Err(Error::ItabRecovery(format!(
             "interface ptr 0x{inter_addr:x} not in types region [0x{:x}, 0x{:x})",
@@ -197,7 +225,8 @@ fn read_interface_method_names(
         let name_off = rd_u32(chunk, 0, le).unwrap_or(0) as i32;
         let name_addr = md.types.wrapping_add(name_off as i64 as u64);
         let name = types::read_name_public(bin, md, name_addr).unwrap_or_else(|_| "?".into());
-        out.push(name);
+        let typ_off = rd_u32(chunk, 4, le).unwrap_or(0) as i32;
+        out.push((name, md.types.wrapping_add(typ_off as i64 as u64)));
     }
     Ok(out)
 }

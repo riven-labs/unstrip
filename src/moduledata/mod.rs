@@ -25,7 +25,9 @@ pub struct ModuleData {
     /// pcHeader pointer, always equals `pclntab_addr` for a valid moduledata.
     pub pc_header_addr: u64,
 
-    /// Slice (ptr, len, cap) of funcnametab.
+    /// Slice (ptr, len, cap) of funcnametab. Go 1.7 to 1.15 have no
+    /// funcnametab, cutab or pctab (names and pc-value tables live in
+    /// `pclntable`), so those three are empty there.
     pub funcnametab: SliceHeader,
     pub cutab: SliceHeader,
     pub filetab: SliceHeader,
@@ -115,6 +117,14 @@ pub struct SliceHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Layout {
+    /// Go 1.7 (pclntab magic 0xfffffffb): the first moduledata with a types
+    /// region. It opens with the single `pclntable` slice, then `ftab` and
+    /// `filetab` (no `funcnametab`, `cutab` or `pctab`), and has no
+    /// `textsectmap`.
+    V107,
+    /// Go 1.8 to 1.15 (pclntab magic 0xfffffffb): Go 1.7's layout with
+    /// `textsectmap` before `typelinks`.
+    V108,
     /// Go 1.16 and 1.17 (pclntab magic 0xfffffffa): no `covctrs` (added in 1.20)
     /// and no `rodata`/`gofunc` (added in 1.18), so the offset table after
     /// `etypes` sits two pointers earlier than every later layout.
@@ -197,12 +207,12 @@ fn detect_name_encoding(bin: &GoBinary, md: &ModuleData) -> NameEnc {
     let str_offset = 4 * ps + 8;
     let header = 4 * ps + 16;
     const PROBES: usize = 64;
-    // A Go 1.18+ magic settles it: only 1.16 and 1.17 share a magic.
-    if matches!(
-        read_u32_e(bin.pclntab_slice(), 0, bin.little_endian),
-        Some(crate::pclntab::MAGIC_1_18 | crate::pclntab::MAGIC_1_20)
-    ) {
-        return NameEnc::Varint;
+    // Any magic but the 1.16/1.17 one settles it: Go 1.7 to 1.15 (the type
+    // names this reads start with 1.7) used the 2-byte length, 1.18+ a varint.
+    match read_u32_e(bin.pclntab_slice(), 0, bin.little_endian) {
+        Some(crate::pclntab::MAGIC_1_18 | crate::pclntab::MAGIC_1_20) => return NameEnc::Varint,
+        Some(crate::pclntab::MAGIC_1_2) => return NameEnc::TwoByteBe,
+        _ => (),
     }
     let Ok(addrs) = md.type_addrs(bin) else {
         return NameEnc::Varint;
@@ -358,8 +368,27 @@ impl ModuleData {
     /// version is read from the itabs themselves: the old pad is always zero,
     /// while the new layout's word at 12 is the first method of a linked itab,
     /// a text address.
+    ///
+    /// Go 1.7 to 1.9 keep a `link *itab` after `_type` and 8 more bytes
+    /// (`bad`, `unused` or `inhash`, from 1.9 `hash` and two flags) before
+    /// `fun`, at 32 on 64-bit and 20 on 32-bit. They share the pclntab magic
+    /// with Go 1.10 to 1.15, which put `hash` where `link` was. `link` is set
+    /// at run time and zero in the file, while `hash` copies the type's hash,
+    /// so a non-zero word there in any itab means the Go 1.10 layout.
     pub fn itab_fun_offset(&self, bin: &GoBinary) -> u64 {
         let ps = bin.pointer_size() as u64;
+        let magic = read_u32_e(bin.pclntab_slice(), 0, bin.little_endian);
+        if magic == Some(crate::pclntab::MAGIC_1_2) {
+            let addrs = self.itab_addrs(bin).unwrap_or_default();
+            let link_zero = addrs
+                .iter()
+                .all(|&a| bin.read_at_addr(a + 2 * ps, 4).is_some_and(|w| w == [0; 4]));
+            return if !addrs.is_empty() && link_zero {
+                3 * ps + 8
+            } else {
+                2 * ps + 8
+            };
+        }
         if ps == 8 {
             return 24;
         }
@@ -411,8 +440,8 @@ impl ModuleData {
     /// between them is what distinguishes the real moduledata from random
     /// pointer matches in the data segment.
     ///
-    /// Layout is chosen from the pclntab magic: 0xfffffff0 = V118,
-    /// 0xfffffff1 = V120. Unknown magics default to V120.
+    /// The layouts to try come from the pclntab magic (see `layouts_for`); an
+    /// unknown magic, such as a garble-rewritten one, gets the Go 1.20+ ones.
     pub fn locate(bin: &GoBinary) -> Result<Self> {
         let ps = bin.pointer_size();
         if !matches!(ps, 4 | 8) {
@@ -622,7 +651,9 @@ fn vaddr_to_file_offset(bin: &GoBinary, vaddr: u64) -> Option<usize> {
 
 /// Cheap structural check: a moduledata begins with a `pcHeader *pcHeader`
 /// field. The target of that pointer should be 4-byte-aligned and start
-/// with a pclntab magic (0xfffffff0 or 0xfffffff1).
+/// with a pclntab magic (0xfffffff0 or 0xfffffff1). Go 1.7 to 1.15 have no
+/// pcHeader: the first field is the `pclntable` slice, whose data starts with
+/// the Go 1.2 magic 0xfffffffb.
 fn looks_like_moduledata(bin: &GoBinary, file_off: usize) -> bool {
     let Some(pc_header_addr) =
         read_ptr(&bin.bytes, file_off, bin.pointer_size(), bin.little_endian)
@@ -637,7 +668,7 @@ fn looks_like_moduledata(bin: &GoBinary, file_off: usize) -> bool {
     };
     matches!(
         read_u32_e(&bin.bytes, pc_off, bin.little_endian),
-        Some(0xfffffff0) | Some(0xfffffff1)
+        Some(0xfffffff0) | Some(0xfffffff1) | Some(0xfffffffb)
     )
 }
 
@@ -651,6 +682,10 @@ fn layouts_for(bin: &GoBinary) -> &'static [Layout] {
     match read_u32_e(bin.pclntab_slice(), 0, bin.little_endian) {
         Some(0xfffffff0) => &[Layout::V118],
         Some(0xfffffffa) => &[Layout::Pre118],
+        // Go 1.8 to 1.15 first: the textsectmap check rejects V108 on a 1.7
+        // binary, whose typelinks header sits where textsectmap would. Go 1.2
+        // to 1.6 have no types region and match neither.
+        Some(0xfffffffb) => &[Layout::V108, Layout::V107],
         _ => &[Layout::V120, Layout::V126, Layout::V127],
     }
 }
@@ -707,21 +742,38 @@ fn scan_section(
 fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Result<ModuleData> {
     let bytes = &bin.bytes;
     let mut r = Reader::new(bytes, file_off, ps, bin.little_endian);
+    let empty = SliceHeader {
+        data: 0,
+        len: 0,
+        cap: 0,
+    };
 
-    let pc_header_addr = r.uptr()?;
+    // Go 1.7 to 1.15 open with the `pclntable` slice, whose data pointer is
+    // the table's address, then `ftab` and `filetab`. There is no pcHeader and
+    // no `funcnametab`, `cutab` or `pctab`: names and pc-value tables live in
+    // `pclntable`.
+    let go12 = matches!(layout, Layout::V107 | Layout::V108);
+    let (pc_header_addr, funcnametab, cutab, filetab, pctab, pclntable, ftab);
+    if go12 {
+        pclntable = r.slice_header()?;
+        ftab = r.slice_header()?;
+        filetab = r.slice_header()?;
+        (pc_header_addr, funcnametab, cutab, pctab) = (pclntable.data, empty, empty, empty);
+    } else {
+        pc_header_addr = r.uptr()?;
+        funcnametab = r.slice_header()?;
+        cutab = r.slice_header()?;
+        filetab = r.slice_header()?;
+        pctab = r.slice_header()?;
+        pclntable = r.slice_header()?;
+        ftab = r.slice_header()?;
+    }
     if pc_header_addr != bin.pclntab_addr {
         return Err(Error::ModuleData(format!(
             "pcHeader pointer 0x{pc_header_addr:x} != pclntab 0x{:x}",
             bin.pclntab_addr
         )));
     }
-
-    let funcnametab = r.slice_header()?;
-    let cutab = r.slice_header()?;
-    let filetab = r.slice_header()?;
-    let pctab = r.slice_header()?;
-    let pclntable = r.slice_header()?;
-    let ftab = r.slice_header()?;
 
     // Sanity: all five sub-region slices (funcnametab, cutab, filetab,
     // pctab, pclntable, ftab) must point inside the pclntab. In Go 1.20+
@@ -736,19 +788,31 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
             && h.data.saturating_add(h.len) <= pclntab_hi
             && h.len == h.cap
     };
-    for (name, h) in [
+    let tables = [
         ("funcnametab", funcnametab),
         ("cutab", cutab),
         ("filetab", filetab),
         ("pctab", pctab),
         ("pclntable", pclntable),
-    ] {
+    ];
+    for (name, h) in tables {
+        if go12 && matches!(name, "funcnametab" | "cutab" | "pctab") {
+            continue;
+        }
         if !inside(h) {
             return Err(Error::ModuleData(format!(
                 "{name} slice [0x{:x}+{}] not within pclntab [0x{:x}, 0x{:x})",
                 h.data, h.len, pclntab_lo, pclntab_hi
             )));
         }
+    }
+    // Go 1.2 to 1.15 put the functab right after the table's 8-byte prefix and
+    // nfunc, so its address is known exactly.
+    if go12 && ftab.data != pclntab_lo.saturating_add(8 + ps as u64) {
+        return Err(Error::ModuleData(format!(
+            "ftab slice data 0x{:x} is not the functab of the pclntab at 0x{pclntab_lo:x}",
+            ftab.data
+        )));
     }
     // ftab is also a sub-slice but its element size is 8 bytes (functab),
     // not 1, check addr and that (len+1)*8 fits in the remaining pclntab.
@@ -811,9 +875,10 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
     } else {
         (0, 0)
     };
-    // Go 1.18 inserted `rodata` and `gofunc` after `etypes`; Go 1.16/1.17 do not
-    // have them, so the slice headers that follow sit two pointers earlier.
-    let (rodata, gofunc) = if matches!(layout, Layout::Pre118) {
+    // Go 1.18 inserted `rodata` and `gofunc` after `etypes`; Go 1.16/1.17 and
+    // older do not have them, so the slice headers that follow sit two pointers
+    // earlier.
+    let (rodata, gofunc) = if matches!(layout, Layout::V107 | Layout::V108 | Layout::Pre118) {
         (0, 0)
     } else {
         (r.uptr()?, r.uptr()?)
@@ -824,13 +889,13 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
         let _epclntab = r.uptr()?;
     }
 
-    let textsectmap = r.slice_header()?;
-    // Go 1.27 dropped both: its types and itabs are walked in place.
-    let empty = SliceHeader {
-        data: 0,
-        len: 0,
-        cap: 0,
+    // Go 1.8 added textsectmap; Go 1.7 goes straight to typelinks.
+    let textsectmap = if layout == Layout::V107 {
+        empty
+    } else {
+        r.slice_header()?
     };
+    // Go 1.27 dropped both: its types and itabs are walked in place.
     let (typelinks, itablinks) = if matches!(layout, Layout::V127) {
         (empty, empty)
     } else {
@@ -872,6 +937,24 @@ fn try_parse(bin: &GoBinary, file_off: usize, ps: usize, layout: Layout) -> Resu
         return Err(Error::ModuleData(format!(
             "implausible text region: [0x{text:x}, 0x{etext:x})"
         )));
+    }
+    // Go 1.8 to 1.15: the linker always writes textsectmap, and its first
+    // section starts at virtual offset 0 and is loaded at `text`. Read as V108,
+    // a Go 1.7 moduledata puts its typelinks header here, whose first entry is
+    // two type offsets, so this is what tells the two layouts apart.
+    if layout == Layout::V108 {
+        let sized = (1..=4096).contains(&textsectmap.len) && textsectmap.len == textsectmap.cap;
+        let entry = bin.read_at_addr(textsectmap.data, 3 * ps);
+        let anchored = entry.is_some_and(|e| {
+            read_ptr(e, 0, ps, bin.little_endian) == Some(0)
+                && read_ptr(e, 2 * ps, ps, bin.little_endian) == Some(text)
+        });
+        if !sized || !anchored {
+            return Err(Error::ModuleData(format!(
+                "textsectmap (data 0x{:x}, len {}) does not start at text 0x{text:x}",
+                textsectmap.data, textsectmap.len
+            )));
+        }
     }
     if minpc > maxpc {
         return Err(Error::ModuleData(format!(
