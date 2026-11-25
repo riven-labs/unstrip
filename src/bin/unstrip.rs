@@ -71,11 +71,11 @@ struct Args {
     #[arg(long, value_name = "SYMBOL", help_heading = "Analysis modes")]
     xref: Option<String>,
 
-    /// Every .text instruction READING the given data address. amd64 only.
+    /// Every .text instruction READING the given data address. amd64, arm64 and 386.
     #[arg(long, value_name = "ADDR", help_heading = "Analysis modes")]
     xref_readers: Option<String>,
 
-    /// Every .text instruction WRITING the given data address. amd64 only.
+    /// Every .text instruction WRITING the given data address. amd64, arm64 and 386.
     #[arg(long, value_name = "ADDR", help_heading = "Analysis modes")]
     xref_writers: Option<String>,
 
@@ -1517,8 +1517,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         // "live"/"unused": on well-formed Go binaries the linker
         // already dead-strips unreachable itabs, so the marker is a
         // reachability confirmation, not a dead-code finder. Where no
-        // scanner reads the code (anything but amd64), every itab is
-        // marked unknown rather than unreachable.
+        // scanner reads the code (anything but amd64, arm64 and 386),
+        // every itab is marked unknown rather than unreachable.
         let reachable_set = if args.no_itab_reachability {
             None
         } else {

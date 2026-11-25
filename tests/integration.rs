@@ -2393,28 +2393,54 @@ fn callgraph_honors_from_and_depth() {
 
 #[test]
 fn itab_reachability_is_unknown_without_a_code_scanner() {
-    // Only amd64 code is scanned for itab references. On arm64 and 386 the
-    // answer is unknown, not "unreachable" for every itab.
+    // amd64, arm64 and 386 code is scanned for itab references. Elsewhere
+    // the answer is unknown, not "unreachable" for every itab.
+    let Some(path) = fixture("featureset.linux-s390x.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    assert!(
+        unstrip::dataxref::referenced_addresses(&bin).is_err(),
+        "no reference scanner for big-endian s390x"
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_unstrip"))
+        .arg(&path)
+        .arg("--itabs")
+        .output()
+        .expect("run unstrip");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("(reachability unknown)"));
+    assert!(!text.contains("(unreachable)"));
+}
+
+#[test]
+fn itab_reachability_reads_arm64_and_386_code() {
     for name in [
         "hello.linux-arm64.stripped",
         "featureset.linux-386.stripped",
+        "featureset.windows-386.stripped.exe",
     ] {
         let Some(path) = fixture(name) else {
             continue;
         };
         let bin = GoBinary::open(&path).expect("open");
-        assert!(
-            unstrip::dataxref::referenced_addresses(&bin).is_err(),
-            "{name}: no reference scanner"
-        );
+        let md = ModuleData::locate(&bin).expect("moduledata");
+        let all = itabs::recover_all(&bin, &md).expect("itabs");
+        let referenced = unstrip::dataxref::referenced_addresses(&bin).expect("sweep");
+        let missing: Vec<u64> = all
+            .iter()
+            .map(|it| it.addr)
+            .filter(|a| !referenced.contains(a))
+            .collect();
+        assert!(missing.is_empty(), "{name}: unreferenced {missing:x?}");
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_unstrip"))
             .arg(&path)
             .arg("--itabs")
             .output()
             .expect("run unstrip");
         let text = String::from_utf8(out.stdout).unwrap();
-        assert!(text.contains("(reachability unknown)"), "{name}");
-        assert!(!text.contains("(unreachable)"), "{name}");
+        assert!(text.contains("(reachable)"), "{name}");
+        assert!(!text.contains("(reachability unknown)"), "{name}");
     }
 }
 
