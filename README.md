@@ -39,7 +39,7 @@ Built-in Ghidra, IDA, and Binary Ninja Python exporters via `--format`, with typ
 
 `--data-at <addr>` interprets bytes at a data address through the recovered itab table and function table. Iface headers resolve to concrete type plus dispatched method body. Slice headers expand to ptr/len/cap with the data pointer symbolized. String headers print a quoted preview.
 
-`--xref <symbol>` enumerates every call site targeting a function, on amd64 and arm64 binaries alike. Direct CALL/BL coverage is solid on both. Indirect dispatch is reported only in the `CALL [rip+itab+slot]` form, which stock Go codegen does not emit (see [Targeted xref by symbol](#targeted-xref-by-symbol)).
+`--xref <symbol>` enumerates every call site targeting a function, on amd64, arm64 and 386 binaries. Direct CALL/BL coverage is solid on all three. Indirect dispatch is reported only in the `CALL [rip+itab+slot]` form, on amd64 and arm64, and stock Go codegen does not emit it (see [Targeted xref by symbol](#targeted-xref-by-symbol)).
 
 A 1.4 MiB static Rust binary, no runtime deps. Go 1.2 through 1.27, ELF + Mach-O + PE, amd64 + arm64 + 386, PIE + non-PIE, one tool.
 
@@ -58,8 +58,8 @@ A short verified-only table follows. The longer differences and the "when to rea
 | Ghidra + IDA + Binja exporters          | yes                  | yes        | no       | no       |
 | Inlined call stacks on PC lookup        | yes                  | unverified | no       | no       |
 | `--data-at` symbolic data inspection    | yes                  | no         | no       | no       |
-| `--xref` on amd64 and arm64             | yes                  | n/a        | n/a      | n/a      |
-| Literals with the functions using them  | amd64, arm64         | no         | unverified | unverified |
+| `--xref` on amd64, arm64 and 386        | yes                  | n/a        | n/a      | n/a      |
+| Literals with the functions using them  | amd64, arm64, 386    | no         | unverified | unverified |
 | Static binary, no runtime deps          | yes (Rust)           | yes (Go)   | yes (Go) | n/a      |
 
 ## Use
@@ -334,7 +334,7 @@ runtime.convT @ 0x000000000040fb00:
 
 Accepts a function name (resolved through pclntab) or a hex address (`0x...`). When the target is an interface-method implementation, indirect dispatch sites of the form `CALL [rip+itab+slot]` are reported alongside direct calls with the resolved itab and method name carried inline. The compiler usually loads the slot pointer into a register first; those register-indirect sites do not show up here because resolving them requires basic-block tracking we deliberately don't ship. In practice the indirect-itab scanner finds matches on hand-written assembly and unusual codegen; expect zero hits from stock Go compiler output. The strict-encoding hits that do appear carry zero false positives.
 
-amd64 and arm64. Direct-CALL coverage is solid on both; indirect-itab on arm64 catches the canonical `LDR Xt, [Xn, #slot]; BLR Xt` pair but misses other dispatch patterns the compiler emits, pending a real disassembler integration.
+amd64, arm64 and 386. Direct-CALL coverage is solid on all three; indirect-itab on arm64 catches the canonical `LDR Xt, [Xn, #slot]; BLR Xt` pair but misses other dispatch patterns the compiler emits, pending a real disassembler integration, and 386 reports direct calls only. On 386 each function is decoded from its entry; on linux and windows 386 builds of a small `net/http` server and `testdata/strlits.go` with Go 1.15, 1.20 and 1.26, the call graph held every direct call to a function entry that `go tool objdump` shows and no other (32,071 to 43,946 calls a build for the server).
 
 ### String literals
 
@@ -349,7 +349,7 @@ $ unstrip ./strlits --strings --filter host.strlits
     0x00000000004a26d5  main.build+0x35  store
 ```
 
-Go packs literals end to end with no terminator, so `strings(1)` and a plain run walk print several literals glued into one line. unstrip reports a literal only where the binary pairs its pointer with its length: two consecutive argument or result registers at a call or return, two adjacent words stored off one base, or a static `{pointer, length}` header in data. Every pair is then checked against the linker's string table, which is sorted by length and packed, and dropped if it does not fit. On amd64 and arm64 builds of Go 1.15, 1.20 and 1.26 (ELF, plus spot checks on PE, Mach-O, PIE and garble), every reported literal matched a literal the compiler emitted, and every function attribution checked against the compiler's `-S` output was right; 88 to 98% of the (function, literal) uses the compiler emitted were found, and 45% under garble `-literals`, which replaces most literals with code. Literals the code never pairs with a length, such as lookup tables indexed byte by byte, are not reported. 386 has no instruction scanner yet, so it reports none; `--strings --strings-runs` prints the old run output on any architecture. The library call is `unstrip::strings::literals`.
+Go packs literals end to end with no terminator, so `strings(1)` and a plain run walk print several literals glued into one line. unstrip reports a literal only where the binary pairs its pointer with its length: two consecutive argument or result registers at a call or return, two adjacent words stored off one base, or a static `{pointer, length}` header in data. Every pair is then checked against the linker's string table, which is sorted by length and packed, and dropped if it does not fit. On amd64 and arm64 builds of Go 1.15, 1.20 and 1.26 (ELF, plus spot checks on PE, Mach-O, PIE and garble), every reported literal matched a literal the compiler emitted, and every function attribution checked against the compiler's `-S` output was right; 88 to 98% of the (function, literal) uses the compiler emitted were found, and 45% under garble `-literals`, which replaces most literals with code. Literals the code never pairs with a length, such as lookup tables indexed byte by byte, are not reported. 386 passes arguments on the stack, so there the pairs are the two adjacent stack words a call's string argument is stored to, and the same table check applies. On linux and windows 386 builds of `testdata/strlits.go` and a small `net/http` server with Go 1.15, 1.20 and 1.26, every reported literal and static header matched what the compiler emitted, every function attribution was right, and 92 to 97% of the (function, literal) uses were found. `--strings --strings-runs` prints the old run output on any architecture. The library call is `unstrip::strings::literals`.
 
 ### Goroutines and deferred calls
 
@@ -367,7 +367,7 @@ $ unstrip inl --goroutines | head -6
     (physical) runtime.gcenable  runtime/mgc.go:215
 ```
 
-When the target resolves, you see exactly which function the goroutine runs. Resolution is partial: on a Go 1.26 test program 4 of 34 sites resolve on amd64 and 7 of 34 on arm64; a funcval built in a heap object several instructions before the call is not followed. When the LEA pattern doesn't match the heuristic (the funcval came from a register or stack slot), the call site and source file:line still show so you can open the source. amd64 and arm64 only today.
+When the target resolves, you see exactly which function the goroutine runs. Resolution is partial: on a Go 1.26 test program 4 of 34 sites resolve on amd64 and 7 of 34 on arm64; a funcval built in a heap object several instructions before the call is not followed. When the LEA pattern doesn't match the heuristic (the funcval came from a register or stack slot), the call site and source file:line still show so you can open the source. On 386 the funcval is the spawner's last stack argument, and a `LEAL` of a static funcval stored to that slot in the same block resolves. On linux and windows 386 builds of a small `net/http` server with Go 1.15, 1.20 and 1.26, every call site matched `go tool objdump`, as did every resolved target: 22 of 49 sites resolve on Go 1.15, which still passes static funcvals, and 4 of 66 on Go 1.26. amd64, arm64 and 386.
 
 ### Dispatch resolver for Ghidra
 
@@ -504,7 +504,7 @@ What works:
 
 - Go 1.2 through 1.27 for functions, files and lines; Go 1.7 through 1.27 for types, itabs and method signatures
 - ELF, Mach-O, and PE containers
-- amd64, arm64, and 386 (on 386 the table readers; the instruction scanners decode amd64 and arm64 only)
+- amd64, arm64, and 386 (on 386 the table readers are checked on Go 1.17 to 1.27, and the pclntab, type and itab readers also on Go 1.7 to 1.15, the pclntab reader from Go 1.5)
 - PIE and non-PIE
 - Garble-obfuscated binaries (detected and flagged; structural data still recovered)
 - Function names, file paths, line numbers
@@ -513,8 +513,9 @@ What works:
 - Interface to concrete type recovery via itabs
 - Module dependency tree, build settings, VCS info
 - PC-to-symbol reverse lookup with inlined call stacks
-- Direct CALL/BL call-site enumeration on amd64 and arm64
-- Exact string literals with the functions that use them, on amd64 and arm64
+- Direct CALL/BL call-site enumeration on amd64, arm64 and 386
+- Data references from code (`--xref-readers`, `--xref-writers`) on amd64, arm64 and 386
+- Exact string literals with the functions that use them, on amd64, arm64 and 386
 - IDA, Ghidra, Binary Ninja, JSON, and human-readable output
 
 Tested against: Linux ELF amd64 and arm64 (PIE and non-PIE), Windows PE amd64, Linux ELF and Windows PE 386, and Mach-O amd64 and arm64 (cross-compiled darwin builds in the integration suite), on Go versions in the supported range. Open an issue if it breaks. Garble heuristic detection works and structural recovery survives the default mode (string literals, inline trees, and the funcdata array all stay walkable).
@@ -540,7 +541,7 @@ Funcdata before Go 1.16. Go 1.2 to 1.15 binaries read their functions, files, li
 
 Free-function signature recovery. Methods ship today (we walk `_type.uncommon().methods` and the itab method tables). Free top-level functions do not appear in either table, so their signatures are absent from a stripped binary unless the compiler emitted a `funcType` for reflection or interface storage. Closing that gap means either reading DWARF when present or recognizing reflective uses and back-resolving.
 
-32-bit arm, and the instruction scanners on i386. The table readers (pclntab, moduledata, buildinfo, types, itabs, method tables, funcdata) handle i386 on Go 1.17 to 1.27, and the pclntab, type and itab readers also on Go 1.7 to 1.15 (the pclntab reader from Go 1.5); the call, goroutine, data-reference and string-literal scanners decode amd64 and arm64 code only, and 32-bit arm is untested.
+32-bit arm. The call, goroutine, data-reference and string-literal scanners decode amd64, arm64 and 386 code, not 32-bit arm, and the table readers are untested on it.
 
 `--symbols-as` for Mach-O. ELF and PE write today. The Mach-O equivalent (`LC_SYMTAB` patching) ships once we have a tested fixture; we do not currently have one we can publish.
 

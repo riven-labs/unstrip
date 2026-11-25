@@ -14,12 +14,29 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   in. A literal is reported only where the binary pairs its pointer with its
   length (two consecutive argument or result registers at a call or return,
   two adjacent stored words, or a static header in data) and the pair fits
-  the linker's string table, which is sorted by length and packed. amd64 and
-  arm64; on 386, which has no instruction scanner yet, nothing is reported.
-  On amd64 and arm64 builds of Go 1.15, 1.20 and 1.26,
+  the linker's string table, which is sorted by length and packed. amd64,
+  arm64 and 386. On amd64 and arm64 builds of Go 1.15, 1.20 and 1.26,
   plain and garbled, every reported literal was one the compiler emitted and
   every function attribution checked against `-gcflags=-S` was right. The
   library call is `strings::literals`, returning `strings::Literals`.
+- The instruction scanners read 386 code: the call graph (`--xrefs`),
+  `--xref`, `--goroutines`, `--xref-readers` and `--xref-writers`, itab
+  reachability, and `--strings`. Each function is decoded from its entry,
+  not swept byte by byte. A goroutine's funcval is read from the spawner's
+  last stack argument, data references are the absolute operands and
+  address immediates of MOV, LEA, PUSH, CMP, CALL and JMP, and a string
+  argument pairs through the two stack words it is stored to. On Go 1.15,
+  1.20 and 1.26 builds of a `net/http` server and `testdata/strlits.go`
+  for linux and windows 386, the direct calls, spawn sites, resolved spawn
+  targets and data references were exactly the ones `go tool objdump`
+  shows, and every literal and function attribution `--strings` reported
+  was one the compiler emitted (97 to 99% of the literals were found).
+  `--xref` on 386 reports direct calls only.
+- `--xref-readers` and `--xref-writers` on arm64: an `ADRP` with the `ADD`,
+  load or store after it, reported at that second instruction, and the
+  `ADRP`, `ADD`, `MOVD (R27)` triple Go 1.18 and earlier use for a global
+  as one load or store. On Go 1.15, 1.20 and 1.26 builds (linux, and Go
+  1.26 darwin and windows), every reference matched `go tool objdump`.
 - Type identity on `types::Type`: `pkg_path` (the import path of a named
   type, from its uncommon block, as `reflect.Type.PkgPath()` gives it),
   `named`, `align`, `field_align`, and `methods`, the uncommon method table:
@@ -123,6 +140,10 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Changed
 
+- `--itabs` marks arm64 and 386 itabs `(reachable)` or `(unreachable)`
+  from a scan of their code, where it printed `(reachability unknown)`;
+  `dataxref::referenced_addresses` reads arm64 and 386 code, and on 386
+  data words are 4 bytes.
 - `--addr` and `--addr-file` print a PC in inlined code as a line with the
   PC and its offset in the physical function (`0x00000000004a0225
   main.physical+0x25`), then one `(inlined)` line per inlined frame and the

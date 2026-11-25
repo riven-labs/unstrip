@@ -38,7 +38,7 @@ Types print in Go syntax, as `reflect.Type.String()` gives them: a field as `+00
 
 ### `--itabs`
 
-Recovers `(interface, concrete) -> method set` pairs from `runtime.itablinks`. Tags each entry as `(reachable)` if its address is referenced from `.text` or any data section, `(unreachable)` otherwise. The `.text` scan is amd64 only; on other architectures every entry reads `(reachability unknown)`. Useful for spotting dead itabs the linker left behind and for de-virtualizing calls in a disassembler.
+Recovers `(interface, concrete) -> method set` pairs from `runtime.itablinks`. Tags each entry as `(reachable)` if its address is referenced from `.text` or any data section, `(unreachable)` otherwise. The `.text` scan reads amd64, arm64 and 386 code; on other architectures every entry reads `(reachability unknown)`. Useful for spotting dead itabs the linker left behind and for de-virtualizing calls in a disassembler.
 
 ### `--strings`
 
@@ -63,8 +63,9 @@ Text that is not valid UTF-8 prints as `hex:...`.
 The toolchain version and module info strings are marked `[buildinfo]`.
 In JSON (`-f json`) each literal has `addr`, `len`, `text` (or `hex`), `origin`, `uses` (`pc`, `function_addr`, `function`, `site`) and `headers`, and the report says whether the code was scanned, whether calls were read with the register ABI, and how many pairs were dropped and why.
 
-amd64 and arm64.
-On 386 there is no instruction scanner yet, so nothing is reported; `--strings --strings-runs` still prints the printable runs.
+amd64, arm64 and 386.
+386 passes arguments on the stack, so there a string argument pairs through the two stack words it is stored to.
+On other architectures nothing is reported; `--strings --strings-runs` still prints the printable runs.
 Garble's default mode leaves literals in place; `-literals` replaces most of them with code that builds them at run time, and what remains (including the encrypted bytes) is reported as it is.
 
 ### `--capabilities`
@@ -81,7 +82,7 @@ Stable structural sha256 over the user-package surface: functions, types, itabs,
 
 ### `--goroutines`
 
-Lists every `runtime.newproc` and `runtime.deferproc` call site in `.text`, resolving the target function when the LEA/ADRP pattern decodes. Surfaces the control flow hidden behind `go func() { ... }` and `defer`. Under each site, one indented line per frame at the call: the function holding it, and the functions it was inlined through when the call sits in inlined code. `--format json` gives them as each site's `location`. amd64 and arm64 only.
+Lists every `runtime.newproc` and `runtime.deferproc` call site in `.text`, resolving the target function when the LEA/ADRP pattern decodes. Surfaces the control flow hidden behind `go func() { ... }` and `defer`. Under each site, one indented line per frame at the call: the function holding it, and the functions it was inlined through when the call sits in inlined code. `--format json` gives them as each site's `location`. amd64, arm64 and 386; on 386 the funcval is read from the spawner's last stack argument.
 
 ### `--xrefs`
 
@@ -89,11 +90,17 @@ Builds a static call graph from direct `CALL` / `BL` scans in `.text`. Direct ca
 
 ### `--xref <SYMBOL>`
 
-Lists every call site targeting the given symbol. Accepts a function name (resolved through pclntab) or a hex address (`0x...`). Output groups call sites under their containing function. amd64 and arm64. Direct-CALL coverage is solid on both; indirect-itab on arm64 catches the canonical `LDR Xt, [Xn, #slot]; BLR Xt` pair but misses other dispatch patterns Go's compiler emits.
+Lists every call site targeting the given symbol. Accepts a function name (resolved through pclntab) or a hex address (`0x...`). Output groups call sites under their containing function. amd64, arm64 and 386. Direct-CALL coverage is solid on all three; indirect-itab on arm64 catches the canonical `LDR Xt, [Xn, #slot]; BLR Xt` pair but misses other dispatch patterns Go's compiler emits, and 386 reports direct calls only.
 
 ### `--xref-readers <ADDR>` / `--xref-writers <ADDR>`
 
-Scans `.text` for amd64 RIP-relative instructions touching the given data address. Readers cover LEA, MOV-load, CMP-against-memory, and CALL/JMP through a memory pointer. Writers cover MOV-store. Each hit reports the containing function plus the instruction PC and kind.
+Scans `.text` for instructions touching the given data address: RIP-relative forms on amd64, absolute operands and immediates in every function on 386, and on arm64 an `ADRP` with the `ADD`, load or store after it, reported at that second instruction.
+Go 1.18 and earlier build an arm64 load or store as `ADRP R27; ADD $lo, R27, R27; MOVD (R27), R0`, which is reported once, as the load or store.
+Readers cover LEA (on 386 also a `MOV` or `PUSH` of the address as an immediate), MOV-load, CMP, and CALL/JMP through a memory pointer.
+Writers cover MOV-store.
+On 386 no other instruction with an absolute operand is reported (`INCL x(SB)`, `ADDL`, SSE arithmetic).
+Each hit reports the containing function plus the instruction PC and kind.
+Checked against `go tool objdump` on Go 1.15, 1.20 and 1.26 builds of a small `net/http` server and `testdata/strlits.go`, for linux and windows 386 and linux arm64, and on Go 1.26 darwin and windows arm64 builds of the server: every reference unstrip reported was one objdump shows, and it missed none of the MOV, LEA, PUSH, CMP, CALL and JMP references (on arm64, `ADRP` pairs).
 
 ### `--data-at <ADDR>`
 
@@ -158,7 +165,7 @@ These flags only make sense alongside one of the analysis modes above.
 
 ### `--format goresym`
 
-Prints the whole binary in the JSON schema of [GoReSym](https://github.com/mandiant/GoReSym) (`ExtractMetadata` in its `main.go`, master `fa3f0577`), as `GoReSym -t -d -p` fills it: `Version`, `BuildId`, `Arch`, `OS`, `TabMeta`, `ModuleMeta`, `Types`, `Interfaces`, `BuildInfo`, `Files`, `UserFunctions`, `StdFunctions`, `Strings`, with GoReSym's field names, nesting, JSON types and four-space indent. A script or pipeline written for GoReSym output reads it, including GoReSym's IDA and Ghidra rename scripts. Add `--strings` to fill `Strings` from the literals `--strings` proves (amd64 and arm64; empty on 386). It does not combine with the analysis modes. When the file does not read, it prints GoReSym's `{"error": "Failed to parse file: ..."}` with the reason and exits 1.
+Prints the whole binary in the JSON schema of [GoReSym](https://github.com/mandiant/GoReSym) (`ExtractMetadata` in its `main.go`, master `fa3f0577`), as `GoReSym -t -d -p` fills it: `Version`, `BuildId`, `Arch`, `OS`, `TabMeta`, `ModuleMeta`, `Types`, `Interfaces`, `BuildInfo`, `Files`, `UserFunctions`, `StdFunctions`, `Strings`, with GoReSym's field names, nesting, JSON types and four-space indent. A script or pipeline written for GoReSym output reads it, including GoReSym's IDA and Ghidra rename scripts. Add `--strings` to fill `Strings` from the literals `--strings` proves (amd64, arm64 and 386). It does not combine with the analysis modes. When the file does not read, it prints GoReSym's `{"error": "Failed to parse file: ..."}` with the reason and exits 1.
 
 Checked against GoReSym master `fa3f0577` (`GoReSym -t -d -p`, field by field) on 31 builds of one program (Go 1.13, 1.14, 1.15, 1.16, 1.17, 1.18, 1.20 and 1.26; linux amd64, arm64 and 386, windows amd64) and 18 of the testdata fixtures (Go 1.5 to 1.26, Linux, Windows and macOS, amd64, arm64, 386 and s390x, PIE, a cobra program, a garbled build). GoReSym read none of a garble v0.18.0 build of the program and a Go 1.2 Windows fixture ("no valid pclntab found"); unstrip reads both. Equal on every build where both read the part: `BuildId`, `Arch`, `TabMeta`, `ModuleMeta` addresses and lengths, `BuildInfo`, the `Files` set, and every function's `Start`, `End`, `FullName` and `PackageName`; `Version` and `OS` on every build that is not garbled. `Types` and `Interfaces` hold the same types at the same addresses with the same `CStr`, and the same `Str` and `Kind` except as listed below. What unstrip fills differently:
 
