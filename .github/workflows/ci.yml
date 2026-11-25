@@ -60,3 +60,102 @@ jobs:
           toolchain: "1.85"
       - name: cargo check
         run: cargo check --all-targets
+
+  # Runs the `--format ghidra` script inside headless Ghidra on freshly built
+  # test programs and fails on any declaration, function, prototype or label
+  # Ghidra refused. Separate so the other jobs stay fast; Ghidra is cached.
+  ghidra:
+    name: Ghidra script (headless)
+    runs-on: ubuntu-latest
+    env:
+      GHIDRA_VERSION: "12.2"
+      GHIDRA_BUILD: "20261016"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ghidra-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ghidra-${{ runner.os }}-cargo-
+
+      - name: Install Java (Ghidra 12.2 needs 25)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Install Python (PyGhidra)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Cache Ghidra
+        id: ghidra-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ghidra
+          key: ghidra-${{ env.GHIDRA_VERSION }}-${{ env.GHIDRA_BUILD }}
+
+      - name: Download Ghidra
+        if: steps.ghidra-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/ghidra.zip" \
+            "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_BUILD}.zip"
+          mkdir -p ~/ghidra
+          unzip -q "$RUNNER_TEMP/ghidra.zip" -d ~/ghidra
+
+      - name: Install PyGhidra from the Ghidra distribution
+        run: |
+          pip install --no-index \
+            --find-links ~/ghidra/ghidra_${GHIDRA_VERSION}_PUBLIC/Ghidra/Features/PyGhidra/pypkg/dist \
+            pyghidra
+
+      - name: Build unstrip
+        run: cargo build --release
+
+      - name: Build the test programs
+        run: |
+          mkdir -p ghidra-ci
+          cd testdata
+          GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o ../ghidra-ci/featureset.go126-amd64 featureset.go
+          GOOS=linux GOARCH=386 go build -ldflags='-s -w' -o ../ghidra-ci/featureset.go126-386 featureset.go
+          go install golang.org/dl/go1.15.15@latest
+          "$(go env GOPATH)/bin/go1.15.15" download
+          GOOS=linux GOARCH=amd64 "$(go env GOPATH)/bin/go1.15.15" build -ldflags='-s -w' -o ../ghidra-ci/typeset.go115-amd64 typeset.go
+
+      - name: Apply the scripts in headless Ghidra
+        run: |
+          ghidra=~/ghidra/ghidra_${GHIDRA_VERSION}_PUBLIC
+          status=0
+          for bin in ghidra-ci/featureset.go126-amd64 ghidra-ci/featureset.go126-386 ghidra-ci/typeset.go115-amd64; do
+            name=$(basename "$bin")
+            ./target/release/unstrip "$bin" --format ghidra > "ghidra-ci/$name.py"
+            mkdir -p "$RUNNER_TEMP/proj"
+            python -m pyghidra.ghidra_launch --install-dir "$ghidra" \
+              ghidra.app.util.headless.AnalyzeHeadless "$RUNNER_TEMP/proj" "$name" \
+              -import "$PWD/$bin" -scriptPath "$PWD/ghidra-ci" -postScript "$name.py" \
+              -deleteProject -noanalysis > "ghidra-ci/$name.log" 2>&1 || true
+            echo "== $name"
+            grep '^unstrip: ' "ghidra-ci/$name.log" || tail -n 40 "ghidra-ci/$name.log"
+            # Every kind must have applied something, and nothing may fail.
+            for kind in 'type declarations' functions prototypes labels; do
+              grep -Eq "^unstrip: applied [1-9][0-9]*/[0-9]+ $kind \(0 failed\)$" "ghidra-ci/$name.log" || status=1
+            done
+            grep -qx 'unstrip: done, 0 failures' "ghidra-ci/$name.log" || status=1
+          done
+          exit $status
