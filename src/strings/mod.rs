@@ -15,9 +15,7 @@
 //! Garble's default mode leaves literals alone (encrypting them is its
 //! separate `-literals` mode), so both survive it.
 
-mod arm64;
 mod literals;
-mod x86;
 
 use serde::Serialize;
 

@@ -4,6 +4,7 @@ pub mod capabilities;
 pub mod dataview;
 pub mod dataxref;
 pub mod diff;
+mod disasm;
 pub mod dispatch;
 pub mod error;
 pub mod export;

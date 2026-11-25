@@ -106,7 +106,10 @@ const IN_GLOBALS: [&str; 4] = [
 fn check_strlits(name: &str) -> Option<Literals> {
     let bin = fixture(name)?;
     let report = recover(&bin);
-    assert!(report.code_scanned, "{name}: amd64 and arm64 are scanned");
+    assert!(
+        report.code_scanned,
+        "{name}: amd64, arm64 and 386 are scanned"
+    );
     check_invariants(&bin, &report);
     for (text, function) in USED_BY {
         assert!(
@@ -200,14 +203,8 @@ fn literals_with_odd_bytes_keep_them() {
 }
 
 #[test]
-fn x386_has_no_scanner_and_reports_nothing() {
-    let Some(bin) = fixture("strlits.linux-386.stripped") else {
-        return;
-    };
-    let report = recover(&bin);
-    assert!(!report.code_scanned);
-    assert!(
-        report.literals.is_empty(),
-        "nothing locates the table on 386"
-    );
+fn linux_386_literals_match_the_source() {
+    if let Some(report) = check_strlits("strlits.linux-386.stripped") {
+        assert!(!report.register_abi, "386 passes arguments on the stack");
+    }
 }

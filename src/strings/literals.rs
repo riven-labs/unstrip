@@ -15,7 +15,8 @@
 //! - In code, a pointer and a length stored to two adjacent words off the
 //!   same base: `MOV [base+d], ptr; MOV [base+d+8], len`, or one `STP` on
 //!   arm64. This is how a string reaches a struct field, a slice element, a
-//!   map slot, or a stack argument before the register ABI.
+//!   map slot, or a stack argument before the register ABI, and on 386,
+//!   which has no register ABI, a stack argument always.
 //! - In data, a header in an initialized global or a read-only composite
 //!   literal: a pointer word into the string table and the length word
 //!   after it. Code that loads the header's address uses the literal too.
@@ -35,9 +36,6 @@
 //! length order or overlaps another literal. Nothing is guessed: a literal
 //! the code never pairs, such as a lookup table indexed byte by byte, is
 //! not reported.
-//!
-//! 386 has no instruction scanner yet, so nothing locates the table there
-//! and no literal is reported.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -47,7 +45,7 @@ use crate::gobin::{Arch, GoBinary, Section, SectionKind};
 use crate::pclntab::Pclntab;
 use crate::Result;
 
-use super::{arm64, x86};
+use crate::disasm::{arm64, function_code, x86};
 
 /// One string literal, its bytes, and everything in the binary proven to
 /// use it.
@@ -130,9 +128,9 @@ pub struct Header {
 pub struct Literals {
     /// Sorted by address, then length.
     pub literals: Vec<Literal>,
-    /// False when the architecture has no instruction scanner (386 today).
-    /// Then nothing is reported, because a static header is accepted only
-    /// inside the span code-proven literals occupy.
+    /// False when the architecture has no instruction scanner (anything but
+    /// amd64, arm64 and 386). Then nothing is reported, because a static
+    /// header is accepted only inside the span code-proven literals occupy.
     pub code_scanned: bool,
     /// Whether call and return sites were read with the register ABI (Go
     /// 1.17 and later on amd64, 1.18 and later on arm64).
@@ -193,7 +191,19 @@ pub fn literals(bin: &GoBinary, pcln: &Pclntab<'_>) -> Result<Literals> {
                 let Some(code) = function_code(bin, f.address, f.size) else {
                     continue;
                 };
-                scan_amd64(code, f.address, idx, &ctx, &mut scan);
+                scan_x86(code, f.address, idx, &ctx, &AMD64, &mut scan);
+            }
+            true
+        }
+        Arch::X86 if bin.little_endian => {
+            for (idx, f) in functions.iter().enumerate() {
+                if assembly.contains(&f.address) {
+                    continue;
+                }
+                let Some(code) = function_code(bin, f.address, f.size) else {
+                    continue;
+                };
+                scan_x86(code, f.address, idx, &ctx, &I386, &mut scan);
             }
             true
         }
@@ -544,20 +554,6 @@ fn go_minor(version: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-fn function_code(bin: &GoBinary, addr: u64, size: u64) -> Option<&[u8]> {
-    let section = bin.section_for_addr(addr)?;
-    if section.kind != SectionKind::Text {
-        return None;
-    }
-    let start = section.file_offset_of(addr)?;
-    let section_end = section.file_offset.saturating_add(section.file_size);
-    let end = start
-        .saturating_add(usize::try_from(size).ok()?)
-        .min(section_end)
-        .min(bin.bytes.len());
-    bin.bytes.get(start..end)
-}
-
 /// The bytes of a candidate literal, when they sit wholly inside one
 /// read-only data section's file-backed bytes and it is not the pclntab.
 fn read_only_bytes(bin: &GoBinary, addr: u64, len: u64) -> Option<&[u8]> {
@@ -783,6 +779,8 @@ fn fresh(defs: &mut u32) -> u32 {
 /// that no jump in the function names.
 struct Walk<'a> {
     func_idx: usize,
+    /// Pointer size in bytes.
+    word: i64,
     defs: u32,
     /// The definition counter when the current basic block began.
     block_start: u32,
@@ -795,11 +793,12 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    fn new(func_idx: usize, scan: &'a mut Scan) -> Walk<'a> {
+    fn new(func_idx: usize, word: i64, scan: &'a mut Scan) -> Walk<'a> {
         let mut defs = 0;
         let state = State::empty(&mut defs);
         Walk {
             func_idx,
+            word,
             defs,
             block_start: defs,
             state,
@@ -865,7 +864,7 @@ impl<'a> Walk<'a> {
     /// Forgets the words a write of `width` bytes at `(base, disp)` may
     /// overlap.
     fn clobber(&mut self, base: Base, disp: i64, width: i64) {
-        let lo = disp.saturating_sub(7);
+        let lo = disp.saturating_sub(self.word - 1);
         let hi = disp.saturating_add(width);
         let doomed: Vec<(Base, i64)> = self
             .state
@@ -1002,11 +1001,36 @@ const AMD64_ABI: [u8; 9] = [
     11,
 ];
 
-/// R11, the one register `runtime.gcWriteBarrier1` to `8` change: they
-/// return the write barrier buffer slot there and save everything else.
-const AMD64_WB_SCRATCH: u8 = 11;
+/// What sets the two x86 modes apart for the walk.
+struct X86Mode {
+    decode: fn(&[u8], u64) -> Option<x86::Insn>,
+    /// Pointer size: a store this wide can hold a header word.
+    word: u8,
+    /// The one register `runtime.gcWriteBarrier1` to `8` change: they return
+    /// the write barrier buffer slot there and save everything else.
+    wb_scratch: u8,
+}
 
-fn scan_amd64(code: &[u8], entry: u64, func_idx: usize, ctx: &CodeCtx, scan: &mut Scan) {
+const AMD64: X86Mode = X86Mode {
+    decode: x86::decode,
+    word: 8,
+    wb_scratch: 11,
+};
+
+const I386: X86Mode = X86Mode {
+    decode: x86::decode32,
+    word: 4,
+    wb_scratch: x86::RDI,
+};
+
+fn scan_x86(
+    code: &[u8],
+    entry: u64,
+    func_idx: usize,
+    ctx: &CodeCtx,
+    mode: &X86Mode,
+    scan: &mut Scan,
+) {
     // First pass: decode, and note every jump target inside the function
     // and whether a jump reaches it from below (a loop head).
     let mut insns = Vec::new();
@@ -1015,7 +1039,7 @@ fn scan_amd64(code: &[u8], entry: u64, func_idx: usize, ctx: &CodeCtx, scan: &mu
     let mut off = 0usize;
     while off < code.len() {
         let pc = entry + off as u64;
-        let Some(insn) = x86::decode(&code[off..], pc) else {
+        let Some(insn) = (mode.decode)(&code[off..], pc) else {
             break;
         };
         if let x86::Kind::Jump {
@@ -1064,23 +1088,23 @@ fn scan_amd64(code: &[u8], entry: u64, func_idx: usize, ctx: &CodeCtx, scan: &mu
         }
     }
 
-    let mut walk = Walk::new(func_idx, scan);
+    let mut walk = Walk::new(func_idx, i64::from(mode.word), scan);
     let mut falls_through = true;
     for &(pc, insn) in &insns {
         walk.enter(pc, falls_through, loop_heads.contains(&pc));
         falls_through = true;
-        if let Some(t) = insn.rip_target {
+        if let Some(t) = insn.mem_target {
             walk.scan.refs.push((t, pc, func_idx));
         }
         match insn.kind {
-            x86::Kind::LeaRip { dst, target } => walk.write_reg(dst, Val::Addr { target, pc }),
+            x86::Kind::Lea { dst, target } => walk.write_reg(dst, Val::Addr { target, pc }),
             x86::Kind::MovImm { dst, value } => walk.write_reg(dst, Val::Imm(value)),
             x86::Kind::MovReg { dst, src } => walk.copy_reg(dst, src),
             x86::Kind::Store { mem, src, width } => {
-                let val = match (src, width) {
-                    (x86::Src::Reg(r), 8) => walk.reg(r),
-                    (x86::Src::Imm(v), 8) => Val::Imm(v),
-                    _ => Val::Unknown,
+                let val = match src {
+                    _ if width != mode.word => Val::Unknown,
+                    x86::Src::Reg(r) => walk.reg(r),
+                    x86::Src::Imm(v) => Val::Imm(v),
                 };
                 let (base, disp) = match mem {
                     x86::Mem::Base { reg, index, disp } => (walk.base(reg, index), disp),
@@ -1090,15 +1114,15 @@ fn scan_amd64(code: &[u8], entry: u64, func_idx: usize, ctx: &CodeCtx, scan: &mu
                         continue;
                     }
                 };
-                if width == 8 {
-                    walk.store(base, disp, val, 8);
+                if width == mode.word {
+                    walk.store(base, disp, val, i64::from(mode.word));
                 } else {
                     walk.clobber(base, disp, width as i64);
                 }
             }
             x86::Kind::Call { target } => {
                 if target.is_some_and(|t| ctx.write_barriers.contains(&t)) {
-                    walk.write_reg(AMD64_WB_SCRATCH, Val::Unknown);
+                    walk.write_reg(mode.wb_scratch, Val::Unknown);
                     continue;
                 }
                 if ctx.register_abi {
@@ -1218,7 +1242,7 @@ fn scan_arm64(code: &[u8], entry: u64, func_idx: usize, ctx: &CodeCtx, scan: &mu
         }
     }
 
-    let mut walk = Walk::new(func_idx, scan);
+    let mut walk = Walk::new(func_idx, 8, scan);
     let mut falls_through = true;
     for &(pc, kind) in &insns {
         walk.enter(pc, falls_through, loop_heads.contains(&pc));
@@ -1399,7 +1423,7 @@ mod tests {
             0xc3, // RET
         ];
         let mut scan = Scan::default();
-        scan_amd64(&code, 0x1000, 0, &ctx(&[]), &mut scan);
+        scan_x86(&code, 0x1000, 0, &ctx(&[]), &AMD64, &mut scan);
         assert_eq!(pairs(&scan), vec![(0x1107, 5, 0x1000, Site::Registers)]);
     }
 
@@ -1412,7 +1436,7 @@ mod tests {
             0xe8, 0x00, 0x00, 0x00, 0x00, // CALL
         ];
         let mut scan = Scan::default();
-        scan_amd64(&code, 0x1000, 0, &ctx(&[]), &mut scan);
+        scan_x86(&code, 0x1000, 0, &ctx(&[]), &AMD64, &mut scan);
         assert_eq!(pairs(&scan), vec![], "the call starts a new block");
     }
 
@@ -1430,13 +1454,33 @@ mod tests {
             0xc3,
         ];
         let mut scan = Scan::default();
-        scan_amd64(&code, 0x1000, 0, &ctx(&[0x2016]), &mut scan);
+        scan_x86(&code, 0x1000, 0, &ctx(&[0x2016]), &AMD64, &mut scan);
         assert_eq!(pairs(&scan), vec![(0x121d, 21, 0x1016, Site::Store)]);
 
         // Any other call may write the memory, so nothing pairs across it.
         let mut scan = Scan::default();
-        scan_amd64(&code, 0x1000, 0, &ctx(&[]), &mut scan);
+        scan_x86(&code, 0x1000, 0, &ctx(&[]), &AMD64, &mut scan);
         assert_eq!(pairs(&scan), vec![]);
+    }
+
+    #[test]
+    fn i386_stack_argument_words_pair() {
+        let code = [
+            0x8d, 0x05, 0x00, 0x20, 0x00, 0x08, // LEAL lit(SB), AX
+            0x89, 0x04, 0x24, // MOVL AX, 0(SP)
+            0xc7, 0x44, 0x24, 0x04, 0x05, 0x00, 0x00, 0x00, // MOVL $5, 4(SP)
+            0xe8, 0x00, 0x00, 0x00, 0x00, // CALL
+            0xc3, // RET
+        ];
+        let mut ctx = ctx(&[]);
+        ctx.register_abi = false;
+        let mut scan = Scan::default();
+        scan_x86(&code, 0x1000, 0, &ctx, &I386, &mut scan);
+        assert_eq!(
+            pairs(&scan),
+            vec![(0x0800_2000, 5, 0x1000, Site::Store)],
+            "a 4-byte store beside a 4-byte word leaves it standing"
+        );
     }
 
     fn arm64_code(words: &[u32]) -> Vec<u8> {
