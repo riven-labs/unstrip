@@ -11,8 +11,9 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 - Go 1.2 to 1.15 binaries are read (pclntab magic `0xfffffffb`): every
   function with its file and line, PC lookups, line tables, SP deltas and
-  PCDATA. On Go 1.2 to 1.15 builds for Linux, Windows and macOS (amd64, 386,
-  arm, arm64) the function table matches `debug/gosym` entry for entry.
+  PCDATA. The function table matches `debug/gosym` entry for entry on every
+  build checked: Go 1.2 to 1.4 for Windows, and Go 1.5 to 1.15 for Linux,
+  Windows and macOS (amd64, 386, arm, arm64).
   Windows builds from Go 1.8 and older keep the table inside `.text` and used
   to fail with "no pclntab section found"; they are found and read too. The
   readers built on funcdata (inline tree, ArgInfo, defer records, stack
