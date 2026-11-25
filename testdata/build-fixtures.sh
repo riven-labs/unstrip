@@ -269,6 +269,38 @@ else
     echo "go1.15.15 not installed; skipping strlits.go115.linux-amd64.stripped"
 fi
 
+# typeid/ holds types that reference each other and two packages named sync,
+# for type identity and Go-syntax rendering. The binary run with `dump`
+# prints the reflect view the tests restate. Go 1.12 (a map record without a
+# hasher) and Go 1.15 builds come from ~/sdk or the goX.Y.Z wrapper and are
+# skipped when neither is there.
+build_typeid() {
+    local go=$1
+    local goos=$2
+    local goarch=$3
+    local out=$4
+    echo "building $out ($goos/$goarch, $("$go" version | cut -d' ' -f3))"
+    (cd typeid && GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 GO111MODULE=on         "$go" build -ldflags='-s -w' -o "../$out" .)
+}
+
+build_typeid "$GO" linux   amd64 typeid.linux-amd64.stripped
+build_typeid "$GO" linux   arm64 typeid.linux-arm64.stripped
+build_typeid "$GO" linux   386   typeid.linux-386.stripped
+build_typeid "$GO" windows amd64 typeid.windows-amd64.stripped.exe
+build_typeid "$GO" darwin  arm64 typeid.darwin-arm64.stripped
+
+for version in 1.12.17 1.15.15; do
+    short=go$(echo "$version" | cut -d. -f1-2 | tr -d .)
+    out=typeid.$short.linux-amd64.stripped
+    if [ -x "$HOME/sdk/go$version/bin/go" ] || [ -x "$HOME/sdk/go$version/bin/go.exe" ]; then
+        GOROOT="$HOME/sdk/go$version" build_typeid "$HOME/sdk/go$version/bin/go" linux amd64 "$out"
+    elif command -v "go$version" >/dev/null 2>&1; then
+        build_typeid "go$version" linux amd64 "$out"
+    else
+        echo "go$version not installed; skipping $out"
+    fi
+done
+
 # Optional: a reflected program built with garble, used to test recovery on
 # obfuscated binaries: the magic is rewritten (structural pclntab discovery) and
 # the moduledata uses the toolchain's layout. garble needs a matching Go
