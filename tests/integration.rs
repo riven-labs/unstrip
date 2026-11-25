@@ -2526,3 +2526,106 @@ fn ghidra_prototypes_place_arguments_per_go_abi() {
         );
     }
 }
+
+#[test]
+fn triage_reads_the_build_and_agrees_with_detect_garble() {
+    for (name, goos, goarch) in [
+        ("depsdemo.linux-amd64.stripped", "linux", "amd64"),
+        ("hello.windows-amd64.stripped.exe", "windows", "amd64"),
+        ("typeset.go113.linux-386.stripped", "linux", "386"),
+        ("gtest.garbled.stripped", "linux", "amd64"),
+    ] {
+        let Some(path) = fixture(name) else {
+            continue;
+        };
+        let bin = GoBinary::open(&path).expect("open");
+        let pcln = Pclntab::parse(&bin).expect("pclntab");
+        let functions = pcln.functions().expect("functions");
+        let triage = unstrip::triage::triage(&bin, &pcln, &functions);
+        assert_eq!(triage.goos.as_deref(), Some(goos), "{name}");
+        assert_eq!(triage.goarch.as_deref(), Some(goarch), "{name}");
+        let assessment = unstrip::garble::assess(
+            &functions,
+            unstrip::output::go_version(&bin).as_deref(),
+            pcln.magic_is_official(),
+        );
+        assert_eq!(
+            triage.garble.verdict, assessment.verdict,
+            "{name}: --info and --detect-garble give one verdict"
+        );
+        if name.starts_with("gtest.garbled") {
+            assert!(triage.build_id.is_none(), "garble writes an empty build ID");
+            continue;
+        }
+        let id = triage.build_id.as_deref().expect("build id");
+        assert_eq!(id.split('/').count(), 4, "{name}: action/content IDs, {id}");
+    }
+    if let Some(path) = fixture("depsdemo.linux-amd64.stripped") {
+        let bin = GoBinary::open(&path).expect("open");
+        let pcln = Pclntab::parse(&bin).expect("pclntab");
+        let triage = unstrip::triage::triage(&bin, &pcln, &pcln.functions().unwrap());
+        let module = triage.main_module.expect("main module");
+        assert_eq!(module.path, "example.com/depsdemo");
+        assert_eq!(
+            triage.platform_from,
+            unstrip::triage::PlatformSource::BuildInfo
+        );
+        assert!(triage.cgo_enabled.is_some(), "Go 1.18+ records CGO_ENABLED");
+    }
+}
+
+#[test]
+fn info_on_a_file_without_go_says_why() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/hello.go");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_unstrip"))
+        .arg(&source)
+        .args(["--info", "--format", "json"])
+        .output()
+        .expect("run unstrip");
+    assert_eq!(out.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(report["reason"], "not_a_container");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not an ELF, PE or Mach-O file"), "{stderr}");
+}
+
+#[test]
+fn goresym_document_lists_every_function_with_its_end() {
+    for name in [
+        "hello.linux-amd64.stripped",
+        "typeset.go115.windows-386.stripped.exe",
+        "featureset.linux-s390x.stripped",
+    ] {
+        let Some(path) = fixture(name) else {
+            continue;
+        };
+        let bin = GoBinary::open(&path).expect("open");
+        let pcln = Pclntab::parse(&bin).expect("pclntab");
+        let functions = pcln.functions().expect("functions");
+        let doc = unstrip::goresym::document(&bin, &pcln, Default::default());
+        let value = serde_json::to_value(&doc).unwrap();
+        let listed: Vec<&serde_json::Value> = ["UserFunctions", "StdFunctions"]
+            .iter()
+            .flat_map(|k| value[k].as_array().unwrap())
+            .collect();
+        assert_eq!(listed.len(), functions.len(), "{name}: every function once");
+        for f in &listed {
+            let (start, end) = (f["Start"].as_u64().unwrap(), f["End"].as_u64().unwrap());
+            assert!(start < end, "{name}: {f}");
+        }
+        assert!(
+            listed
+                .iter()
+                .any(|f| f["FullName"] == "main.main" && f["PackageName"] == "main"),
+            "{name}: main.main is a user function"
+        );
+        assert!(!value["Files"].as_array().unwrap().is_empty(), "{name}");
+        match bin.little_endian {
+            true => assert!(!value["Types"].as_array().unwrap().is_empty(), "{name}"),
+            // The type reader is little-endian only; GoReSym leaves a part it
+            // could not read null.
+            false => assert!(value["Types"].is_null(), "{name}"),
+        }
+        assert_eq!(value["TabMeta"]["PointerSize"], bin.ptr_size as u64);
+    }
+}
