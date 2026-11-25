@@ -18,6 +18,11 @@
 //! On arm64 the equivalent is `ADRP x0, ...` + `ADD x0, x0, ...`
 //! followed by `BL runtime.newproc`.
 //!
+//! On 386 arguments go on the stack: `LEAL fv, AX; MOVL AX, 0(SP);
+//! CALL runtime.newproc`. The funcval is the spawner's last argument (Go
+//! 1.17 and earlier pass the argument size before it), so its slot is read
+//! from the spawner's argument size in the function table.
+//!
 //! When pattern matching fails (the LEA isn't where we expect it, the
 //! funcval isn't in a section we can read, etc.) we still emit the call
 //! site with `target: None` so the analyst sees how many goroutines the
@@ -25,6 +30,7 @@
 
 use serde::Serialize;
 
+use crate::disasm::{self, x86};
 use crate::error::Error;
 use crate::gobin::{Arch, GoBinary, SectionKind};
 use crate::pclntab::{Function, PcLocation, Pclntab};
@@ -107,9 +113,9 @@ pub fn find_spawns(bin: &GoBinary, pcln: &Pclntab<'_>) -> Result<Vec<GoroutineSp
             "only little-endian binaries supported today".into(),
         ));
     }
-    if !matches!(bin.arch, Arch::X86_64 | Arch::Aarch64) {
+    if !matches!(bin.arch, Arch::X86_64 | Arch::Aarch64 | Arch::X86) {
         return Err(Error::Goroutines(format!(
-            "unsupported arch {:?}; only amd64 and arm64 today",
+            "unsupported arch {:?}; only amd64, arm64 and 386 today",
             bin.arch
         )));
     }
@@ -132,6 +138,12 @@ pub fn find_spawns(bin: &GoBinary, pcln: &Pclntab<'_>) -> Result<Vec<GoroutineSp
     }
     let spawner_set: std::collections::HashMap<u64, &'static str> =
         spawners.iter().copied().collect();
+
+    if bin.arch == Arch::X86 {
+        let mut out = Vec::new();
+        scan_386(bin, &spawner_set, &by_addr, pcln, &mut out)?;
+        return Ok(out);
+    }
 
     // Pick the actual .text section, not the first executable one.
     // .init and .plt appear before .text in the header table on most
@@ -273,6 +285,133 @@ fn resolve_amd64_target(
         Resolution::NoLeaPattern
     };
     (None, None, reason)
+}
+
+/// 386 scan: every function decoded from its entry. Within a basic block,
+/// a register loaded by `LEAL fv, r` carries the funcval address to the
+/// stack slot it is stored to; at a call to a spawner, the slot of its last
+/// argument names the funcval.
+fn scan_386(
+    bin: &GoBinary,
+    spawners: &std::collections::HashMap<u64, &'static str>,
+    by_addr: &std::collections::HashMap<u64, &Function>,
+    pcln: &Pclntab<'_>,
+    out: &mut Vec<GoroutineSpawn>,
+) -> Result<()> {
+    // The funcval is the last argument: `newproc(fn)` from Go 1.18,
+    // `newproc(siz, fn)` before. Without the recorded argument size, the
+    // table layout says which.
+    let fallback_slot = if pcln.is_go118_or_later() { 0 } else { 4 };
+    let slots: std::collections::HashMap<u64, i64> = spawners
+        .keys()
+        .map(|&addr| {
+            let args = pcln
+                .func_entry_at(addr)
+                .and_then(|entry| pcln.func_fields(&entry))
+                .map(|fields| fields.args);
+            let slot = match args {
+                Some(args) if args >= 4 => i64::from(args) - 4,
+                _ => fallback_slot,
+            };
+            (addr, slot)
+        })
+        .collect();
+
+    disasm::each_function_386(bin, pcln, |_, _, insns| {
+        let entry = insns.first().map_or(0, |&(pc, _)| pc);
+        let end = insns.last().map_or(0, |&(pc, insn)| pc + insn.len as u64);
+        let labels: std::collections::HashSet<u64> = insns
+            .iter()
+            .filter_map(|&(_, insn)| match insn.kind {
+                x86::Kind::Jump {
+                    target: Some(t), ..
+                } if entry <= t && t < end => Some(t),
+                _ => None,
+            })
+            .collect();
+        // Addresses held in registers and stored to stack words, since the
+        // block began.
+        let mut regs = [None; 8];
+        let mut stack: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
+        for &(pc, insn) in insns {
+            if labels.contains(&pc) {
+                regs = [None; 8];
+                stack.clear();
+            }
+            match insn.kind {
+                x86::Kind::Lea { dst, target } => regs[dst as usize % 8] = Some(target),
+                x86::Kind::MovReg { dst, src } => regs[dst as usize % 8] = regs[src as usize % 8],
+                x86::Kind::MovImm { dst, .. } => regs[dst as usize % 8] = None,
+                x86::Kind::Store {
+                    mem:
+                        x86::Mem::Base {
+                            reg: x86::RSP,
+                            index: None,
+                            disp,
+                        },
+                    src,
+                    ..
+                } => {
+                    let val = match src {
+                        x86::Src::Reg(r) => regs[r as usize % 8],
+                        x86::Src::Imm(_) => None,
+                    };
+                    match val {
+                        Some(addr) => stack.insert(disp, addr),
+                        None => stack.remove(&disp),
+                    };
+                }
+                x86::Kind::Store { .. } => (),
+                x86::Kind::Call { target } => {
+                    if let Some(&spawner_name) = target.and_then(|t| spawners.get(&t)) {
+                        let slot = target.and_then(|t| slots.get(&t)).copied();
+                        let funcval = slot.and_then(|slot| stack.get(&slot)).copied();
+                        let (target_addr, target_name, resolution) = match funcval {
+                            None => (None, None, Resolution::NoLeaPattern),
+                            Some(funcval) => match bin.read_at_addr(funcval, 4) {
+                                Some(buf) => {
+                                    let entry_pc =
+                                        u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64;
+                                    let name = by_addr.get(&entry_pc).map(|f| f.name.clone());
+                                    (Some(entry_pc), name, Resolution::Resolved)
+                                }
+                                None => (None, None, Resolution::FuncvalUnmapped),
+                            },
+                        };
+                        let (file, line) = pcln.pc_position(pc);
+                        let location = pcln.pc_location(pc);
+                        out.push(GoroutineSpawn {
+                            call_site: pc,
+                            spawner: spawner_name.to_string(),
+                            target_addr,
+                            target_name,
+                            file,
+                            line,
+                            resolution,
+                            location,
+                        });
+                    }
+                    regs = [None; 8];
+                    stack.clear();
+                }
+                x86::Kind::Jump { .. } | x86::Kind::Ret | x86::Kind::Stop => {
+                    regs = [None; 8];
+                    stack.clear();
+                }
+                x86::Kind::Other { writes, mem_write } => {
+                    for (r, reg) in regs.iter_mut().enumerate() {
+                        if writes & (1 << r) != 0 {
+                            *reg = None;
+                        }
+                    }
+                    if mem_write.is_some() {
+                        stack.clear();
+                    }
+                }
+            }
+        }
+    })?;
+    Ok(())
 }
 
 /// arm64 scan: look for `BL` instructions (top byte 0x94 in little-endian
