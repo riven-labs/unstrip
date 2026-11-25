@@ -6,7 +6,8 @@
 //!
 //! # Supported Go envelope
 //!
-//! Every pclntab layout the reader parses: Go 1.16 through 1.26.
+//! Go 1.16 through 1.26. On Go 1.2 to 1.15, whose records differ,
+//! [`Pclntab::funcdata`] returns None and no tree is decoded.
 //! `FUNCDATA_InlTree=3` and `PCDATA_InlTreeIndex=2` are unchanged across
 //! that range; the record itself changed once, in Go 1.20 (see below). The
 //! `_func` header and funcdata addressing are read through

@@ -748,16 +748,23 @@ fn scan_for_magic(
     little_endian: bool,
     skip: &[usize],
 ) -> Result<(usize, usize)> {
-    // Include the Go 1.16/1.17 magic: a PE carries no named pclntab section, so a
-    // 1.16/1.17 Windows binary is only reachable through this scan, and pcheader_at
-    // validates the older header shape for it.
-    let candidates: [[u8; 4]; 3] = if little_endian {
-        [PCLNTAB_MAGIC_1_20, PCLNTAB_MAGIC_1_18, PCLNTAB_MAGIC_1_16]
+    // Include the Go 1.2 to 1.17 magics: a PE carries no named pclntab section, so
+    // an older Windows binary is only reachable through this scan, and pcheader_at
+    // validates each older header shape. Go 1.8 and older PE put the table inside
+    // .text, so the scan covers the whole file, not only the data sections.
+    let candidates: [[u8; 4]; 4] = if little_endian {
+        [
+            PCLNTAB_MAGIC_1_20,
+            PCLNTAB_MAGIC_1_18,
+            PCLNTAB_MAGIC_1_16,
+            PCLNTAB_MAGIC_1_2,
+        ]
     } else {
         [
             PCLNTAB_MAGIC_1_20_BE,
             PCLNTAB_MAGIC_1_18_BE,
             PCLNTAB_MAGIC_1_16_BE,
+            PCLNTAB_MAGIC_1_2_BE,
         ]
     };
 
@@ -816,78 +823,15 @@ fn locate_pclntab(
     if let Ok(found) = scan_for_pcheader(bytes, sections, text_addr, little_endian, skip) {
         return Ok(found);
     }
-    // Both scans look for the Go 1.18+ pcHeader shape. Before reporting "no
-    // pclntab" -- which an analyst reads as "not a Go binary" -- check for a
-    // pre-1.18 pclntab we recognize but do not parse. Naming the version turns a
-    // misleading container fallback into the honest "this is Go 1.16/1.17, which
-    // relift does not yet read". Consulted last, so it never downgrades a binary
-    // the real scans could parse, and a garble-rewritten (random) magic never
-    // reaches it.
-    if let Some(magic) = detect_pre118_magic(bytes, sections, little_endian) {
-        if let Some(version) = crate::pclntab::unsupported_pre118_magic(magic) {
-            return Err(Error::UnsupportedPclntabVersion { magic, version });
-        }
-    }
     Err(Error::NoPclntab)
 }
 
 /// Go 1.16/1.17 magic, located by scan_for_magic and parsed like any other layout.
 const PCLNTAB_MAGIC_1_16: [u8; 4] = [0xfa, 0xff, 0xff, 0xff];
 const PCLNTAB_MAGIC_1_16_BE: [u8; 4] = [0xff, 0xff, 0xff, 0xfa];
-/// Go 1.2 to 1.15 magic. This layout is not parsed, so detect_pre118_magic only
-/// recognizes it, to choose an honest error message.
+/// Go 1.2 to 1.15 magic, located by scan_for_magic like the newer ones.
 const PCLNTAB_MAGIC_1_2: [u8; 4] = [0xfb, 0xff, 0xff, 0xff];
 const PCLNTAB_MAGIC_1_2_BE: [u8; 4] = [0xff, 0xff, 0xff, 0xfb];
-
-/// Recognize (do not parse) a Go 1.2 to 1.15 pclntab and return its magic.
-/// Deliberately shallow: that layout has no climbing offset table for pcheader_at
-/// to validate and this reader does not implement it, so recognizing the magic is
-/// enough to choose an honest error message. Validate only the version-independent
-/// prefix every pclntab since Go 1.2 shares (the 4-byte magic, two zero pad bytes,
-/// a quantum in {1,2,4}, and a pointer size in {4,8}) in a data-bearing section.
-/// Go 1.16/1.17 is not handled here; scan_for_magic locates it and the parser reads
-/// it. False positives are bounded and far less harmful than the alternative: a
-/// real Go binary mislabeled "not Go".
-fn detect_pre118_magic(bytes: &[u8], sections: &[Section], little_endian: bool) -> Option<u32> {
-    let candidates: [([u8; 4], u32); 1] = if little_endian {
-        [(PCLNTAB_MAGIC_1_2, 0xfffffffb)]
-    } else {
-        [(PCLNTAB_MAGIC_1_2_BE, 0xfffffffb)]
-    };
-    for s in sections {
-        match s.kind {
-            SectionKind::ReadOnlyData
-            | SectionKind::Data
-            | SectionKind::NoPtrData
-            | SectionKind::Pclntab
-            | SectionKind::Other => {}
-            SectionKind::Text | SectionKind::Bss => continue,
-        }
-        let start = s.file_offset.min(bytes.len());
-        let end = s.file_offset.saturating_add(s.file_size).min(bytes.len());
-        for (magic_bytes, magic) in &candidates {
-            let mut from = start;
-            while from < end {
-                let Some(found) = find_subslice(&bytes[from..end], magic_bytes) else {
-                    break;
-                };
-                let off = from + found;
-                // Version-independent pcHeader prefix shared by every pclntab since
-                // Go 1.2: magic(4), two zero pad bytes, quantum, pointer size.
-                if off + 8 <= bytes.len()
-                    && bytes[off + 4] == 0
-                    && bytes[off + 5] == 0
-                    && matches!(bytes[off + 6], 1 | 2 | 4)
-                    && matches!(bytes[off + 7], 4 | 8)
-                {
-                    return Some(*magic);
-                }
-                from = off + 4;
-            }
-        }
-    }
-    None
-}
 
 fn read_uint_at(bytes: &[u8], off: usize, ptr_size: usize, little_endian: bool) -> Option<u64> {
     let slice = bytes.get(off..off.checked_add(ptr_size)?)?;
@@ -963,6 +907,10 @@ fn pcheader_at(
     }
     let ps = ptr_size as usize;
 
+    if read_uint_at(bytes, off, 4, little_endian)? == crate::pclntab::MAGIC_1_2 as u64 {
+        return go12_table_at(bytes, off, ps, sections, little_endian);
+    }
+
     // Go 1.16/1.17 (magic 0xfffffffa) has no textStart, so the header is one
     // pointer shorter and the offset table sits one pointer earlier. The entries
     // are absolute PCs, so there is no textStart to anchor in a text section; the
@@ -1025,6 +973,60 @@ fn pcheader_at(
         return None;
     }
     Some(bytes.len() - off)
+}
+
+/// Validate a Go 1.2 to 1.15 table at `off` and return its size the way
+/// [`pcheader_at`] does. That layout has no offset header to check, so the
+/// functab itself is the guard: `nfunc` entries of (entry PC, funcoff) whose
+/// PCs climb strictly and start in a text section, each funcoff pointing past
+/// the functab into the table, and a file table offset past the functab too.
+/// Four bytes of magic followed by that shape do not occur by chance.
+fn go12_table_at(
+    bytes: &[u8],
+    off: usize,
+    ps: usize,
+    sections: &[Section],
+    little_endian: bool,
+) -> Option<usize> {
+    const MAX_FUNCS: u64 = 5_000_000;
+    let available = bytes.len() - off;
+    let nfunc = read_uint_at(bytes, off + 8, ps, little_endian)?;
+    if nfunc == 0 || nfunc > MAX_FUNCS {
+        return None;
+    }
+    let n = nfunc as usize;
+    let functab = 8 + ps;
+    let tab_end = functab.checked_add((2 * n + 1).checked_mul(ps)?)?;
+    if tab_end.checked_add(4)? > available {
+        return None;
+    }
+    let filetab = read_uint_at(bytes, off + tab_end, 4, little_endian)?;
+    if filetab < tab_end as u64 || filetab >= available as u64 {
+        return None;
+    }
+    let first = read_uint_at(bytes, off + functab, ps, little_endian)?;
+    let in_text = sections.iter().any(|t| {
+        t.kind == SectionKind::Text
+            && first >= t.addr
+            && first < t.addr.saturating_add(t.vmsize.max(t.file_size as u64))
+    });
+    if !in_text {
+        return None;
+    }
+    let mut prev: Option<u64> = None;
+    for i in 0..n {
+        let at = off + functab + 2 * i * ps;
+        let pc = read_uint_at(bytes, at, ps, little_endian)?;
+        let func_off = read_uint_at(bytes, at + ps, ps, little_endian)?;
+        if prev.is_some_and(|p| pc <= p) {
+            return None;
+        }
+        if func_off < tab_end as u64 || func_off >= available as u64 {
+            return None;
+        }
+        prev = Some(pc);
+    }
+    Some(available)
 }
 
 fn finish(bytes: Vec<u8>, d: Described) -> Result<GoBinary> {
@@ -1159,59 +1161,67 @@ mod tests {
         assert!(matches!(GoBinary::parse(b), Err(Error::Goblin(_))));
     }
 
-    #[test]
-    fn detector_recognizes_only_the_unparsed_1_2_to_1_15_layout() {
-        // A Go 1.2 to 1.15 pclntab prefix (magic 0xfffffffb, two zero pad bytes,
-        // quantum, ptr size) in a data section is recognized so the loader can
-        // report the honest "Go 1.2 to 1.15 unsupported" instead of "no pclntab".
-        let mut bytes = vec![0u8; 256];
-        let off = 32;
-        bytes[off..off + 4].copy_from_slice(&[0xfb, 0xff, 0xff, 0xff]);
-        bytes[off + 6] = 1; // quantum (pad bytes at +4,+5 already zero)
-        bytes[off + 7] = 8; // ptr size
-        let sections = data_sec(bytes.len());
-        assert_eq!(
-            detect_pre118_magic(&bytes, &sections, true),
-            Some(0xfffffffb)
-        );
-        // Go 1.16/1.17 (0xfffffffa) is parsed now, so the detector leaves it for
-        // scan_for_magic and the parser rather than naming it unsupported.
-        bytes[off] = 0xfa;
-        assert_eq!(detect_pre118_magic(&bytes, &sections, true), None);
+    /// A Go 1.2 to 1.15 table at `off`: magic, quantum 1, pointer size 8, two
+    /// functions at 0x1000 and 0x1010 ending at 0x1020, then the file table.
+    fn go12_table(bytes: &mut [u8], off: usize) {
+        bytes[off..off + 4].copy_from_slice(&PCLNTAB_MAGIC_1_2);
+        bytes[off + 6] = 1;
+        bytes[off + 7] = 8;
+        let words: [u64; 6] = [2, 0x1000, 80, 0x1010, 120, 0x1020];
+        for (i, w) in words.iter().enumerate() {
+            let at = off + 8 + i * 8;
+            bytes[at..at + 8].copy_from_slice(&w.to_le_bytes());
+        }
+        bytes[off + 56..off + 60].copy_from_slice(&64u32.to_le_bytes());
     }
 
-    #[test]
-    fn pre118_detector_avoids_false_positives() {
-        let mut bytes = vec![0u8; 256];
-        let off = 32;
-        bytes[off..off + 4].copy_from_slice(&[0xfb, 0xff, 0xff, 0xff]);
-        bytes[off + 7] = 8;
-        // A nonzero pad byte means it is not a pcHeader prefix: reject.
-        bytes[off + 4] = 0x41;
-        assert_eq!(
-            detect_pre118_magic(&bytes, &data_sec(bytes.len()), true),
-            None
-        );
-        // A valid prefix sitting in a .text section is skipped (a pclntab never
-        // lives in code), so a stray match in executable bytes is not a header.
-        bytes[off + 4] = 0;
-        bytes[off + 6] = 1;
-        let text = vec![Section {
+    fn text_at_0x1000() -> Section {
+        Section {
             name: ".text".to_string(),
             kind: SectionKind::Text,
             file_offset: 0,
-            file_size: bytes.len(),
+            file_size: 0,
             addr: 0x1000,
-            vmsize: bytes.len() as u64,
-        }];
-        assert_eq!(detect_pre118_magic(&bytes, &text, true), None);
-        // The 1.18+ magic is not the 1.2 to 1.15 magic: the detector ignores it (the
-        // real scans handle it), so it never shadows a parseable binary.
-        bytes[off..off + 4].copy_from_slice(&[0xf1, 0xff, 0xff, 0xff]);
+            vmsize: 0x100,
+        }
+    }
+
+    #[test]
+    fn scan_finds_a_go_1_2_table_by_its_functab() {
+        let mut bytes = vec![0u8; 512];
+        go12_table(&mut bytes, 32);
+        let sections = [data_sec(bytes.len()).remove(0), text_at_0x1000()];
         assert_eq!(
-            detect_pre118_magic(&bytes, &data_sec(bytes.len()), true),
-            None
+            scan_for_magic(&bytes, &sections, true, &[]).ok(),
+            Some((32, bytes.len() - 32)),
+            "a well-formed Go 1.2 table is found by its magic"
         );
+    }
+
+    #[test]
+    fn scan_rejects_a_go_1_2_magic_without_the_table_shape() {
+        let sections = [data_sec(512).remove(0), text_at_0x1000()];
+        // The bare 8-byte prefix with nothing behind it.
+        let mut bytes = vec![0u8; 512];
+        bytes[32..36].copy_from_slice(&PCLNTAB_MAGIC_1_2);
+        bytes[38] = 1;
+        bytes[39] = 8;
+        assert!(scan_for_magic(&bytes, &sections, true, &[]).is_err());
+        // Entry PCs that do not climb.
+        let mut bytes = vec![0u8; 512];
+        go12_table(&mut bytes, 32);
+        bytes[32 + 32..32 + 40].copy_from_slice(&0x1000u64.to_le_bytes());
+        assert!(scan_for_magic(&bytes, &sections, true, &[]).is_err());
+        // A first entry outside every text section.
+        let mut bytes = vec![0u8; 512];
+        go12_table(&mut bytes, 32);
+        bytes[32 + 16..32 + 24].copy_from_slice(&0x9000u64.to_le_bytes());
+        assert!(scan_for_magic(&bytes, &sections, true, &[]).is_err());
+        // A funcoff that points back into the functab.
+        let mut bytes = vec![0u8; 512];
+        go12_table(&mut bytes, 32);
+        bytes[32 + 24..32 + 32].copy_from_slice(&16u64.to_le_bytes());
+        assert!(scan_for_magic(&bytes, &sections, true, &[]).is_err());
     }
 
     #[test]

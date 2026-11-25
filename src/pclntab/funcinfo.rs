@@ -253,17 +253,41 @@ impl<'a> Pclntab<'a> {
     /// Size of the fixed `_func` header, i.e. the offset of `pcdata[0]`.
     fn func_header_size(&self) -> usize {
         // entry, then nameOff..cuOffset (8 x 4 bytes), then [startLine], then
-        // funcID, flag/pad, pad, nfuncdata.
+        // funcID, flag/pad, pad, nfuncdata. Go 1.2 to 1.15 end after npcdata
+        // with one more 4-byte word: nfuncdata, or from Go 1.12 funcID, two
+        // pad bytes and nfuncdata.
         let base = self.fields_base() + 32;
-        if self.is_go120() {
-            base + 8
-        } else {
-            base + 4
+        match self.layout {
+            Layout::Go12 => base,
+            Layout::Pre118 | Layout::Modern if self.is_go120() => base + 8,
+            Layout::Pre118 | Layout::Modern => base + 4,
         }
     }
 
+    /// Go 1.2 to 1.15: whether `_func` ends with Go 1.12's `funcID u8, _
+    /// [2]int8, nfuncdata u8` instead of `nfuncdata int32`. The magic is the
+    /// same, so the records decide. A count below 256 stored as an int32
+    /// leaves its most significant byte zero in every record: the last byte of
+    /// the word little-endian, the first big-endian. Go 1.12 stores
+    /// `nfuncdata` in the last byte, non-zero for most functions, and the
+    /// funcID in the first, non-zero for the runtime's special functions.
+    fn has_go112_func_tail(&self) -> bool {
+        *self.go112_func_tail.get_or_init(|| {
+            let (probe, fb) = (if self.little_endian { 31 } else { 28 }, self.fields_base());
+            let stride = self.functab_stride();
+            let avail = self.data.len().saturating_sub(self.functab_off) / stride;
+            let n = (self.nfunc as usize).min(avail);
+            (0..n).any(|i| {
+                self.functab_entry(i)
+                    .and_then(|(_, start)| start.checked_add(fb + probe))
+                    .and_then(|at| self.data.get(at))
+                    .is_some_and(|&b| b != 0)
+            })
+        })
+    }
+
     fn func_start(&self, func: &FuncEntry) -> Option<usize> {
-        self.funcdata_off.checked_add(func.func_off)
+        self.funcoff_base.checked_add(func.func_off)
     }
 
     /// The function containing `pc`, with its `_func` offset and size, for the
@@ -294,7 +318,7 @@ impl<'a> Pclntab<'a> {
         Some(FuncEntry {
             address,
             name: self.read_name(name_off as usize).unwrap_or_default(),
-            func_off: func_start - self.funcdata_off,
+            func_off: func_start - self.funcoff_base,
             size: next.saturating_sub(address),
         })
     }
@@ -309,6 +333,32 @@ impl<'a> Pclntab<'a> {
         let fb = start + self.fields_base();
         let le = self.little_endian;
         let u32_at = |off: usize| read_u32(self.data, fb + off, le).ok();
+        if self.layout == Layout::Go12 {
+            // Go 1.2 to 1.11 keep the frame size (to 1.9) or a 4-byte funcID
+            // (1.10, 1.11) where deferreturn sits from 1.12, and end with
+            // `nfuncdata int32`. Neither of the older two can be told apart, so
+            // the funcID and deferreturn of those releases read as 0.
+            let (deferreturn, func_id, nfuncdata) = if self.has_go112_func_tail() {
+                (u32_at(8)?, self.data[fb + 28], self.data[fb + 31])
+            } else {
+                (0, 0, u8::try_from(u32_at(28)?).ok()?)
+            };
+            return Some(FuncFields {
+                entry: func.address,
+                name_off: u32_at(0)? as i32,
+                args: u32_at(4)? as i32,
+                deferreturn,
+                pcsp: u32_at(12)?,
+                pcfile: u32_at(16)?,
+                pcln: u32_at(20)?,
+                npcdata: u32_at(24)?,
+                cu_offset: 0,
+                start_line: None,
+                func_id,
+                flag: 0,
+                nfuncdata,
+            });
+        }
         let (start_line, tail) = if self.is_go120() {
             (Some(u32_at(32)? as i32), fb + 36)
         } else {
@@ -361,7 +411,13 @@ impl<'a> Pclntab<'a> {
     /// The address of funcdata slot `idx` for `func`, or None when the slot is
     /// absent or nil. On Go 1.18+ slots are offsets from gofunc, so this needs
     /// [`Pclntab::with_gofunc`]; on Go 1.16/1.17 they are absolute pointers.
+    /// Always None on Go 1.2 to 1.15: the records the slots point at (inline
+    /// tree, stack objects, defer info) had other layouts there, and the
+    /// readers built on this decode only the 1.16+ ones.
     pub fn funcdata(&self, func: &FuncEntry, idx: u8) -> Option<u64> {
+        if self.layout == Layout::Go12 {
+            return None;
+        }
         let fields = self.func_fields(func)?;
         if idx >= fields.nfuncdata {
             return None;
@@ -379,7 +435,7 @@ impl<'a> Pclntab<'a> {
                 }
                 Some(self.gofunc?.wrapping_add(off as u64))
             }
-            Layout::Pre118 => {
+            Layout::Go12 | Layout::Pre118 => {
                 // runtime 1.16/1.17 funcdata(): the uintptr array is 8-aligned
                 // on 64-bit; the _func itself is pointer-aligned, so align the
                 // offset relative to its start.
@@ -661,7 +717,7 @@ impl<'a> Pclntab<'a> {
         let gcdata_at = 12usize.next_multiple_of(ps);
         let rs = match self.layout {
             Layout::Modern => 16,
-            Layout::Pre118 => gcdata_at + ps,
+            Layout::Go12 | Layout::Pre118 => gcdata_at + ps,
         };
         let body = self.read_upto(addr + ps as u64, n * rs)?;
         if body.len() < n * rs {
@@ -675,7 +731,7 @@ impl<'a> Pclntab<'a> {
             let ptr_bytes = read_u32(body, r + 8, le).ok()? as i32;
             let gcdata = match self.layout {
                 Layout::Modern => u64::from(read_u32(body, r + 12, le).ok()?),
-                Layout::Pre118 => read_uintptr(body, r + gcdata_at, ps, le).ok()?,
+                Layout::Go12 | Layout::Pre118 => read_uintptr(body, r + gcdata_at, ps, le).ok()?,
             };
             // Go 1.16's {off int64, typ *_type} reads as a size of -1 here.
             if size <= 0 || ptr_bytes < 0 || ptr_bytes > size {
@@ -699,7 +755,7 @@ impl<'a> Pclntab<'a> {
     pub fn stack_object_mask(&self, o: &StackObject, rodata: Option<u64>) -> Option<Vec<u8>> {
         let addr = match self.layout {
             Layout::Modern => rodata?.checked_add(o.gcdata)?,
-            Layout::Pre118 => o.gcdata,
+            Layout::Go12 | Layout::Pre118 => o.gcdata,
         };
         let words = usize::try_from(o.ptr_bytes)
             .ok()?
@@ -757,6 +813,7 @@ impl<'a> Pclntab<'a> {
         let addr = self.funcdata(func, FUNCDATA_OPEN_CODED_DEFER_INFO)?;
         let bytes = self.read_upto(addr, OPEN_DEFER_READ_LEN)?;
         let format = match self.layout {
+            Layout::Go12 => None,
             Layout::Pre118 => Some(OpenDeferFormat::Go114),
             Layout::Modern if !self.is_go120() => Some(OpenDeferFormat::Go118),
             // Go 1.20/1.21 and 1.22+ share the magic. FuncID_corostart (1.22)
@@ -785,6 +842,7 @@ impl<'a> Pclntab<'a> {
     /// 1.25. From 1.17 on it directly follows FuncID_systemstack_switch.
     fn wrapper_func_id(&self) -> Option<u8> {
         match self.layout {
+            Layout::Go12 => None,
             Layout::Pre118 => Some(22),
             Layout::Modern if !self.is_go120() => Some(21),
             Layout::Modern => self.systemstack_switch_id()?.checked_add(1),
@@ -797,7 +855,7 @@ impl<'a> Pclntab<'a> {
         *self.systemstack_switch_id.get_or_init(|| {
             const NAME: &[u8] = b"runtime.systemstack_switch\0";
             let stride = self.functab_stride();
-            let avail = self.data.len().saturating_sub(self.funcdata_off) / stride;
+            let avail = self.data.len().saturating_sub(self.functab_off) / stride;
             let n = (self.nfunc as usize).min(avail);
             let tail = if self.is_go120() { 36 } else { 32 };
             for i in 0..n {

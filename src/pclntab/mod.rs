@@ -21,25 +21,27 @@ pub const MAGIC_1_18: u32 = 0xfffffff0;
 /// entries are pointer-sized (an absolute entry PC and a funcoff), and the `_func`
 /// struct leads with a uintptr entry.
 pub const MAGIC_1_16: u32 = 0xfffffffa;
-/// Go 1.2 to 1.15 pclntab magic. A different table shape again (a two-level
-/// functab and no offset header) that this reader does not yet implement.
+/// Go 1.2 to 1.15 pclntab magic. There is no offset header: the functab
+/// follows `nfunc` directly, a u32 after it locates the file table, and every
+/// other offset (function names, pc-value tables, `_func` records, file names)
+/// is relative to the start of the table.
 pub const MAGIC_1_2: u32 = 0xfffffffb;
 
 /// The Go release family for a pclntab magic this reader does not implement.
-/// Returns None for every layout we can read (1.16 through 1.20+ and a
-/// garble-rewritten magic, which keeps the 1.18+ shape). Naming the version lets a
-/// caller report "this is Go 1.2 to 1.15" instead of "not a Go binary".
+/// Every layout since Go 1.2 is read, so this returns None for every magic. It
+/// is kept so callers written against the earlier API still build.
 pub fn unsupported_pre118_magic(magic: u32) -> Option<&'static str> {
-    match magic {
-        MAGIC_1_2 => Some("Go 1.2 to 1.15"),
-        _ => None,
-    }
+    let _ = magic;
+    None
 }
 
 /// Which pclntab table layout a binary uses. The header field positions, the
-/// functab entry width, and the `_func` struct prefix all changed in Go 1.18.
+/// functab entry width, and the `_func` struct prefix changed in Go 1.16 and
+/// again in Go 1.18.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
+    /// Go 1.2 to 1.15 (magic [`MAGIC_1_2`]).
+    Go12,
     /// Go 1.16 and 1.17 (magic [`MAGIC_1_16`]).
     Pre118,
     /// Go 1.18 and later, and garble-rewritten magics that keep the 1.18+ shape.
@@ -79,7 +81,12 @@ pub struct Pclntab<'a> {
     cu_off: usize,
     filetab_off: usize,
     pctab_off: usize,
-    funcdata_off: usize,
+    /// Base the functab's `_func` offsets are relative to: the functab itself
+    /// from Go 1.16, the start of the table in Go 1.2 to 1.15.
+    funcoff_base: usize,
+    /// Offset of the functab's first entry. Equal to `funcoff_base` from Go
+    /// 1.16, right after `nfunc` in Go 1.2 to 1.15.
+    functab_off: usize,
 
     /// Optional: gofunc base from moduledata. Required for inline-tree walking
     /// (the funcdata entries are offsets relative to gofunc). When None,
@@ -92,6 +99,12 @@ pub struct Pclntab<'a> {
     /// so this one value pins both the wrapper ID and the toolchain epoch
     /// (1.20/1.21 vs 1.22+) that the open-coded defer format depends on.
     systemstack_switch_id: std::sync::OnceLock<Option<u8>>,
+
+    /// Go 1.2 to 1.15 only: whether `_func` ends with the Go 1.12 tail
+    /// (`funcID u8, _ [2]int8, nfuncdata u8`) rather than the older
+    /// `nfuncdata int32`. The releases share the magic, so it is read from the
+    /// records once, on demand.
+    go112_func_tail: std::sync::OnceLock<bool>,
 }
 
 /// A richer per-function record with the raw `_func` struct offset and the
@@ -134,23 +147,15 @@ impl<'a> Pclntab<'a> {
         }
 
         let magic = read_u32(data, 0, little_endian)?;
-        // Go 1.2 to 1.15 used a different table shape (a two-level functab, no
-        // offset header) that this reader does not implement; name the version
-        // honestly rather than walk it with the wrong reader.
-        if magic == MAGIC_1_2 {
-            return Err(Error::UnsupportedPclntabVersion {
-                magic,
-                version: "Go 1.2 to 1.15",
-            });
-        }
-        // Go 1.16/1.17 and Go 1.18+ differ in the header field positions, the
-        // functab entry width, and the _func prefix. Pick the reader by magic. A
-        // garble-rewritten magic keeps the 1.18+ shape, so it reads as Modern; the
-        // structural checks below still reject a genuinely broken header.
-        let layout = if magic == MAGIC_1_16 {
-            Layout::Pre118
-        } else {
-            Layout::Modern
+        // Go 1.2 to 1.15, Go 1.16/1.17 and Go 1.18+ differ in the header field
+        // positions, the functab entry width, and the _func prefix. Pick the
+        // reader by magic. A garble-rewritten magic keeps the 1.18+ shape, so it
+        // reads as Modern; the structural checks below still reject a genuinely
+        // broken header.
+        let layout = match magic {
+            MAGIC_1_2 => Layout::Go12,
+            MAGIC_1_16 => Layout::Pre118,
+            _ => Layout::Modern,
         };
 
         if data[4] != 0 || data[5] != 0 {
@@ -203,6 +208,30 @@ impl<'a> Pclntab<'a> {
                 read_uptr(8 + 5 * ps)? as usize,
                 read_uptr(8 + 6 * ps)? as usize,
             ),
+            // No offset header. The functab follows nfunc: nfunc (entry, funcoff)
+            // pointer pairs and the end PC of the last function, then a u32 that
+            // locates the file table. Names, pc-value tables and _func records are
+            // addressed from the start of the table, so those bases are zero.
+            // There is no cutab: a pcfile value indexes the file table directly.
+            Layout::Go12 => {
+                let tab_end = usize::try_from(nfunc)
+                    .ok()
+                    .and_then(|n| n.checked_mul(2)?.checked_add(1)?.checked_mul(ps))
+                    .and_then(|size| size.checked_add(8 + ps))
+                    .filter(|&end| end.saturating_add(4) <= data.len());
+                let Some(tab_end) = tab_end else {
+                    return Err(Error::BadPclntab {
+                        offset: bin.pclntab_offset,
+                        reason: format!("functab of {nfunc} entries extends past pclntab end"),
+                    });
+                };
+                let filetab_off = read_u32(data, tab_end, little_endian)? as usize;
+                (0, 0, 0, filetab_off, 0, 0)
+            }
+        };
+        let functab_off = match layout {
+            Layout::Go12 => 8 + ps,
+            Layout::Pre118 | Layout::Modern => funcdata_off,
         };
 
         for (name, off) in [
@@ -228,7 +257,7 @@ impl<'a> Pclntab<'a> {
         // back to the .text section address from the container. That anchor is
         // only right for the container's own table: GoBinary::parse refuses a
         // scanned table that belongs to an embedded image. Only meaningful for
-        // Modern; Pre118 functab entries are absolute, so text_start stays 0 there.
+        // Modern; older functab entries are absolute, so text_start stays 0 there.
         let text_start = if layout == Layout::Modern && text_start == 0 {
             bin.text_addr
         } else {
@@ -249,9 +278,11 @@ impl<'a> Pclntab<'a> {
             cu_off,
             filetab_off,
             pctab_off,
-            funcdata_off,
+            funcoff_base: funcdata_off,
+            functab_off,
             gofunc: None,
             systemstack_switch_id: std::sync::OnceLock::new(),
+            go112_func_tail: std::sync::OnceLock::new(),
         })
     }
 
@@ -268,68 +299,69 @@ impl<'a> Pclntab<'a> {
     }
 
     pub fn magic_is_official(&self) -> bool {
-        self.magic == MAGIC_1_20 || self.magic == MAGIC_1_18 || self.magic == MAGIC_1_16
+        matches!(self.magic, MAGIC_1_20 | MAGIC_1_18 | MAGIC_1_16 | MAGIC_1_2)
     }
 
     pub fn nfunc(&self) -> u64 {
         self.nfunc
     }
 
-    /// Bytes per functab entry: a u32 pair in 1.18+, a pointer pair in 1.16/1.17.
+    /// Bytes per functab entry: a u32 pair in 1.18+, a pointer pair before.
     fn functab_stride(&self) -> usize {
         match self.layout {
             Layout::Modern => 8,
-            Layout::Pre118 => 2 * self.ptrsize as usize,
+            Layout::Go12 | Layout::Pre118 => 2 * self.ptrsize as usize,
         }
     }
 
     /// Entry PC (absolute VA) of functab index `i`. In 1.18+ the entry is a u32
-    /// offset from textStart; in 1.16/1.17 it is an absolute uintptr.
+    /// offset from textStart; before 1.18 it is an absolute uintptr.
     pub(crate) fn functab_addr(&self, i: usize) -> Option<u64> {
         // Checked throughout: a hostile header can set nfunc or the offsets so that
-        // funcdata_off + i*stride overflows usize. Overflow resolves to None (no
+        // functab_off + i*stride overflows usize. Overflow resolves to None (no
         // such entry), never a panic or a wrapped offset.
         let off = self
-            .funcdata_off
+            .functab_off
             .checked_add(i.checked_mul(self.functab_stride())?)?;
         match self.layout {
             Layout::Modern => self
                 .text_start
                 .checked_add(read_u32(self.data, off, self.little_endian).ok()? as u64),
-            Layout::Pre118 => {
+            Layout::Go12 | Layout::Pre118 => {
                 read_uintptr(self.data, off, self.ptrsize as usize, self.little_endian).ok()
             }
         }
     }
 
     /// The (entry PC, `_func` struct offset within `data`) for functab index `i`.
-    /// The funcoff is relative to the functab base in both layouts.
+    /// The funcoff is relative to `funcoff_base`: the functab base from Go 1.16,
+    /// the start of the table in Go 1.2 to 1.15.
     fn functab_entry(&self, i: usize) -> Option<(u64, usize)> {
         let ps = self.ptrsize as usize;
         let off = self
-            .funcdata_off
+            .functab_off
             .checked_add(i.checked_mul(self.functab_stride())?)?;
         let func_off = match self.layout {
             Layout::Modern => {
                 read_u32(self.data, off.checked_add(4)?, self.little_endian).ok()? as usize
             }
-            Layout::Pre118 => {
+            Layout::Go12 | Layout::Pre118 => {
                 read_uintptr(self.data, off.checked_add(ps)?, ps, self.little_endian).ok()? as usize
             }
         };
         Some((
             self.functab_addr(i)?,
-            self.funcdata_off.checked_add(func_off)?,
+            self.funcoff_base.checked_add(func_off)?,
         ))
     }
 
     /// Offset from a `_func` struct start to its `nameOff` field, i.e. the width of
-    /// the leading entry field: a u32 entryOff in 1.18+, a uintptr entry in
-    /// 1.16/1.17. Every later `_func` field is at a fixed offset past this.
+    /// the leading entry field: a u32 entryOff in 1.18+, a uintptr entry before.
+    /// Every later `_func` field is at a fixed offset past this.
     fn fields_base(&self) -> usize {
         match self.layout {
             Layout::Modern => 4,
-            Layout::Pre118 => self.ptrsize as usize,
+            Layout::Go12 | Layout::Pre118 => self.ptrsize as usize,
         }
     }
 
@@ -347,11 +379,12 @@ impl<'a> Pclntab<'a> {
     }
 
     /// Offset of the functab inside `data()`. Each entry is `(entry, func_off)`:
-    /// two u32s on Go 1.18+ (entry as an offset from textStart), two uintptrs on
-    /// Go 1.16/1.17 (absolute entry). The final sentinel entry marks the end of
-    /// the last function.
+    /// two u32s on Go 1.18+ (entry as an offset from textStart), two uintptrs
+    /// before (absolute entry). The final sentinel entry marks the end of the
+    /// last function. `func_off` is relative to this offset from Go 1.16 and to
+    /// the start of `data()` in Go 1.2 to 1.15.
     pub fn funcdata_off(&self) -> usize {
-        self.funcdata_off
+        self.functab_off
     }
 
     /// Offset of the funcname string table inside `data()`. Add a per-function
@@ -466,6 +499,18 @@ impl<'a> Pclntab<'a> {
     }
 
     fn resolve_file(&self, cu_offset: usize, file_idx: usize) -> Option<String> {
+        if self.layout == Layout::Go12 {
+            // No cutab: the pcfile value indexes the file table, whose first word
+            // is its own length, so the linker numbers files from 1. Each entry is
+            // the offset of a NUL-terminated name from the start of the table.
+            let n = read_u32(self.data, self.filetab_off, self.little_endian).ok()? as usize;
+            if file_idx == 0 || file_idx >= n {
+                return None;
+            }
+            let entry = file_idx.checked_mul(4)?.checked_add(self.filetab_off)?;
+            let name_off = read_u32(self.data, entry, self.little_endian).ok()?;
+            return read_cstring(self.data, name_off as usize).ok();
+        }
         // cu_offset and file_idx come from attacker-controlled pc-value tables,
         // so the cutab index arithmetic is checked: a crafted value resolves to
         // no file rather than overflowing (a panic with overflow checks on, or a
@@ -509,7 +554,7 @@ impl<'a> Pclntab<'a> {
         // Derive the structural maximum from the bytes actually available,
         // before honoring the header's claimed nfunc. A hostile pclntab can
         // claim nfunc=2^60; we must not allocate based on that.
-        let available_bytes = self.data.len().saturating_sub(self.funcdata_off);
+        let available_bytes = self.data.len().saturating_sub(self.functab_off);
         let max_possible = (available_bytes / stride).saturating_sub(1) as u64;
 
         let n = self.nfunc.min(MAX_FUNCS).min(max_possible) as usize;
@@ -528,7 +573,7 @@ impl<'a> Pclntab<'a> {
         // Required byte range for (n+1) entries: the trailing sentinel marks
         // the end of the last function, so we always read one extra.
         let table_bytes = n.saturating_add(1).saturating_mul(stride);
-        if self.funcdata_off + table_bytes > self.data.len() {
+        if self.functab_off + table_bytes > self.data.len() {
             return Err(Error::BadPclntab {
                 offset: 0,
                 reason: format!("functab ({n} entries x {stride}) extends past pclntab end"),
@@ -556,7 +601,7 @@ impl<'a> Pclntab<'a> {
     pub fn functions_with_offsets(&self) -> Result<Vec<FuncEntry>> {
         let stride = self.functab_stride();
         const MAX_FUNCS: u64 = 5_000_000;
-        let available_bytes = self.data.len().saturating_sub(self.funcdata_off);
+        let available_bytes = self.data.len().saturating_sub(self.functab_off);
         let max_possible = (available_bytes / stride).saturating_sub(1) as u64;
         let n = self.nfunc.min(MAX_FUNCS).min(max_possible) as usize;
         if (self.nfunc > MAX_FUNCS || self.nfunc > max_possible) && self.nfunc != 0 {
@@ -569,7 +614,7 @@ impl<'a> Pclntab<'a> {
             });
         }
         let table_bytes = n.saturating_add(1).saturating_mul(stride);
-        if self.funcdata_off + table_bytes > self.data.len() {
+        if self.functab_off + table_bytes > self.data.len() {
             return Err(Error::BadPclntab {
                 offset: 0,
                 reason: format!("functab ({n} entries) extends past pclntab end"),
@@ -596,7 +641,7 @@ impl<'a> Pclntab<'a> {
             out.push(FuncEntry {
                 address,
                 name,
-                func_off: func_start - self.funcdata_off,
+                func_off: func_start - self.funcoff_base,
                 size,
             });
         }
@@ -654,12 +699,17 @@ impl<'a> Pclntab<'a> {
     /// file index through cutab -> filetab.
     fn read_file_and_line(&self, func_start: usize) -> Option<(Option<String>, Option<u32>)> {
         // The _func fields sit past the leading entry field (a u32 in 1.18+, a
-        // uintptr in 1.16/1.17), so offset them from fields_base: pcfile at +16,
-        // pcln at +20, cuOffset at +28.
+        // uintptr before), so offset them from fields_base: pcfile at +16, pcln
+        // at +20, cuOffset at +28. Go 1.2 to 1.15 have no cuOffset.
         let fb = self.fields_base();
-        // cuOffset (the furthest field, at fb+28) is 4 bytes, so the struct needs
-        // fb+32 bytes. Checked: a hostile funcoff can push func_start near usize::MAX.
-        let end = func_start.checked_add(fb).and_then(|x| x.checked_add(32));
+        let fields_len = match self.layout {
+            Layout::Go12 => 24,
+            Layout::Pre118 | Layout::Modern => 32,
+        };
+        // Checked: a hostile funcoff can push func_start near usize::MAX.
+        let end = func_start
+            .checked_add(fb)
+            .and_then(|x| x.checked_add(fields_len));
         if end.is_none_or(|e| e > self.data.len()) {
             return None;
         }
@@ -667,8 +717,12 @@ impl<'a> Pclntab<'a> {
         let pcfile_off =
             read_u32(self.data, func_start + fb + 16, self.little_endian).ok()? as usize;
         let pcln_off = read_u32(self.data, func_start + fb + 20, self.little_endian).ok()? as usize;
-        let cu_offset =
-            read_u32(self.data, func_start + fb + 28, self.little_endian).ok()? as usize;
+        let cu_offset = match self.layout {
+            Layout::Go12 => 0,
+            Layout::Pre118 | Layout::Modern => {
+                read_u32(self.data, func_start + fb + 28, self.little_endian).ok()? as usize
+            }
+        };
 
         let file_idx = first_pcvalue(&self.data[self.pctab_off..], pcfile_off)?;
         let line = first_pcvalue(&self.data[self.pctab_off..], pcln_off)?;
@@ -784,17 +838,103 @@ fn read_cstring(buf: &[u8], off: usize) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// A GoBinary over `bytes` as one section mapped at 0x1000, read as the
+    /// pclntab, for tests that build a table by hand.
+    fn table_bin(bytes: Vec<u8>) -> GoBinary {
+        use crate::gobin::{Arch, Container, Section, SectionKind};
+        let n = bytes.len();
+        GoBinary {
+            bytes,
+            container: Container::Elf,
+            arch: Arch::X86_64,
+            little_endian: true,
+            ptr_size: 8,
+            sections: vec![Section {
+                name: ".text".to_string(),
+                kind: SectionKind::Text,
+                file_offset: 0,
+                file_size: n,
+                addr: 0x1000,
+                vmsize: 0x100000,
+            }],
+            pclntab_offset: 0,
+            pclntab_size: n,
+            pclntab_addr: 0x1000,
+            text_addr: 0x1000,
+        }
+    }
+
     #[test]
-    fn only_go_1_2_to_1_15_is_an_unsupported_layout() {
-        // Go 1.2 to 1.15 is the one layout this reader still does not implement, so
-        // it is named and refused.
-        assert_eq!(unsupported_pre118_magic(MAGIC_1_2), Some("Go 1.2 to 1.15"));
-        // Every layout we read passes through: Go 1.16/1.17, Go 1.18+, and an
-        // unknown (garble-rewritten) magic that keeps the 1.18+ shape.
-        assert_eq!(unsupported_pre118_magic(MAGIC_1_16), None);
-        assert_eq!(unsupported_pre118_magic(MAGIC_1_18), None);
-        assert_eq!(unsupported_pre118_magic(MAGIC_1_20), None);
-        assert_eq!(unsupported_pre118_magic(0x1234_5678), None);
+    fn every_magic_since_go_1_2_is_read() {
+        for magic in [MAGIC_1_2, MAGIC_1_16, MAGIC_1_18, MAGIC_1_20, 0x1234_5678] {
+            assert_eq!(unsupported_pre118_magic(magic), None, "{magic:#x}");
+        }
+    }
+
+    #[test]
+    fn parses_a_go_1_2_table() {
+        // Two functions in one file, laid out as cmd/link wrote Go 1.2 to 1.15
+        // tables: no offset header, a functab of (entry, funcoff) pointer
+        // pairs and the end PC, the file table offset, and every other offset
+        // relative to the start of the table.
+        let mut b = vec![0u8; 200];
+        let put64 =
+            |b: &mut Vec<u8>, at: usize, v: u64| b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        let put32 =
+            |b: &mut Vec<u8>, at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        b[0..4].copy_from_slice(&MAGIC_1_2.to_le_bytes());
+        b[6] = 1;
+        b[7] = 8;
+        put64(&mut b, 8, 2);
+        for (i, v) in [0x1000, 112, 0x1010, 160, 0x1020].into_iter().enumerate() {
+            put64(&mut b, 16 + 8 * i, v);
+        }
+        put32(&mut b, 56, 64);
+        // File table: its length (file 0 is never used), then name offsets.
+        put32(&mut b, 64, 2);
+        put32(&mut b, 68, 72);
+        b[72..76].copy_from_slice(b"a.go");
+        b[80..86].copy_from_slice(b"main.a");
+        b[88..94].copy_from_slice(b"main.b");
+        // pc-value tables over 0x10 bytes: file 1, line 10, line 20.
+        b[96..98].copy_from_slice(&[4, 0x10]);
+        b[100..102].copy_from_slice(&[22, 0x10]);
+        b[104..106].copy_from_slice(&[42, 0x10]);
+        // _func: entry, nameoff, args, frame, pcsp, pcfile, pcln, npcdata,
+        // nfuncdata.
+        for (at, entry, name, pcln) in [(112, 0x1000, 80, 100), (160, 0x1010, 88, 104)] {
+            put64(&mut b, at, entry);
+            put32(&mut b, at + 8, name);
+            put32(&mut b, at + 24, 96);
+            put32(&mut b, at + 28, pcln);
+        }
+
+        let bin = table_bin(b);
+        let pcln = Pclntab::parse(&bin).expect("parse a Go 1.2 table");
+        assert!(pcln.magic_is_official());
+        let funcs = pcln.functions().expect("walk the functab");
+        let got: Vec<(u64, &str, Option<&str>, Option<u32>)> = funcs
+            .iter()
+            .map(|f| (f.address, f.name.as_str(), f.file.as_deref(), f.start_line))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0x1000, "main.a", Some("a.go"), Some(10)),
+                (0x1010, "main.b", Some("a.go"), Some(20)),
+            ]
+        );
+        assert_eq!(pcln.lookup(0x101f).map(|f| f.name), Some("main.b".into()));
+        assert_eq!(pcln.lookup(0x1020).map(|f| f.name), None, "past the end PC");
+        assert_eq!(pcln.pc_position(0x1004), (Some("a.go".into()), Some(10)));
+        let entry = pcln.func_entry_at(0x1010).expect("func entry");
+        let fields = pcln.func_fields(&entry).expect("func fields");
+        assert_eq!((fields.pcfile, fields.pcln, fields.cu_offset), (96, 104, 0));
+        assert_eq!(
+            pcln.funcdata(&entry, 0),
+            None,
+            "funcdata is not decoded here"
+        );
     }
 
     #[test]
@@ -893,33 +1033,9 @@ mod tests {
     #[test]
     fn parse_chain_never_panics_on_hostile_pclntab() {
         // Malware crafts pclntab fields to crash naive parsers. Feed a valid header
-        // prefix for each layout (pre-1.18 and 1.18+) with hostile bodies plus
+        // prefix for each layout (1.2, 1.16 and 1.18+) with hostile bodies plus
         // deterministic byte mutations through the whole walk. Every read is
         // bounds-checked, so the chain must return a Result, never panic.
-        use crate::gobin::{Arch, Container, Section, SectionKind};
-
-        fn make_bin(bytes: Vec<u8>) -> GoBinary {
-            let n = bytes.len();
-            GoBinary {
-                bytes,
-                container: Container::Elf,
-                arch: Arch::X86_64,
-                little_endian: true,
-                ptr_size: 8,
-                sections: vec![Section {
-                    name: ".text".to_string(),
-                    kind: SectionKind::Text,
-                    file_offset: 0,
-                    file_size: n,
-                    addr: 0x1000,
-                    vmsize: 0x100000,
-                }],
-                pclntab_offset: 0,
-                pclntab_size: n,
-                pclntab_addr: 0x1000,
-                text_addr: 0x1000,
-            }
-        }
 
         // A syntactically valid header prefix; the body is mutated below.
         let mut base = vec![0u8; 4096];
@@ -938,7 +1054,7 @@ mod tests {
 
         let magics: [[u8; 4]; 4] = [
             [0xfa, 0xff, 0xff, 0xff], // 1.16/1.17
-            [0xfb, 0xff, 0xff, 0xff], // 1.2-1.15 (rejected by version)
+            [0xfb, 0xff, 0xff, 0xff], // 1.2-1.15
             [0xf0, 0xff, 0xff, 0xff], // 1.18/1.19
             [0xf1, 0xff, 0xff, 0xff], // 1.20+
         ];
@@ -955,13 +1071,18 @@ mod tests {
                     let cut = (rng() as usize) % b.len();
                     b.truncate(cut);
                 }
-                let bin = make_bin(b);
+                let bin = table_bin(b);
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Ok(p) = Pclntab::parse(&bin) {
                         let _ = p.functions();
                         let _ = p.functions_with_offsets();
                         let _ = p.lookup(0x1234);
                         let _ = p.lookup(0xffff_ffff_ffff_ffff);
+                        if let Some(e) = p.func_entry_at(0x1000) {
+                            let _ = p.func_fields(&e);
+                            let _ = p.line_table(&e);
+                        }
+                        let _ = p.pc_position(0x1000);
                     }
                 }));
                 assert!(res.is_ok(), "parse chain panicked on a hostile pclntab");
