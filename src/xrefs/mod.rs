@@ -2,8 +2,9 @@
 //! for CALL/BL instructions and resolving each target against the
 //! recovered function table.
 //!
-//! This is a fast static analysis: linear sweep, no decoding of
-//! intervening instructions, no taint or alias analysis. CALLs through
+//! This is a fast static analysis: a linear sweep on amd64 and arm64,
+//! every function decoded from its entry on 386, and no taint or alias
+//! analysis. CALLs through
 //! a register (virtual dispatch, dynamically loaded function pointers)
 //! don't show up here; their destinations are in the itab table for
 //! interface calls and only at runtime for everything else. Direct
@@ -14,6 +15,7 @@
 
 use serde::Serialize;
 
+use crate::disasm::{self, x86};
 use crate::error::Error;
 use crate::gobin::{Arch, GoBinary, SectionKind};
 use crate::pclntab::{Function, Pclntab};
@@ -36,9 +38,9 @@ pub fn find_calls(bin: &GoBinary, pcln: &Pclntab<'_>) -> Result<Vec<CallEdge>> {
             "only little-endian binaries supported today".into(),
         ));
     }
-    if !matches!(bin.arch, Arch::X86_64 | Arch::Aarch64) {
+    if !matches!(bin.arch, Arch::X86_64 | Arch::Aarch64 | Arch::X86) {
         return Err(Error::Xrefs(format!(
-            "unsupported arch {:?}; only amd64 and arm64 today",
+            "unsupported arch {:?}; only amd64, arm64 and 386 today",
             bin.arch
         )));
     }
@@ -46,6 +48,30 @@ pub fn find_calls(bin: &GoBinary, pcln: &Pclntab<'_>) -> Result<Vec<CallEdge>> {
     let functions = pcln.functions()?;
     let by_addr: std::collections::HashMap<u64, &Function> =
         functions.iter().map(|f| (f.address, f)).collect();
+
+    if bin.arch == Arch::X86 {
+        let mut edges = Vec::new();
+        disasm::each_function_386(bin, pcln, |caller, _, insns| {
+            for &(pc, insn) in insns {
+                let x86::Kind::Call {
+                    target: Some(target),
+                } = insn.kind
+                else {
+                    continue;
+                };
+                if let Some(callee) = by_addr.get(&target) {
+                    edges.push(CallEdge {
+                        call_site: pc,
+                        caller_addr: caller.address,
+                        caller_name: caller.name.clone(),
+                        callee_addr: target,
+                        callee_name: callee.name.clone(),
+                    });
+                }
+            }
+        })?;
+        return Ok(edges);
+    }
 
     // Pick the actual .text section, not just the first executable one.
     // On Linux ELF helm-class binaries .init and .plt appear before .text

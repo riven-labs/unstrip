@@ -67,7 +67,7 @@ struct Args {
     #[arg(long, help_heading = "Analysis modes")]
     xrefs: bool,
 
-    /// Every call site targeting the given symbol (name or 0xADDR). amd64 and arm64.
+    /// Every call site targeting the given symbol (name or 0xADDR). amd64, arm64 and 386.
     #[arg(long, value_name = "SYMBOL", help_heading = "Analysis modes")]
     xref: Option<String>,
 

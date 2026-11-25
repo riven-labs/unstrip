@@ -7,16 +7,19 @@
 //!
 //! Two scanners cooperate:
 //!
-//! - **Scanner 1**: direct amd64 `CALL rel32` (opcode 0xE8) sites
-//!   whose resolved target matches the requested address. Covers
-//!   80-90% of call sites on a typical Go build.
-//! - **Scanner 2**: direct `CALL [rip+disp32]` (opcode FF 15) sites
-//!   whose resolved effective address lands inside a known itab
-//!   method slot. Strict-only precision: the rare-but-deterministic
-//!   shape where the compiler emits the indirect call directly off
-//!   RIP. The much more common encoding loads the slot pointer into
-//!   a register first and then calls through the register, which
-//!   requires basic-block tracking we deliberately do not ship.
+//! - **Scanner 1**: direct `CALL rel32` (opcode 0xE8) sites on amd64
+//!   and 386, `BL` on arm64, whose resolved target matches the
+//!   requested address. Covers 80-90% of call sites on a typical Go
+//!   build. On 386 each function is decoded from its entry instead of
+//!   swept byte by byte.
+//! - **Scanner 2**, amd64 and arm64: direct `CALL [rip+disp32]`
+//!   (opcode FF 15) sites whose resolved effective address lands
+//!   inside a known itab method slot. Strict-only precision: the
+//!   rare-but-deterministic shape where the compiler emits the
+//!   indirect call directly off RIP. The much more common encoding
+//!   loads the slot pointer into a register first and then calls
+//!   through the register, which requires basic-block tracking we
+//!   deliberately do not ship.
 //!
 //! The failure mode is "misses real indirect calls," never "false
 //! positive." Recall on Scanner 2 is honestly closer to "free hits
@@ -24,6 +27,7 @@
 
 use serde::Serialize;
 
+use crate::disasm::{self, x86};
 use crate::error::Error;
 use crate::gobin::{Arch, GoBinary, SectionKind};
 use crate::itabs::Itab;
@@ -75,10 +79,10 @@ pub struct CallSite {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum CallKind {
-    /// Direct amd64 `CALL rel32` (opcode 0xE8). The most common shape
-    /// on Go binaries; covers 80-90% of call sites on a typical build
-    /// because the compiler prefers PC-relative direct calls when
-    /// the callee is statically known.
+    /// Direct `CALL rel32` (opcode 0xE8) on amd64 and 386, `BL` on
+    /// arm64. The most common shape on Go binaries; covers 80-90% of
+    /// call sites on a typical build because the compiler prefers
+    /// PC-relative direct calls when the callee is statically known.
     Direct,
     /// Direct indirect call through a known itab method slot:
     /// `CALL [rip + itab + (5 + method_index) * 8]`. Rare in real
@@ -93,9 +97,11 @@ pub enum CallKind {
     },
 }
 
-/// Find every call site that targets `target`. amd64 only; other
-/// architectures return an error (the encodings are arch-specific
-/// and we don't ship a fake answer).
+/// Find every call site that targets `target` on amd64, arm64 or 386;
+/// other architectures return an error (the encodings are arch-specific
+/// and we don't ship a fake answer). On 386 every function is decoded
+/// from its entry and only direct calls are reported: there is no
+/// indirect-itab scan, and a [`Target::ItabMethod`] is an error.
 ///
 /// `itabs` is the recovered itab table (pass an empty slice if
 /// moduledata could not be located; Scanner 2's indirect-itab
@@ -113,14 +119,43 @@ pub fn find(
             "callsites scan is little-endian only today".into(),
         ));
     }
-    if !matches!(bin.arch, Arch::X86_64 | Arch::Aarch64) {
+    if !matches!(bin.arch, Arch::X86_64 | Arch::Aarch64 | Arch::X86) {
         return Err(Error::Xrefs(format!(
-            "callsites scan supports amd64 and arm64 today; got {:?}",
+            "callsites scan supports amd64, arm64 and 386 today; got {:?}",
             bin.arch
         )));
     }
 
     let functions = pcln.functions()?;
+    if bin.arch == Arch::X86 {
+        let target_addr = match target {
+            Target::Function(name) => resolve_function(name, &functions)?,
+            Target::Address(addr) => *addr,
+            Target::ItabMethod { .. } => {
+                return Err(Error::Xrefs(
+                    "indirect-itab call sites are not scanned on 386".into(),
+                ))
+            }
+        };
+        let mut out = Vec::new();
+        disasm::each_function_386(bin, pcln, |caller, _, insns| {
+            for &(pc, insn) in insns {
+                if insn.kind
+                    == (x86::Kind::Call {
+                        target: Some(target_addr),
+                    })
+                {
+                    out.push(CallSite {
+                        call_site: pc,
+                        caller_name: Some(caller.name.clone()),
+                        caller_addr: Some(caller.address),
+                        kind: CallKind::Direct,
+                    });
+                }
+            }
+        })?;
+        return Ok(out);
+    }
     let text = pick_text(bin)?;
     let text_start = text.addr;
     let text_bytes = &bin.bytes[text.file_offset..text.file_offset + text.file_size];
