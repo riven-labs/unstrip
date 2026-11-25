@@ -1,3 +1,4 @@
+mod syntax;
 mod uncommon;
 
 use serde::Serialize;
@@ -7,6 +8,7 @@ use crate::gobin::GoBinary;
 use crate::moduledata::{read_name_len, ModuleData};
 use crate::Result;
 
+pub use syntax::TypeNames;
 pub use uncommon::Method;
 
 /// A recovered Go type: the `_type` header, the package and method table from
