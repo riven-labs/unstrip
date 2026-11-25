@@ -146,20 +146,24 @@ From a stripped binary, no debug info, no SDK installed:
 
 ```
 $ unstrip ./samples/myapp --types --filter cobra.Command
-0x00000000005c01a0  struct     size=728     *cobra.Command
-    +0000  Use: type@0x589ec0
-    +0010  Aliases: type@0x588960
-    +0028  SuggestFor: type@0x588960
-    +0040  Short: type@0x589ec0
-    +0050  GroupID: type@0x589ec0
+0x00000000005f4f40  struct     size=728     cobra.Command
+    +0000  Use string
+    +0010  Aliases []string
+    +0028  SuggestFor []string
     ...
-    +02c8  TraverseChildren: type@0x58a2c0
-    +02c9  Hidden: type@0x58a2c0
-    +02ca  SilenceErrors: type@0x58a2c0
-    +02d0  SuggestionsMinimumDistance: type@0x58a100
+    +0098  ValidArgsFunction func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective)
+    +00a0  Args cobra.PositionalArgs
+    ...
+    +0230  inReader io.Reader
+    ...
+    +0268  commandCalledAs struct { name string; called bool }
+    +0280  ctx context.Context
+    +0290  commands []*cobra.Command
+    ...
+    +02d0  SuggestionsMinimumDistance int
 ```
 
-Full struct layouts, including unexported fields. Field types are cross-referenced by address so you can navigate the type graph. JSON output is wired for tooling.
+Full struct layouts, including unexported fields, in Go syntax: each field with its offset, its type as the source declares it, and its struct tag; each interface method with its signature. A name two packages share is written with the import path (`internal/sync.Mutex` beside `sync.Mutex`). `--format json` gives every type's package path, whether it is named, its size and alignment, the addresses of the types it refers to, and its method table with the entry of each method. On a test program built with Go 1.7 to 1.27 for amd64, 386 and arm64, every type a `reflect` walk of the program reaches came out with the name, package path, layout and methods `reflect` reports.
 
 ### Interfaces
 
@@ -498,10 +502,8 @@ What's out of scope, and where to look instead:
 
 Known gaps:
 
-- Type recovery reads struct package paths and discards them, so two types with one name in different packages (`sync.Mutex` and `internal/sync.Mutex`) print the same name.
 - Free top-level function signatures: the binary records signatures for methods (on types reached at runtime) but not for free top-level functions; their signatures are absent without DWARF.
 - `--buildinfo` fails on Go 1.13 to 1.15 binaries (the version string header it points at is not in the file), and Go 1.2 and 1.3 binaries carry no version string to report.
-- Method tables of named map types are not found before Go 1.14, whose map type record has a different size.
 
 ## Roadmap
 

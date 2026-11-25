@@ -20,6 +20,18 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   plain and garbled, every reported literal was one the compiler emitted and
   every function attribution checked against `-gcflags=-S` was right. The
   library call is `strings::literals`, returning `strings::Literals`.
+- Type identity on `types::Type`: `pkg_path` (the import path of a named
+  type, from its uncommon block, as `reflect.Type.PkgPath()` gives it),
+  `named`, `align`, `field_align`, and `methods`, the uncommon method table:
+  every method's name, method type, and the `Ifn` and `Tfn` entries resolved
+  to code addresses (`types::Method`); on the 55 builds named below each one
+  is the entry of a pclntab function. `--types --format json` carries them.
+  `sync.Mutex` and `internal/sync.Mutex` are now told apart.
+- `types::TypeNames` renders references in a recovered type set as Go
+  source writes them: `name`, `signature` and `field`. Where two named types
+  share a name in different packages, both are written with their import
+  path (`internal/sync.Mutex`), and so is every type that mentions one
+  (`[]*internal/sync.Mutex`).
 - Go 1.2 to 1.15 binaries are read (pclntab magic `0xfffffffb`): every
   function with its file and line, PC lookups, line tables, SP deltas and
   PCDATA. The function table matches `debug/gosym` entry for entry on every
@@ -54,6 +66,18 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Changed
 
+- `--types` prints Go syntax: struct fields as declared
+  (``C2 string `json:"c2"` ``, `Next *main.Node`, an embedded field as its
+  bare type) and interface methods with their signatures
+  (`Handle([]uint8) ([]uint8, error)`). They printed `type@0x...` and
+  `.Handle(): type@0x...`. `--filter` also matches the path-qualified name.
+  Checked against `reflect` on a test program (`testdata/typeid`) built with
+  Go 1.7 to 1.27 for Windows, Linux and macOS on amd64, 386 and arm64, 55
+  builds: all 5,850 types a `reflect` walk of the program reaches have the
+  same name, package path, kind, size, alignment, fields, interface methods
+  and exported methods. Rebuilt from its parts, each of the 114,398 unnamed
+  types in those builds and the testdata fixtures equals the name the
+  compiler stored.
 - `--strings` prints literals instead of printable runs, which often glued
   a dozen literals into one line. `--strings --strings-runs` prints the runs
   as before, on every architecture. `--strings-min` now defaults to 1 for
@@ -80,6 +104,10 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Fixed
 
+- Method tables of named map types (`http.Header`, `url.Values`) are found on
+  Go 1.7 to 1.13, whose map type record differs from 1.14's: 1.7 to 1.10
+  have an `hmap` type where 1.14 has the hasher, and 1.11 to 1.13 have
+  neither. Their methods get signatures in the listing too.
 - The Ghidra script created no functions in a program Ghidra had not
   analyzed: it called `createFunction` without a body, which Ghidra refuses
   ("Function body must contain the entrypoint"), so 2136 of 2137 functions
