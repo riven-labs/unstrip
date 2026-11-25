@@ -138,29 +138,9 @@ pub fn write_info<W: Write>(
     go_version: Option<&str>,
     garble_check: Option<&GarbleReport>,
 ) -> io::Result<()> {
-    let size_kb = bin.pclntab_size / 1024;
     let version = go_version.unwrap_or("(not detected)");
     writeln!(w, "go version:    {version}")?;
-    writeln!(
-        w,
-        "container:     {} ({}, {})",
-        bin.container.as_str(),
-        bin.arch.as_str(),
-        if bin.little_endian {
-            "little-endian"
-        } else {
-            "big-endian"
-        },
-    )?;
-    writeln!(
-        w,
-        "pclntab:       0x{:016x} ({} KB)",
-        bin.pclntab_offset, size_kb,
-    )?;
-    writeln!(w, "functions:     {}", pcln.nfunc())?;
-    writeln!(w, "text start:    0x{:016x}", pcln.text_start())?;
-    writeln!(w, "ptr size:      {}", pcln.ptrsize())?;
-    writeln!(w, "quantum:       {}", pcln.quantum())?;
+    write_layout(w, bin, pcln)?;
     if let Some(report) = garble_check {
         if report.any() {
             writeln!(w)?;
@@ -196,6 +176,97 @@ pub fn write_info<W: Write>(
 
     write_section_map(w, bin)?;
 
+    Ok(())
+}
+
+/// The `--info` report: the triage facts first, then where the Go tables
+/// sit and the section map.
+pub fn write_triage<W: Write>(
+    w: &mut W,
+    triage: &crate::triage::Triage,
+    bin: &GoBinary,
+    pcln: &Pclntab<'_>,
+) -> io::Result<()> {
+    let version = triage.go_version.as_deref().unwrap_or("(not detected)");
+    writeln!(w, "go version:    {version}")?;
+    let build_id = triage.build_id.as_deref().unwrap_or("(none)");
+    writeln!(w, "build id:      {build_id}")?;
+    if let Some(module) = &triage.main_module {
+        let version = if module.version.is_empty() {
+            "(devel)"
+        } else {
+            &module.version
+        };
+        writeln!(w, "main module:   {}  {version}", module.path)?;
+    }
+    let platform = match (&triage.goos, &triage.goarch) {
+        (Some(goos), Some(goarch)) => format!("{goos}/{goarch}"),
+        (None, Some(goarch)) => format!("?/{goarch}"),
+        (Some(goos), None) => format!("{goos}/?"),
+        (None, None) => "(not detected)".to_string(),
+    };
+    let from = match triage.platform_from {
+        crate::triage::PlatformSource::BuildInfo => "",
+        crate::triage::PlatformSource::EntryPoint => "  (from the entry point name)",
+        crate::triage::PlatformSource::Container => "  (from the container)",
+    };
+    writeln!(w, "platform:      {platform}{from}")?;
+    if let Some(cgo) = triage.cgo_enabled {
+        writeln!(w, "cgo:           CGO_ENABLED={}", u8::from(cgo))?;
+    }
+    if let Some(vcs) = &triage.vcs {
+        let mut line = vcs.system.clone().unwrap_or_else(|| "vcs".to_string());
+        for part in [&vcs.revision, &vcs.time].into_iter().flatten() {
+            line.push(' ');
+            line.push_str(part);
+        }
+        if vcs.modified == Some(true) {
+            line.push_str("  (modified)");
+        }
+        writeln!(w, "vcs:           {line}")?;
+    }
+    let garble = &triage.garble;
+    let verdict = match garble.verdict {
+        crate::garble::Verdict::Garbled => "garbled",
+        crate::garble::Verdict::Clean => "clean",
+        crate::garble::Verdict::Indeterminate => "indeterminate",
+    };
+    writeln!(
+        w,
+        "garble:        {verdict} (confidence {:.2})",
+        garble.confidence
+    )?;
+    for signal in garble.signals.iter().filter(|s| s.fired) {
+        writeln!(w, "  - {}", signal.detail)?;
+    }
+    writeln!(w)?;
+    write_layout(w, bin, pcln)?;
+    write_section_map(w, bin)
+}
+
+/// Container, pclntab placement and the table's header facts.
+fn write_layout<W: Write>(w: &mut W, bin: &GoBinary, pcln: &Pclntab<'_>) -> io::Result<()> {
+    let size_kb = bin.pclntab_size / 1024;
+    writeln!(
+        w,
+        "container:     {} ({}, {})",
+        bin.container.as_str(),
+        bin.arch.as_str(),
+        if bin.little_endian {
+            "little-endian"
+        } else {
+            "big-endian"
+        },
+    )?;
+    writeln!(
+        w,
+        "pclntab:       0x{:016x} ({} KB)",
+        bin.pclntab_offset, size_kb,
+    )?;
+    writeln!(w, "functions:     {}", pcln.nfunc())?;
+    writeln!(w, "text start:    0x{:016x}", pcln.text_start())?;
+    writeln!(w, "ptr size:      {}", pcln.ptrsize())?;
+    writeln!(w, "quantum:       {}", pcln.quantum())?;
     Ok(())
 }
 
@@ -361,17 +432,27 @@ fn looks_garbled(name: &str) -> bool {
 /// None when the build info holds no release (garble blanks it) or the scan
 /// finds none.
 pub fn go_version(bin: &GoBinary) -> Option<String> {
-    match crate::buildinfo::BuildInfo::parse(bin) {
+    let info = crate::buildinfo::BuildInfo::parse(bin).ok();
+    go_version_from(info.as_ref(), bin)
+}
+
+/// [`go_version`] for a caller that parsed the build info already: `info` is
+/// None when it did not parse.
+pub fn go_version_from(
+    info: Option<&crate::buildinfo::BuildInfo>,
+    bin: &GoBinary,
+) -> Option<String> {
+    match info {
         // The recorded string can carry experiments after a space
         // (`go1.21.0 X:nocoverageredesign`); the release is the first word.
-        Ok(bi) => {
+        Some(bi) => {
             let first = bi.go_version.split_whitespace().next()?;
             if release_len(first.as_bytes()) != Some(first.len()) {
                 return None;
             }
             Some(first.to_string())
         }
-        Err(_) => detect_go_version(&bin.bytes),
+        None => detect_go_version(&bin.bytes),
     }
 }
 

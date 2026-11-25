@@ -9,7 +9,7 @@ use unstrip::export;
 use unstrip::gobin::GoBinary;
 use unstrip::itabs;
 use unstrip::moduledata::ModuleData;
-use unstrip::output::{detect_garble, go_version, write_functions, write_info, Format};
+use unstrip::output::{go_version, write_functions, write_triage, Format};
 use unstrip::pclntab::Pclntab;
 use unstrip::types;
 
@@ -25,7 +25,9 @@ struct Args {
     binary: Option<PathBuf>,
 
     // ----- Analysis modes -----
-    /// Container, Go version, garble heuristic.
+    /// Go version, build ID, main module, platform, cgo, VCS stamp, garble
+    /// verdict, then the container and sections. Says why when the file has
+    /// no Go metadata.
     #[arg(long, help_heading = "Analysis modes")]
     info: bool,
 
@@ -469,11 +471,20 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let binary_path = args.binary.as_ref().ok_or_else(|| {
         "missing binary path (or use --install-plugin to install a wrapper)".to_string()
     })?;
-    let bin = GoBinary::open(binary_path)?;
-    let pcln = Pclntab::parse(&bin)?;
-
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
+
+    let bin = match GoBinary::open(binary_path) {
+        Ok(bin) => bin,
+        Err(err) => {
+            let bytes = std::fs::read(binary_path).unwrap_or_default();
+            return Err(unreadable(&mut out, &args, &bytes, err));
+        }
+    };
+    let pcln = match Pclntab::parse(&bin) {
+        Ok(pcln) => pcln,
+        Err(err) => return Err(unreadable(&mut out, &args, &bin.bytes, err)),
+    };
 
     if let Some(target) = &args.symbols_as {
         if target != "elf" && target != "pe" {
@@ -558,15 +569,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.info {
-        let version = go_version(&bin);
         let funcs = pcln.functions().unwrap_or_default();
-        let report = detect_garble(&funcs, version.as_deref(), pcln.magic_is_official());
-        maybe_warn_garbled(
-            &funcs,
-            version.as_deref(),
-            pcln.magic_is_official(),
-            args.no_garble_warning,
-        );
+        let triage = unstrip::triage::triage(&bin, &pcln, &funcs);
+        maybe_warn_garbled(&triage.garble, args.no_garble_warning);
 
         // Behavioral classification: classify itabs against the curated
         // stdlib interface list. Failure is non-fatal (no moduledata, etc.).
@@ -579,7 +584,15 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         match args.format {
             OutFormat::Json => {
                 let payload = serde_json::json!({
-                    "go_version": version,
+                    "go_version": triage.go_version,
+                    "build_id": triage.build_id,
+                    "main_module": triage.main_module,
+                    "goos": triage.goos,
+                    "goarch": triage.goarch,
+                    "platform_from": triage.platform_from,
+                    "cgo_enabled": triage.cgo_enabled,
+                    "vcs": triage.vcs,
+                    "garble": triage.garble,
                     "container": bin.container.as_str(),
                     "arch": bin.arch.as_str(),
                     "little_endian": bin.little_endian,
@@ -591,10 +604,6 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     "quantum": pcln.quantum(),
                     "functions": pcln.nfunc(),
                     "magic_is_official": pcln.magic_is_official(),
-                    "garble_magic_rewritten": report.magic_rewritten,
-                    "garble_version_overwritten": report.version_overwritten,
-                    "garble_hashed_names": report.hashed_names,
-                    "garble_verdict": report.verdict(),
                     "stdlib_interfaces": stdlib_counts.iter().map(|(name, count)| {
                         serde_json::json!({ "interface": name, "implementations": count })
                     }).collect::<Vec<_>>(),
@@ -603,7 +612,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 writeln!(out)?;
             }
             OutFormat::Text => {
-                write_info(&mut out, &bin, &pcln, version.as_deref(), Some(&report))?;
+                write_triage(&mut out, &triage, &bin, &pcln)?;
                 if !stdlib_counts.is_empty() {
                     writeln!(out)?;
                     writeln!(out, "stdlib interface implementations:")?;
@@ -1519,12 +1528,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.buildinfo {
         let funcs_for_warn = pcln.functions().unwrap_or_default();
         let version_for_warn = go_version(&bin);
-        maybe_warn_garbled(
+        let assessment = unstrip::garble::assess(
             &funcs_for_warn,
             version_for_warn.as_deref(),
             pcln.magic_is_official(),
-            args.no_garble_warning,
         );
+        maybe_warn_garbled(&assessment, args.no_garble_warning);
         // When the modinfo blob has been stripped (garble's default
         // mode does this), fall back to the pclntab magic as a coarse
         // Go-version proxy. We deliberately encode "this is inferred,
@@ -1647,28 +1656,61 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Fire a one-line stderr warning when the unified garble assessment
-/// returns a `Garbled` verdict. Routes through the same `assess()` path
-/// `--detect-garble` uses so the warning and the explicit detector never
-/// disagree on the same binary. Gated behind `--no-garble-warning`.
-fn maybe_warn_garbled(
-    functions: &[unstrip::pclntab::Function],
-    go_version: Option<&str>,
-    magic_is_official: bool,
-    suppressed: bool,
-) {
+/// Fire a one-line stderr warning when the garble assessment, the one
+/// `--detect-garble` prints, is `Garbled`. Gated behind `--no-garble-warning`.
+fn maybe_warn_garbled(assessment: &unstrip::garble::GarbleAssessment, suppressed: bool) {
     if suppressed {
         return;
     }
-    let a = unstrip::garble::assess(functions, go_version, magic_is_official);
-    if a.is_garbled() && a.confidence >= 0.75 {
+    if assessment.is_garbled() && assessment.confidence >= 0.75 {
         eprintln!(
             "warning: this binary appears to be obfuscated with garble \
              (confidence {:.2}); reported symbols and build metadata are \
              not authoritative",
-            a.confidence
+            assessment.confidence
         );
     }
+}
+
+/// The error for a file that gave no Go metadata, with the probe's reason in
+/// it. `--info` also prints the reason and what the probe saw on stdout, in
+/// the format asked for.
+fn unreadable<W: Write>(
+    out: &mut W,
+    args: &Args,
+    bytes: &[u8],
+    err: unstrip::Error,
+) -> Box<dyn std::error::Error> {
+    let Some(why) = unstrip::triage::diagnose(bytes, &err) else {
+        return Box::new(err);
+    };
+    if args.info {
+        let res = match args.format {
+            OutFormat::Json => serde_json::to_writer_pretty(&mut *out, &why)
+                .map_err(io::Error::other)
+                .and_then(|()| writeln!(out)),
+            _ => write_unreadable(out, &why),
+        };
+        if let Err(e) = res.and_then(|()| out.flush()) {
+            return Box::new(e);
+        }
+    }
+    why.detail.into()
+}
+
+fn write_unreadable<W: Write>(w: &mut W, why: &unstrip::triage::Unreadable) -> io::Result<()> {
+    writeln!(w, "go metadata:   none")?;
+    writeln!(w, "reason:        {}", why.detail)?;
+    let container = match (&why.container, &why.arch) {
+        (Some(container), Some(arch)) => format!("{container} ({arch})"),
+        _ => "(not recognised)".to_string(),
+    };
+    writeln!(w, "container:     {container}")?;
+    writeln!(
+        w,
+        "file:          {} bytes, entropy {:.2} bits/byte",
+        why.file_size, why.file_entropy
+    )
 }
 
 /// Build a PC -> Go-syntax-signature map for the whole binary. Best-effort:

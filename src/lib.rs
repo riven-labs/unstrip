@@ -23,6 +23,7 @@ pub mod probe;
 pub mod rewrite;
 pub mod stdlib;
 pub mod strings;
+pub mod triage;
 pub mod types;
 pub mod xrefs;
 
