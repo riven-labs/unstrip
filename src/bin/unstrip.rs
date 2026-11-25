@@ -397,6 +397,7 @@ Examples
   unstrip <bin> --types                type catalog
   unstrip <bin> --itabs                interface dispatch table
   unstrip <bin> --format ghidra > apply.py
+  unstrip <bin> --format goresym > out.json  GoReSym's JSON schema
   unstrip <bin> --addr 0x4a3c40        PC -> function:file:line
   unstrip <bin> --strings --filter http  string literals and the code using them
   unstrip <bin> --data-at 0x520180 --data-as ifaces --data-count 4
@@ -1719,28 +1720,37 @@ fn maybe_warn_garbled(assessment: &unstrip::garble::GarbleAssessment, suppressed
 
 /// The error for a file that gave no Go metadata, with the probe's reason in
 /// it. `--info` also prints the reason and what the probe saw on stdout, in
-/// the format asked for.
+/// the format asked for, and `--format goresym` prints GoReSym's
+/// `{"error": ...}` object.
 fn unreadable<W: Write>(
     out: &mut W,
     args: &Args,
     bytes: &[u8],
     err: unstrip::Error,
 ) -> Box<dyn std::error::Error> {
-    let Some(why) = unstrip::triage::diagnose(bytes, &err) else {
-        return Box::new(err);
+    let why = unstrip::triage::diagnose(bytes, &err);
+    let detail = match &why {
+        Some(why) => why.detail.clone(),
+        None => err.to_string(),
     };
-    if args.info {
-        let res = match args.format {
-            OutFormat::Json => serde_json::to_writer_pretty(&mut *out, &why)
-                .map_err(io::Error::other)
-                .and_then(|()| writeln!(out)),
-            _ => write_unreadable(out, &why),
-        };
-        if let Err(e) = res.and_then(|()| out.flush()) {
-            return Box::new(e);
+    let res = match (&why, args.info, args.format) {
+        (Some(why), true, OutFormat::Json) => serde_json::to_writer_pretty(&mut *out, why)
+            .map_err(io::Error::other)
+            .and_then(|()| writeln!(out)),
+        (Some(why), true, _) => write_unreadable(out, why),
+        (_, false, OutFormat::Goresym) => {
+            let error = serde_json::json!({ "error": format!("Failed to parse file: {detail}") });
+            writeln!(out, "{error}")
         }
+        _ => Ok(()),
+    };
+    if let Err(e) = res.and_then(|()| out.flush()) {
+        return Box::new(e);
     }
-    why.detail.into()
+    match why {
+        Some(_) => detail.into(),
+        None => Box::new(err),
+    }
 }
 
 fn write_unreadable<W: Write>(w: &mut W, why: &unstrip::triage::Unreadable) -> io::Result<()> {
