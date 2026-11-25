@@ -30,6 +30,11 @@ struct Report<'a> {
 #[derive(Debug, Serialize)]
 struct FunctionView<'a> {
     address: u64,
+    /// The next function's entry: `address + size`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
     name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<&'a str>,
@@ -55,6 +60,8 @@ pub fn write_functions<W: Write>(
                 .iter()
                 .map(|f| FunctionView {
                     address: f.address,
+                    end: f.size.and_then(|size| f.address.checked_add(size)),
+                    size: f.size,
                     name: &f.name,
                     file: f.file.as_deref(),
                     start_line: f.start_line,
@@ -108,9 +115,13 @@ fn write_text<W: Write>(
                 name_col.push_str("  (itab thunk)");
             }
         }
+        let size = match f.size {
+            Some(size) => size.to_string(),
+            None => "?".to_string(),
+        };
         writeln!(
             w,
-            "0x{addr:016x}  {name:<name_width$}  {file}",
+            "0x{addr:016x}  {size:>7}  {name:<name_width$}  {file}",
             addr = f.address,
             name = name_col,
             name_width = name_width,
