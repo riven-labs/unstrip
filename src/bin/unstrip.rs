@@ -189,7 +189,8 @@ struct Args {
     no_itab_reachability: bool,
 
     // ----- Output -----
-    /// Output format.
+    /// Output format. `goresym` prints the whole binary as GoReSym's JSON
+    /// (`GoReSym -t -d -p`; add --strings for its `Strings`).
     #[arg(short, long, value_enum, default_value_t = OutFormat::Text, help_heading = "Output")]
     format: OutFormat,
 
@@ -369,6 +370,7 @@ enum OutFormat {
     Ida,
     Ghidra,
     Binja,
+    Goresym,
 }
 
 impl OutFormat {
@@ -528,6 +530,48 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         writeln!(out, "wrote {} symbols to {}", n, out_path.display())?;
+        out.flush()?;
+        return Ok(());
+    }
+
+    if args.format == OutFormat::Goresym {
+        let modes = [
+            ("--info", args.info),
+            ("--buildinfo", args.buildinfo),
+            ("--types", args.types),
+            ("--itabs", args.itabs),
+            ("--capabilities", args.capabilities),
+            ("--reflect-names", args.reflect_names),
+            ("--fingerprint", args.fingerprint),
+            ("--goroutines", args.goroutines),
+            ("--xrefs", args.xrefs),
+            ("--xref", args.xref.is_some()),
+            ("--xref-readers", args.xref_readers.is_some()),
+            ("--xref-writers", args.xref_writers.is_some()),
+            ("--data-at", args.data_at.is_some()),
+            ("--addr", args.addr.is_some()),
+            ("--addr-file", args.addr_file.is_some()),
+            ("--diff", args.diff.is_some()),
+            ("--detect-garble", args.detect_garble),
+            ("--degarble", args.degarble),
+            ("--dispatch-resolver", args.dispatch_resolver.is_some()),
+        ];
+        if let Some((flag, _)) = modes.iter().find(|(_, set)| *set) {
+            return Err(format!(
+                "--format goresym is a document of the whole binary; {flag} does not apply                  (--strings adds its Strings)"
+            )
+            .into());
+        }
+        let config = unstrip::goresym::Config {
+            strings: args.strings,
+            ..Default::default()
+        };
+        let doc = unstrip::goresym::document(&bin, &pcln, config);
+        // GoReSym indents with four spaces.
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(b"    ");
+        let mut ser = serde_json::Serializer::with_formatter(&mut out, formatter);
+        serde::Serialize::serialize(&doc, &mut ser)?;
+        writeln!(out)?;
         out.flush()?;
         return Ok(());
     }
