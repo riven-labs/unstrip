@@ -419,3 +419,47 @@ fn data_views_read_4_byte_words_on_386() {
         assert_eq!(rows[0].bytes.len(), 8);
     }
 }
+
+#[test]
+fn code_scanners_read_every_386_release() {
+    for (minor, path) in builds() {
+        let bin = GoBinary::open(&path).expect("open");
+        let pcln = Pclntab::parse(&bin).expect("pclntab");
+        let at = || format!("go1.{minor} {}", path.display());
+
+        let edges = unstrip::xrefs::find_calls(&bin, &pcln).expect("call graph");
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.caller_name == "runtime.main" && e.callee_name == "runtime.gcenable"),
+            "{}: runtime.main calls runtime.gcenable",
+            at()
+        );
+
+        let spawns = unstrip::goroutines::find_spawns(&bin, &pcln).expect("spawns");
+        assert!(
+            spawns
+                .iter()
+                .any(|s| s.target_name.as_deref() == Some("runtime.forcegchelper")),
+            "{}: runtime.init starts forcegchelper",
+            at()
+        );
+
+        let md = ModuleData::locate(&bin).expect("moduledata");
+        let referenced = unstrip::dataxref::referenced_addresses(&bin).expect("references");
+        for it in itabs::recover_all(&bin, &md).expect("itabs") {
+            assert!(referenced.contains(&it.addr), "{}: {:x}", at(), it.addr);
+        }
+
+        let report = unstrip::strings::literals(&bin, &pcln).expect("literals");
+        assert!(report.code_scanned, "{}", at());
+        assert!(
+            report
+                .literals
+                .iter()
+                .any(|l| l.text.as_deref() == Some("runtime.main not on m0")),
+            "{}: runtime.main throws with a literal",
+            at()
+        );
+    }
+}

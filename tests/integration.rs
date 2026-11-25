@@ -2445,6 +2445,98 @@ fn itab_reachability_reads_arm64_and_386_code() {
 }
 
 #[test]
+fn x386_call_graph_and_callsites_agree() {
+    // featureset.go: main.main calls main.run once.
+    let Some(path) = fixture("featureset.linux-386.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let edges = unstrip::xrefs::find_calls(&bin, &pcln).expect("scan");
+    let to_run: Vec<u64> = edges
+        .iter()
+        .filter(|e| e.caller_name == "main.main" && e.callee_name == "main.run")
+        .map(|e| e.call_site)
+        .collect();
+    assert_eq!(to_run.len(), 1, "main.main calls main.run once");
+    let target = unstrip::callsites::Target::Function("main.run".into());
+    let sites = unstrip::callsites::find(&bin, &pcln, &[], &target).expect("callsites");
+    let sites: Vec<u64> = sites.iter().map(|s| s.call_site).collect();
+    assert_eq!(sites, to_run, "--xref and --xrefs see the same call");
+    // Every edge leaves a recovered function and lands on one's entry.
+    let functions = pcln.functions().expect("functions");
+    let entries: std::collections::HashSet<u64> = functions.iter().map(|f| f.address).collect();
+    for e in &edges {
+        assert!(entries.contains(&e.callee_addr), "{e:?}");
+        assert!(e.caller_addr <= e.call_site, "{e:?}");
+    }
+}
+
+#[test]
+fn x386_goroutine_spawns_read_the_stack_argument() {
+    // featureset.go: one `go` statement in main.run, on line 80.
+    let Some(path) = fixture("featureset.linux-386.stripped") else {
+        return;
+    };
+    let bin = GoBinary::open(&path).expect("open");
+    let pcln = Pclntab::parse(&bin).expect("parse");
+    let spawns = unstrip::goroutines::find_spawns(&bin, &pcln).expect("scan");
+    let in_run: Vec<_> = spawns
+        .iter()
+        .filter(|s| {
+            pcln.lookup(s.call_site)
+                .is_some_and(|f| f.name == "main.run")
+        })
+        .collect();
+    assert_eq!(in_run.len(), 1, "one go statement in main.run");
+    assert_eq!(in_run[0].line, Some(80));
+    // The runtime starts its helpers from static funcvals.
+    let names: Vec<&str> = spawns
+        .iter()
+        .filter_map(|s| s.target_name.as_deref())
+        .collect();
+    assert!(
+        names.contains(&"runtime.forcegchelper"),
+        "runtime.init starts forcegchelper; resolved {names:?}"
+    );
+}
+
+#[test]
+fn data_refs_on_386_and_arm64_find_itab_loads() {
+    for name in [
+        "featureset.linux-386.stripped",
+        "featureset.windows-386.stripped.exe",
+        "hello.linux-arm64.stripped",
+        "strlits.linux-arm64.stripped",
+    ] {
+        let Some(path) = fixture(name) else {
+            continue;
+        };
+        let bin = GoBinary::open(&path).expect("open");
+        let pcln = Pclntab::parse(&bin).expect("pcln");
+        let md = ModuleData::locate(&bin).expect("md");
+        let itabs_v = itabs::recover_all(&bin, &md).expect("itabs");
+        let mut readers = 0;
+        for it in &itabs_v {
+            let find = |direction| {
+                unstrip::dataxref::find_refs(&bin, &pcln, it.addr, direction).expect("scan")
+            };
+            let read = find(unstrip::dataxref::Direction::Readers);
+            let written = find(unstrip::dataxref::Direction::Writers);
+            let both = find(unstrip::dataxref::Direction::Both);
+            assert!(written.is_empty(), "{name}: code never writes an itab");
+            assert_eq!(both.len(), read.len(), "{name}");
+            for h in &read {
+                assert_eq!(h.target_addr, it.addr);
+                assert!(h.function_name.is_some(), "{name}: {h:?}");
+            }
+            readers += read.len();
+        }
+        assert!(readers > 0, "{name}: code loads some itab");
+    }
+}
+
+#[test]
 fn full_type_scan_emits_only_well_formed_descriptors() {
     // The linear scan behind --types-full tries every pointer-aligned offset
     // of the types region. Offsets inside names and other data used to come
