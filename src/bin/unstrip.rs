@@ -639,6 +639,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             Some(s) => Some(parse_pc(s)?),
             None => None,
         };
+        let json = matches!(args.format, OutFormat::Json);
+        let mut entries: Vec<AddrEntry> = Vec::new();
         for (lineno, line) in raw.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -647,7 +649,14 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             let raw_pc = match parse_pc(line) {
                 Ok(v) => v,
                 Err(e) => {
-                    writeln!(out, "# line {}: {}", lineno + 1, e)?;
+                    if json {
+                        entries.push(AddrEntry::Unparsed {
+                            line: lineno + 1,
+                            error: e.to_string(),
+                        });
+                    } else {
+                        writeln!(out, "# line {}: {}", lineno + 1, e)?;
+                    }
                     continue;
                 }
             };
@@ -655,29 +664,36 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 Some(d) => match raw_pc.checked_sub(d) {
                     Some(v) => v,
                     None => {
-                        writeln!(out, "0x{raw_pc:016x}  (underflow vs --rebase)")?;
+                        if json {
+                            entries.push(AddrEntry::Missing {
+                                pc: raw_pc,
+                                error: "underflow vs --rebase",
+                            });
+                        } else {
+                            writeln!(out, "0x{raw_pc:016x}  (underflow vs --rebase)")?;
+                        }
                         continue;
                     }
                 },
                 None => raw_pc,
             };
-            let frames = pcln_with_inline.lookup_inline(&bin, pc);
-            if frames.is_empty() {
-                writeln!(out, "0x{pc:016x}  (no function)")?;
-                continue;
+            let location = pcln_with_inline.pc_location(pc);
+            match (location, json) {
+                (Some(location), true) => entries.push(AddrEntry::Found {
+                    location,
+                    signature: None,
+                }),
+                (Some(location), false) => write_location(&mut out, &location, "")?,
+                (None, true) => entries.push(AddrEntry::Missing {
+                    pc,
+                    error: NO_FUNCTION,
+                }),
+                (None, false) => writeln!(out, "0x{pc:016x}  (no function)")?,
             }
-            for (i, f) in frames.iter().enumerate() {
-                let file = f.file.as_deref().unwrap_or("?");
-                let line = f.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
-                let prefix = if frames.len() == 1 {
-                    format!("0x{pc:016x} ")
-                } else if i + 1 == frames.len() {
-                    "(physical)".into()
-                } else {
-                    "(inlined) ".into()
-                };
-                writeln!(out, "{prefix} {}  {file}:{line}", f.name)?;
-            }
+        }
+        if json {
+            serde_json::to_writer_pretty(&mut out, &entries)?;
+            writeln!(out)?;
         }
         out.flush()?;
         return Ok(());
@@ -700,7 +716,20 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             Some(md) => pcln.with_gofunc(md.gofunc),
             None => pcln,
         };
-        let frames = pcln_with_inline.lookup_inline(&bin, pc);
+        let Some(location) = pcln_with_inline.pc_location(pc) else {
+            if matches!(args.format, OutFormat::Json) {
+                let entry = AddrEntry::Missing {
+                    pc,
+                    error: NO_FUNCTION,
+                };
+                serde_json::to_writer_pretty(&mut out, &entry)?;
+                writeln!(out)?;
+            } else {
+                writeln!(out, "0x{pc:016x}  (no function covers this PC)")?;
+            }
+            out.flush()?;
+            return Ok(());
+        };
 
         // Resolve the physical frame's signature when signatures are on
         // and moduledata is recoverable. The signature attaches to the
@@ -713,33 +742,18 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         };
         let physical_sig = signatures
             .as_ref()
-            .and_then(|s| s.get(&pc).cloned())
+            .and_then(|s| s.get(&location.entry).cloned())
             .unwrap_or_default();
 
-        if frames.is_empty() {
-            writeln!(out, "0x{pc:016x}  (no function covers this PC)")?;
-        } else if frames.len() == 1 {
-            let f = &frames[0];
-            let file = f.file.as_deref().unwrap_or("?");
-            let line = f.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
-            writeln!(out, "0x{pc:016x}  {}{physical_sig}  {file}:{line}", f.name)?;
+        if matches!(args.format, OutFormat::Json) {
+            let entry = AddrEntry::Found {
+                signature: (!physical_sig.is_empty()).then_some(physical_sig.as_str()),
+                location,
+            };
+            serde_json::to_writer_pretty(&mut out, &entry)?;
+            writeln!(out)?;
         } else {
-            for (i, f) in frames.iter().enumerate() {
-                let file = f.file.as_deref().unwrap_or("?");
-                let line = f.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
-                let is_physical = i + 1 == frames.len();
-                let prefix = if is_physical {
-                    "(physical)"
-                } else {
-                    "(inlined) "
-                };
-                let sig = if is_physical {
-                    physical_sig.as_str()
-                } else {
-                    ""
-                };
-                writeln!(out, "{prefix} {}{sig}  {file}:{line}", f.name)?;
-            }
+            write_location(&mut out, &location, &physical_sig)?;
         }
         out.flush()?;
         return Ok(());
@@ -1346,6 +1360,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.goroutines {
+        // The gofunc lets the call sites' inline frames be read on Go 1.18+.
+        let pcln = match ModuleData::locate(&bin) {
+            Ok(md) => pcln.clone().with_gofunc(md.gofunc),
+            Err(_) => pcln.clone(),
+        };
         let spawns = unstrip::goroutines::find_spawns(&bin, &pcln)?;
         let filtered: Vec<&unstrip::goroutines::GoroutineSpawn> = spawns
             .iter()
@@ -1849,8 +1868,103 @@ fn write_goroutines<W: Write>(
             loc,
             spawner_w = spawner_w,
         )?;
+        // The frames at the call site, one indented line each: the function
+        // holding the call, and when the call is in inlined code, the
+        // functions it was inlined through.
+        if let Some(location) = &s.location {
+            for line in frame_lines(location, "") {
+                writeln!(w, "    {line}")?;
+            }
+        }
     }
     Ok(())
+}
+
+/// Writes the frames at one PC. A PC outside inlined code is one line: the
+/// PC, its function and its position. A PC in inlined code is a line with the
+/// PC and its offset in the physical function, then a line per frame,
+/// innermost first. `signature` is appended to the physical function's name.
+fn write_location<W: Write>(
+    w: &mut W,
+    location: &unstrip::pclntab::PcLocation,
+    signature: &str,
+) -> io::Result<()> {
+    let pc = location.pc;
+    let physical = location.frames.last().and_then(|f| f.function.as_deref());
+    if location.frames.len() == 1 {
+        let f = &location.frames[0];
+        let position = position_text(f);
+        writeln!(
+            w,
+            "0x{pc:016x}  {}{signature}  {position}",
+            physical.unwrap_or("")
+        )?;
+    } else {
+        let offset = pc - location.entry;
+        writeln!(w, "0x{pc:016x}  {}+0x{offset:x}", physical.unwrap_or(""))?;
+        for line in frame_lines(location, signature) {
+            writeln!(w, "{line}")?;
+        }
+    }
+    if location.inlining == unstrip::pclntab::Inlining::Unread {
+        writeln!(
+            w,
+            "  (inline tree not read: frames inlined at this PC, if any, are not listed)"
+        )?;
+    }
+    Ok(())
+}
+
+/// One `(inlined)` or `(physical)` line per frame, innermost first.
+fn frame_lines(location: &unstrip::pclntab::PcLocation, signature: &str) -> Vec<String> {
+    let last = location.frames.len().saturating_sub(1);
+    let mut lines = Vec::with_capacity(location.frames.len());
+    for (i, f) in location.frames.iter().enumerate() {
+        let position = position_text(f);
+        let line = if i == last {
+            let name = f.function.as_deref().unwrap_or("");
+            format!("(physical) {name}{signature}  {position}")
+        } else {
+            let name = match &f.function {
+                Some(name) => name.clone(),
+                None => format!("inlined@{i}"),
+            };
+            format!("(inlined)  {name}  {position}")
+        };
+        lines.push(line);
+    }
+    lines
+}
+
+fn position_text(frame: &unstrip::pclntab::PcFrame) -> String {
+    let file = frame.file.as_deref().unwrap_or("?");
+    match frame.line {
+        Some(line) => format!("{file}:{line}"),
+        None => format!("{file}:?"),
+    }
+}
+
+const NO_FUNCTION: &str = "no function covers this PC";
+
+/// One `--addr` or `--addr-file` answer in JSON: the PC's location, with the
+/// physical function's signature when one is known, or why there is none.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum AddrEntry<'a> {
+    Found {
+        #[serde(flatten)]
+        location: unstrip::pclntab::PcLocation,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<&'a str>,
+    },
+    Missing {
+        pc: u64,
+        error: &'static str,
+    },
+    Unparsed {
+        line: usize,
+        error: String,
+    },
 }
 
 fn write_itabs<W: Write>(

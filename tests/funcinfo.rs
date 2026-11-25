@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use unstrip::gobin::GoBinary;
 use unstrip::moduledata::ModuleData;
-use unstrip::pclntab::{ArgComp, FuncEntry, OpenDeferFormat, Pclntab, MAGIC_1_16};
+use unstrip::pclntab::{ArgComp, FuncEntry, Inlining, OpenDeferFormat, Pclntab, MAGIC_1_16};
 
 fn open(path: PathBuf) -> Option<GoBinary> {
     if path.exists() {
@@ -223,6 +223,88 @@ fn funcinfo_fixtures_across_releases() {
 }
 
 #[test]
+fn pc_location_gives_every_frame_its_own_line() {
+    // main.triple (line 40) is inlined into main.main at line 56. At a PC of
+    // triple's body the runtime reports triple at 40, then main.main at the
+    // call, read at the inline record's parentPc.
+    for (suffix, minor) in VERSIONS {
+        let Some(bin) = fixture(&format!("funcinfo.go{suffix}.stripped")) else {
+            continue;
+        };
+        let ctx = format!("go1.{minor}");
+        let p = pclntab(&bin);
+        let funcs = p.functions_with_offsets().expect("functab");
+        let main = func(&funcs, "main.main");
+        let span = p
+            .line_table(&main)
+            .into_iter()
+            .find(|s| s.line == 40 && s.file.ends_with("funcinfo.go"))
+            .expect("triple's body is inlined into main.main");
+        let pc = span.pc_hi - 1;
+        let location = p.pc_location(pc).expect("main.main covers the PC");
+        assert_eq!(location.pc, pc, "{ctx}");
+        assert_eq!(location.entry, main.address, "{ctx}");
+        assert_eq!(location.inlining, Inlining::Complete, "{ctx}");
+        let parent_pc = p.inline_leaf(&main, pc).expect("inlined pc").parent_pc;
+        let frames: Vec<(Option<&str>, Option<u32>, u64, bool)> = location
+            .frames
+            .iter()
+            .map(|f| (f.function.as_deref(), f.line, f.pc, f.inlined))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (Some("main.triple"), Some(40), pc, true),
+                (Some("main.main"), Some(56), parent_pc, false),
+            ],
+            "{ctx}"
+        );
+        for f in &location.frames {
+            assert!(
+                f.file
+                    .as_deref()
+                    .is_some_and(|f| f.ends_with("funcinfo.go")),
+                "{ctx}: {:?}",
+                f.file
+            );
+        }
+
+        // Outside inlined code there is one frame, at the PC's own line.
+        let entry = p.pc_location(main.address).expect("entry of main.main");
+        assert_eq!(entry.inlining, Inlining::Complete, "{ctx}");
+        assert_eq!(entry.frames.len(), 1, "{ctx}");
+        assert_eq!(
+            (entry.frames[0].file.clone(), entry.frames[0].line),
+            p.pc_position(main.address),
+            "{ctx}"
+        );
+
+        // From Go 1.18 the tree is reached through gofunc. Without it the
+        // inlined PC is unread and only the physical frame is listed, at the
+        // PC's own position; a PC outside inlined code is still complete.
+        let bare = Pclntab::parse(&bin).expect("parse pclntab");
+        let location = bare.pc_location(pc).expect("main.main covers the PC");
+        let want = if minor >= 18 {
+            Inlining::Unread
+        } else {
+            Inlining::Complete
+        };
+        assert_eq!(location.inlining, want, "{ctx}");
+        if minor >= 18 {
+            assert_eq!(location.frames.len(), 1, "{ctx}");
+            assert_eq!(location.frames[0].function.as_deref(), Some("main.main"));
+            assert_eq!(
+                location.frames[0].line,
+                Some(40),
+                "{ctx}: the PC's own line"
+            );
+        }
+        let entry = bare.pc_location(main.address).expect("entry of main.main");
+        assert_eq!(entry.inlining, Inlining::Complete, "{ctx}");
+    }
+}
+
+#[test]
 fn a_pc_reports_its_own_line_not_the_function_start() {
     // main.main opens on line 52 and its body runs 53..=58. Every PC the line
     // table covers resolves to that span's line, through pc_position and the
@@ -335,4 +417,79 @@ fn relift_eval_fixtures_if_present() {
         let sum = func(&funcs, "main.sum");
         assert_eq!(shape(&p.arg_info(&sum).unwrap()), "A(W8 W8 W8)");
     }
+}
+
+#[test]
+fn addr_prints_every_frame_in_text_and_json() {
+    let Some(bin) = fixture("funcinfo.go126.stripped") else {
+        return;
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/funcinfo.go126.stripped");
+    let p = pclntab(&bin);
+    let funcs = p.functions_with_offsets().expect("functab");
+    let main = func(&funcs, "main.main");
+    let span = p
+        .line_table(&main)
+        .into_iter()
+        .find(|s| s.line == 40 && s.file.ends_with("funcinfo.go"))
+        .expect("triple's body is inlined into main.main");
+    let pc = span.pc_lo;
+    let run = |args: &[&str], stdin: &str| {
+        use std::io::Write;
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_unstrip"))
+            .arg(&path)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("run unstrip");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().expect("wait for unstrip");
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let addr = format!("{pc:#x}");
+
+    let text = run(&["--addr", &addr, "--no-signatures"], "");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    assert_eq!(
+        lines[0],
+        format!("0x{pc:016x}  main.main+0x{:x}", pc - main.address)
+    );
+    assert!(lines[1].starts_with("(inlined)  main.triple  "), "{text}");
+    assert!(lines[1].ends_with("funcinfo.go:40"), "{text}");
+    assert!(lines[2].starts_with("(physical) main.main  "), "{text}");
+    assert!(lines[2].ends_with("funcinfo.go:56"), "{text}");
+
+    let json = run(&["--addr", &addr, "--no-signatures", "-f", "json"], "");
+    let v: serde_json::Value = serde_json::from_str(&json).expect("--addr json");
+    assert_eq!(v["pc"], pc);
+    assert_eq!(v["entry"], main.address);
+    assert_eq!(v["inlining"], "complete");
+    let frames = v["frames"].as_array().expect("frames");
+    assert_eq!(frames.len(), 2, "{json}");
+    assert_eq!(frames[0]["function"], "main.triple");
+    assert_eq!(frames[0]["line"], 40);
+    assert_eq!(frames[0]["inlined"], true);
+    assert_eq!(frames[1]["function"], "main.main");
+    assert_eq!(frames[1]["line"], 56);
+    assert_eq!(frames[1]["inlined"], false);
+
+    let batch = run(
+        &["--addr-file", "-", "-f", "json"],
+        &format!("{addr}\n0x1\nnot-a-pc\n"),
+    );
+    let v: serde_json::Value = serde_json::from_str(&batch).expect("--addr-file json");
+    let entries = v.as_array().expect("one entry per line");
+    assert_eq!(entries.len(), 3, "{batch}");
+    assert_eq!(entries[0]["frames"].as_array().map(|f| f.len()), Some(2));
+    assert_eq!(entries[1]["pc"], 1);
+    assert_eq!(entries[1]["error"], "no function covers this PC");
+    assert_eq!(entries[2]["line"], 3);
 }
