@@ -134,6 +134,62 @@ pub struct InlineFrame {
     pub inlined: bool,
 }
 
+/// Where a PC is in the source: every frame the Go runtime's traceback and
+/// `runtime.CallersFrames` report for it, from [`Pclntab::pc_location`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct PcLocation {
+    /// The PC asked about.
+    pub pc: u64,
+    /// Entry PC of the physical function, the one the compiler emitted the
+    /// code at `pc` for.
+    pub entry: u64,
+    /// The innermost frame first. Inlined frames, if any, come before the
+    /// physical function's frame, which is always last.
+    pub frames: Vec<PcFrame>,
+    /// Whether `frames` holds every inlined frame.
+    pub inlining: Inlining,
+}
+
+/// One frame at a PC: a function and the line it is at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct PcFrame {
+    /// The function's name as the binary stores it. None when the binary
+    /// names none (garble `-tiny` blanks names). Generic instantiations keep
+    /// their shape types (`main.Map[go.shape.int]`), which the runtime
+    /// prints as `main.Map[...]`.
+    pub function: Option<String>,
+    /// Source file of `pc`.
+    pub file: Option<String>,
+    /// The line this frame is at: the PC's own line for the innermost frame,
+    /// and for every frame outside it the line of the call it inlined.
+    pub line: Option<u32>,
+    /// The PC whose source position is `file` and `line`: the PC asked about
+    /// for the innermost frame, and an instruction of the call site (the
+    /// inline record's parentPc) for each frame outside it.
+    pub pc: u64,
+    /// True for a frame the compiler inlined into the physical function.
+    pub inlined: bool,
+}
+
+/// How much of the inline stack at a PC is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum Inlining {
+    /// The inline tree was read, or the PC is outside inlined code: the
+    /// frames are the ones the runtime reports.
+    Complete,
+    /// The inline tree could not be read, so only the physical frame is
+    /// listed, at the PC's own file and line. If the PC is in inlined code
+    /// that position is inside the inlined callee, not a line of the physical
+    /// function. Go 1.2 to 1.15 binaries are always read this way; on Go 1.18
+    /// and later it happens without [`Pclntab::with_gofunc`], and on any
+    /// release when a record of the tree does not decode.
+    Unread,
+}
+
 impl<'a> Pclntab<'a> {
     pub fn parse(bin: &'a GoBinary) -> Result<Self> {
         let data = bin.pclntab_slice();
@@ -507,6 +563,73 @@ impl<'a> Pclntab<'a> {
             inlined: false,
         });
         frames
+    }
+
+    /// Every frame at `pc`, innermost first, as the Go runtime's traceback and
+    /// `runtime.CallersFrames` report them: the inlined frames from the inline
+    /// tree (FUNCDATA_InlTree, followed through each record's parentPc), then
+    /// the physical function. Each frame carries the line it is at, so the
+    /// physical frame of a PC in inlined code is at the outermost call site.
+    /// None when no function covers `pc`.
+    ///
+    /// The tree is read on Go 1.16 and later, through each release's record
+    /// layout (Go 1.16 to 1.19, Go 1.20 and later). On Go 1.18 and later it is
+    /// addressed from gofunc, so it needs [`with_gofunc`]. Where it cannot be
+    /// read, [`PcLocation::inlining`] is [`Inlining::Unread`] and only the
+    /// physical frame is listed; see there.
+    ///
+    /// Frames of compiler-generated wrappers are listed. The runtime leaves
+    /// them out of a traceback.
+    ///
+    /// [`with_gofunc`]: Self::with_gofunc
+    pub fn pc_location(&self, pc: u64) -> Option<PcLocation> {
+        let func = self.func_entry_at(pc)?;
+        let physical_name = (!func.name.is_empty()).then(|| func.name.clone());
+        let (chain, whole) = self.read_inline_chain(&func, pc);
+        if !whole {
+            let (file, line) = self.pc_position(pc);
+            let physical = PcFrame {
+                function: physical_name,
+                file,
+                line,
+                pc,
+                inlined: false,
+            };
+            return Some(PcLocation {
+                pc,
+                entry: func.address,
+                frames: vec![physical],
+                inlining: Inlining::Unread,
+            });
+        }
+        let mut frames = Vec::with_capacity(chain.len() + 1);
+        // Each frame's position is read at the PC of its own level: the PC
+        // asked about, then the parentPc of every record walked so far.
+        let mut frame_pc = pc;
+        for call in chain {
+            frames.push(PcFrame {
+                function: (!call.func_name.is_empty()).then_some(call.func_name),
+                file: call.file,
+                line: call.line,
+                pc: frame_pc,
+                inlined: true,
+            });
+            frame_pc = call.parent_pc;
+        }
+        let (file, line) = self.pc_position(frame_pc);
+        frames.push(PcFrame {
+            function: physical_name,
+            file,
+            line,
+            pc: frame_pc,
+            inlined: false,
+        });
+        Some(PcLocation {
+            pc,
+            entry: func.address,
+            frames,
+            inlining: Inlining::Complete,
+        })
     }
 
     fn resolve_file(&self, cu_offset: usize, file_idx: usize) -> Option<String> {
@@ -938,6 +1061,19 @@ mod tests {
         assert_eq!(pcln.lookup(0x101f).map(|f| f.name), Some("main.b".into()));
         assert_eq!(pcln.lookup(0x1020).map(|f| f.name), None, "past the end PC");
         assert_eq!(pcln.pc_position(0x1004), (Some("a.go".into()), Some(10)));
+        let location = pcln.pc_location(0x1014).expect("a function covers 0x1014");
+        assert_eq!(
+            (location.entry, location.inlining),
+            (0x1010, Inlining::Unread),
+            "the Go 1.2 to 1.15 inline tree is not read"
+        );
+        let frames: Vec<(Option<&str>, Option<u32>, u64, bool)> = location
+            .frames
+            .iter()
+            .map(|f| (f.function.as_deref(), f.line, f.pc, f.inlined))
+            .collect();
+        assert_eq!(frames, [(Some("main.b"), Some(20), 0x1014, false)]);
+        assert_eq!(pcln.pc_location(0x1020), None, "past the end PC");
         let entry = pcln.func_entry_at(0x1010).expect("func entry");
         let fields = pcln.func_fields(&entry).expect("func fields");
         assert_eq!((fields.pcfile, fields.pcln, fields.cu_offset), (96, 104, 0));

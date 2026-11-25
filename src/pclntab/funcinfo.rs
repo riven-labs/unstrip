@@ -600,25 +600,45 @@ impl<'a> Pclntab<'a> {
 
     /// The inlined-call chain at absolute `pc`, innermost first, excluding the
     /// physical function. Empty outside inlined code or when the inline tree
-    /// is unreachable (Go 1.18+ without gofunc).
+    /// is unreachable (Go 1.18+ without gofunc). A chain cut short by a record
+    /// that does not decode is returned up to the cut.
     pub(crate) fn inline_chain(&self, func: &FuncEntry, pc: u64) -> Vec<InlineLeaf> {
+        self.read_inline_chain(func, pc).0
+    }
+
+    /// [`Self::inline_chain`], and whether that chain is whole. It is not when
+    /// the PC is in inlined code but the tree, or one of its records, cannot
+    /// be read, and it never is on Go 1.2 to 1.15, whose inline trees are not
+    /// decoded. Outside inlined code the chain is empty and whole.
+    pub(crate) fn read_inline_chain(&self, func: &FuncEntry, pc: u64) -> (Vec<InlineLeaf>, bool) {
         let mut out = Vec::new();
+        if self.layout == Layout::Go12 {
+            return (out, false);
+        }
         let Some(fields) = self.func_fields(func) else {
-            return out;
+            return (out, false);
         };
         let Some(mut off) = self.pc_offset(func, pc) else {
-            return out;
+            return (out, false);
         };
+        // From Go 1.16 a function with inlined code always has this table, so
+        // a function without one has nothing inlined into it.
         let Some(idx_table) = self.pcdata_table(func, &fields, PCDATA_INL_TREE_INDEX) else {
-            return out;
-        };
-        let Some(tree) = self.funcdata(func, FUNCDATA_INL_TREE) else {
-            return out;
+            return (out, true);
         };
         let mut idx = self.pcvalue(idx_table, off, func.size).unwrap_or(-1);
-        while idx >= 0 && out.len() < MAX_INLINE_DEPTH {
+        if idx < 0 {
+            return (out, true);
+        }
+        let Some(tree) = self.funcdata(func, FUNCDATA_INL_TREE) else {
+            return (out, false);
+        };
+        while idx >= 0 {
+            if out.len() == MAX_INLINE_DEPTH {
+                return (out, false);
+            }
             let Some(rec) = self.inline_record(tree, idx) else {
-                break;
+                return (out, false);
             };
             let (file, line) = self.file_line_at_off(&fields, off, func.size);
             let func_name = if rec.name_off > 0 {
@@ -637,12 +657,12 @@ impl<'a> Pclntab<'a> {
             // The record's parentPc must lie inside the physical function; a
             // value outside it is corruption, so stop rather than follow it.
             if rec.parent_pc < 0 || rec.parent_pc as u64 >= func.size {
-                break;
+                return (out, false);
             }
             off = rec.parent_pc as u64;
             idx = self.pcvalue(idx_table, off, func.size).unwrap_or(-1);
         }
-        out
+        (out, true)
     }
 
     /// The innermost inlined call covering absolute `pc` in `func`: the inlined

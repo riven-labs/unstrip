@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use crate::error::Error;
 use crate::gobin::{Arch, GoBinary, SectionKind};
-use crate::pclntab::{Function, Pclntab};
+use crate::pclntab::{Function, PcLocation, Pclntab};
 use crate::Result;
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +54,12 @@ pub struct GoroutineSpawn {
     /// pointer is outside any mapped section" without re-deriving the
     /// distinction from the Option fields.
     pub resolution: Resolution,
+    /// Every frame at the call site, innermost first, from
+    /// [`Pclntab::pc_location`]: when the `go` or `defer` statement sits in
+    /// inlined code, the functions it was inlined through. The inline tree of
+    /// a Go 1.18 or later binary is read only when the [`Pclntab`] passed to
+    /// [`find_spawns`] has its gofunc.
+    pub location: Option<PcLocation>,
 }
 
 /// Outcome of attempting to resolve a goroutine spawn's funcval target.
@@ -196,6 +202,7 @@ fn scan_amd64(
                 let (target_addr, target_name, resolution) =
                     resolve_amd64_target(bin, text_bytes, text_start_va, i, by_addr);
                 let (file, line) = pcln.pc_position(call_site_va);
+                let location = pcln.pc_location(call_site_va);
                 out.push(GoroutineSpawn {
                     call_site: call_site_va,
                     spawner: spawner_name.to_string(),
@@ -204,6 +211,7 @@ fn scan_amd64(
                     file,
                     line,
                     resolution,
+                    location,
                 });
             }
         }
@@ -298,6 +306,7 @@ fn scan_arm64(
                 let (target_addr, target_name, resolution) =
                     resolve_arm64_target(bin, text_bytes, text_start_va, i, by_addr);
                 let (file, line) = pcln.pc_position(call_site_va);
+                let location = pcln.pc_location(call_site_va);
                 out.push(GoroutineSpawn {
                     call_site: call_site_va,
                     spawner: spawner_name.to_string(),
@@ -306,6 +315,7 @@ fn scan_arm64(
                     file,
                     line,
                     resolution,
+                    location,
                 });
             }
         }

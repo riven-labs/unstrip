@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use unstrip::gobin::GoBinary;
 use unstrip::itabs;
 use unstrip::moduledata::ModuleData;
-use unstrip::pclntab::{Pclntab, MAGIC_1_2};
+use unstrip::pclntab::{Inlining, Pclntab, MAGIC_1_2};
 use unstrip::types::{self, KindData};
 
 const RELEASES: [(&str, u32); 14] = [
@@ -207,6 +207,30 @@ fn reads_types_and_itabs_from_go_1_7_to_1_15() {
                     "{name}: {concrete}.{method} slot"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn pc_location_lists_only_the_physical_frame_before_go_1_16() {
+    // The inline tree is not decoded on these releases, so every PC is unread:
+    // one frame, the physical function, at the PC's own position. Inside the
+    // fmt.Println inlined into main.run (Go 1.12+) that position is fmt's.
+    for (name, _) in fixtures() {
+        let bin = open(&name);
+        let pcln = Pclntab::parse(&bin).unwrap_or_else(|e| panic!("{name}: pclntab: {e}"));
+        let funcs = pcln.functions_with_offsets().expect("walk functab");
+        let run = funcs.iter().find(|f| f.name == "main.run").unwrap();
+        for span in pcln.line_table(run) {
+            let location = pcln.pc_location(span.pc_lo).expect("main.run covers it");
+            assert_eq!(location.inlining, Inlining::Unread, "{name}");
+            assert_eq!(location.entry, run.address, "{name}");
+            assert_eq!(location.frames.len(), 1, "{name}");
+            let frame = &location.frames[0];
+            assert_eq!(frame.function.as_deref(), Some("main.run"), "{name}");
+            assert!(!frame.inlined, "{name}");
+            assert_eq!(frame.file.as_deref(), Some(span.file.as_str()), "{name}");
+            assert_eq!(frame.line, Some(span.line), "{name}");
         }
     }
 }

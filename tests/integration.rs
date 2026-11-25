@@ -1974,6 +1974,14 @@ fn goroutines_finds_runtime_newproc_sites() {
         "real Go binaries call runtime.newproc at least 3 times for GC workers; got {}",
         spawns.len()
     );
+    // Each call site carries its frames, the function holding the call last.
+    for s in &spawns {
+        let location = s.location.as_ref().expect("a function covers the call");
+        assert!(location.entry <= s.call_site, "{:#x}", s.call_site);
+        let first = &location.frames[0];
+        assert_eq!((&first.file, first.line), (&s.file, s.line));
+        assert!(!location.frames.last().unwrap().inlined);
+    }
     // At least one of them should resolve to a known runtime function.
     let resolved = spawns.iter().filter(|s| s.target_name.is_some()).count();
     assert!(
