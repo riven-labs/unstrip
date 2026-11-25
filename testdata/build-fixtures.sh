@@ -123,6 +123,58 @@ build_typeset_version() {
 build_typeset_version go1.16.15 typeset.go116.stripped
 build_typeset_version go1.17.13 typeset.go117.stripped
 
+# typeset.go again with Go 1.2 to 1.15, which share one pclntab layout (magic
+# 0xfffffffb) but differ in _func, moduledata (types from 1.7, textsectmap from
+# 1.8) and itab (fun moved in 1.10). Go 1.8 and older Windows builds keep the
+# pclntab inside .text. Writes typeset.go1NN.<goos>-<goarch>.stripped[.exe].
+# A release is taken from ~/sdk/goX.Y.Z (where `goX.Y.Z download` puts it,
+# and where a go.dev/dl archive can be unpacked by hand) or from its
+# `goX.Y.Z` wrapper on PATH.
+# Go 1.5 cross-compiles to every target below; Go 1.4 and older build only for
+# the host, so their Linux fixtures need a Linux host (or WSL) with the
+# linux-amd64 archive. Same optional-skip contract.
+build_typeset_old() {
+    local version=$1
+    local sdk="$HOME/sdk/go$version"
+    local gobin goroot
+    if [ -x "$sdk/bin/go" ] || [ -x "$sdk/bin/go.exe" ]; then
+        # An unpacked archive of Go 1.4 or older reports its compiled-in
+        # GOROOT, not where it sits, so name it.
+        gobin="$sdk/bin/go"
+        goroot=$sdk
+    elif command -v "go$version" >/dev/null 2>&1; then
+        gobin="go$version"
+        goroot=$("$gobin" env GOROOT)
+    else
+        echo "go$version not installed; skipping its typeset fixtures"
+        return
+    fi
+    local tag minor hostos
+    tag=go$(echo "$version" | awk -F. '{print $1 $2}')
+    minor=$(echo "$version" | cut -d. -f2)
+    hostos=$(GOROOT=$goroot "$gobin" env GOHOSTOS)
+    local target
+    for target in linux/amd64 linux/386 windows/amd64 windows/386; do
+        local goos=${target%/*}
+        local goarch=${target#*/}
+        if [ "$minor" -lt 5 ] && { [ "$goos" != "$hostos" ] || [ "$goarch" != amd64 ]; }; then
+            continue
+        fi
+        local out="typeset.$tag.$goos-$goarch.stripped"
+        if [ "$goos" = windows ]; then
+            out="$out.exe"
+        fi
+        echo "building $out (go$version)"
+        GOROOT=$goroot GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 GO111MODULE=off \
+            "$gobin" build -ldflags='-s -w' -o "$out" typeset.go
+    done
+}
+
+for version in 1.2.2 1.3.3 1.4.3 1.5.4 1.6.4 1.7.6 1.8.7 1.9.7 1.10.8 1.11.13 \
+    1.12.17 1.13.15 1.14.15 1.15.15; do
+    build_typeset_old "$version"
+done
+
 # funcinfo.go pins the per-function metadata readers (line table, ArgInfo,
 # open-coded defers, inline tree, wrapper funcID) on each release whose layout
 # differs: 1.17 (pre-1.18 _func, Go 1.14 defer record), 1.18 (no startLine,
