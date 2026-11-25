@@ -7,6 +7,31 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ## [Unreleased]
 
+### Added
+
+- Go 1.2 to 1.15 binaries are read (pclntab magic `0xfffffffb`): every
+  function with its file and line, PC lookups, line tables, SP deltas and
+  PCDATA. On Go 1.2 to 1.15 builds for Linux, Windows and macOS (amd64, 386,
+  arm, arm64) the function table matches `debug/gosym` entry for entry.
+  Windows builds from Go 1.8 and older keep the table inside `.text` and used
+  to fail with "no pclntab section found"; they are found and read too. The
+  readers built on funcdata (inline tree, ArgInfo, defer records, stack
+  objects, pointer maps) return `None` on those releases.
+- Types and itabs of Go 1.7 to 1.15 binaries, through two more moduledata
+  layouts: `moduledata::Layout::V107` (Go 1.7) and `V108` (Go 1.8 to 1.15,
+  with `textsectmap`). Struct sizes and field offsets match DWARF and the itab
+  count matches `go tool nm` on every build checked. Go 1.7 to 1.9 leave the
+  itab method slots zero for the runtime to fill; each slot is resolved from
+  the concrete type's method table the way the runtime does it. Go 1.7 and
+  1.8 store an embedded field with an empty name and no flag; it is flagged
+  embedded and named after its type, as reflect names it.
+
+### Changed
+
+- `Pclntab::parse` and `GoBinary::parse` no longer return
+  `UnsupportedPclntabVersion`, and `pclntab::unsupported_pre118_magic`
+  returns `None` for every magic.
+
 ## [2.1.0] - 2026-11-25
 
 ### Added
