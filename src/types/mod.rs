@@ -222,7 +222,21 @@ pub fn recover_all(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
 /// typelinks walk missed, matching GoReSym's catalog breadth for users
 /// who want one-for-one parity.
 pub fn recover_with_mode(bin: &GoBinary, md: &ModuleData, mode: Mode) -> Result<Vec<Type>> {
-    let mut types = recover_focused(bin, md)?;
+    recover_with_roots(bin, md, mode, &[])
+}
+
+/// [`recover_with_mode`], with `roots` walked as if typelinks listed them.
+/// For types a caller found elsewhere, such as the parameters of a method's
+/// funcType: they and everything they refer to come back decoded the same
+/// way as the linked types (field offsets included). Roots outside the types
+/// region are ignored.
+pub fn recover_with_roots(
+    bin: &GoBinary,
+    md: &ModuleData,
+    mode: Mode,
+    roots: &[u64],
+) -> Result<Vec<Type>> {
+    let mut types = recover_focused(bin, md, roots)?;
     if matches!(mode, Mode::Full) {
         let seen: std::collections::HashSet<u64> = types.iter().map(|t| t.addr).collect();
         let extras = linear_scan_types_region(bin, md, &seen);
@@ -436,7 +450,7 @@ fn is_plausible_descriptor(bin: &GoBinary, md: &ModuleData, t: &Type) -> bool {
 /// header, resolve the name, dispatch to a kind-specific decoder, then queue
 /// any addresses the decoder produced and parse those too. Deduplicated by
 /// address; bounded by the [types, etypes) region.
-fn recover_focused(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
+fn recover_focused(bin: &GoBinary, md: &ModuleData, roots: &[u64]) -> Result<Vec<Type>> {
     let ps = bin.pointer_size();
     if !matches!(ps, 4 | 8) || !bin.little_endian {
         // The kind-specific readers below (struct fields, map buckets, func
@@ -464,6 +478,7 @@ fn recover_focused(bin: &GoBinary, md: &ModuleData) -> Result<Vec<Type>> {
     // The linked types: `typelinks`, or from Go 1.27 the descriptors walked
     // in place ([`ModuleData::type_addrs`]).
     let mut queue: Vec<u64> = md.type_addrs(bin)?;
+    queue.extend_from_slice(roots);
     let mut seen: std::collections::BTreeMap<u64, Type> = std::collections::BTreeMap::new();
 
     while let Some(addr) = queue.pop() {

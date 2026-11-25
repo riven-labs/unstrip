@@ -76,6 +76,11 @@ const UNCOMMON_TYPE_SIZE: usize = 16;
 pub struct RecoveredMethod {
     /// Receiver type name (the type that owns this method).
     pub receiver: String,
+    /// Address of the receiver's type descriptor, the type whose method
+    /// table this came from. Zero for a method read from an itab: the itab
+    /// slot receives the interface's data word, whose type the slot does not
+    /// record.
+    pub receiver_type: u64,
     /// Method name. Empty if the name offset did not resolve.
     pub name: String,
     /// Absolute address of the funcType describing the method's signature
@@ -183,6 +188,7 @@ pub fn recover_methods_from_itabs(
             };
             out.push(RecoveredMethod {
                 receiver: itab.concrete_name.clone(),
+                receiver_type: 0,
                 name: slot.interface_method.clone(),
                 mtyp_addr: iface_method.typ,
                 ifn_pc: 0,
@@ -324,6 +330,7 @@ pub fn methods_for_type(bin: &GoBinary, md: &ModuleData, t: &Type) -> Result<Vec
 
         out.push(RecoveredMethod {
             receiver: t.name.clone(),
+            receiver_type: t.addr,
             name,
             mtyp_addr,
             ifn_pc,
@@ -508,6 +515,63 @@ pub fn signatures_by_pc(
             // first rendered signature is the canonical one.
             out.entry(m.tfn_pc).or_insert(sig);
         }
+    }
+    out
+}
+
+/// A method body's parameters and results as type descriptor addresses, for
+/// callers that build a typed prototype rather than a Go-syntax string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct Prototype {
+    /// The receiver's type, the method body's first argument. None when the
+    /// method came from an itab: the body then receives the interface's data
+    /// word, one pointer-sized value whose type the itab does not record.
+    pub receiver: Option<u64>,
+    pub params: Vec<u64>,
+    pub results: Vec<u64>,
+    /// The last parameter is the `...T` one, stored as a `[]T`.
+    pub variadic: bool,
+}
+
+/// Build a PC -> prototype map for every method whose funcType decodes, keyed
+/// like [`signatures_by_pc`] by the direct-call body (`tfn_pc`). The first
+/// method seen for a PC wins, so pass the uncommon-table methods first: they
+/// carry the receiver's type.
+pub fn prototypes_by_pc(
+    methods: &[RecoveredMethod],
+    cache: &mut TypeCache<'_>,
+) -> HashMap<u64, Prototype> {
+    let mut out = HashMap::with_capacity(methods.len());
+    for m in methods {
+        if m.tfn_pc == 0 || m.mtyp_addr == 0 || out.contains_key(&m.tfn_pc) {
+            continue;
+        }
+        let Some(mtyp) = cache.get(m.mtyp_addr) else {
+            continue;
+        };
+        let KindData::Func {
+            in_count,
+            out_count,
+            variadic,
+            in_types,
+            out_types,
+        } = &mtyp.kind_data
+        else {
+            continue;
+        };
+        // A funcType whose parameter array did not decode in full would give
+        // a prototype with arguments missing.
+        if in_types.len() != *in_count as usize || out_types.len() != *out_count as usize {
+            continue;
+        }
+        let prototype = Prototype {
+            receiver: (m.receiver_type != 0).then_some(m.receiver_type),
+            params: in_types.clone(),
+            results: out_types.clone(),
+            variadic: *variadic,
+        };
+        out.insert(m.tfn_pc, prototype);
     }
     out
 }
