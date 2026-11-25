@@ -41,7 +41,7 @@ struct Args {
     #[arg(long, help_heading = "Analysis modes")]
     itabs: bool,
 
-    /// Recover printable string literals from read-only data.
+    /// Exact string literals (address, length) and the functions that use them.
     #[arg(long, help_heading = "Analysis modes")]
     strings: bool,
 
@@ -139,16 +139,16 @@ struct Args {
     )]
     data_count: Option<usize>,
 
-    /// With --strings: minimum printable-run length.
-    #[arg(
-        long,
-        value_name = "N",
-        default_value_t = 8,
-        help_heading = "Mode modifiers"
-    )]
-    strings_min: usize,
+    /// With --strings: print printable runs of read-only data instead of
+    /// literals (the output of 2.1 and earlier).
+    #[arg(long, help_heading = "Mode modifiers")]
+    strings_runs: bool,
 
-    /// With --strings: cap emitted runs. Default unlimited.
+    /// With --strings: minimum length in bytes. Default 1, or 8 with --strings-runs.
+    #[arg(long, value_name = "N", help_heading = "Mode modifiers")]
+    strings_min: Option<usize>,
+
+    /// With --strings: cap emitted strings. Default unlimited.
     #[arg(long, value_name = "N", help_heading = "Mode modifiers")]
     strings_max: Option<usize>,
 
@@ -394,6 +394,7 @@ Examples
   unstrip <bin> --itabs                interface dispatch table
   unstrip <bin> --format ghidra > apply.py
   unstrip <bin> --addr 0x4a3c40        PC -> function:file:line
+  unstrip <bin> --strings --filter http  string literals and the code using them
   unstrip <bin> --data-at 0x520180 --data-as ifaces --data-count 4
   unstrip <bin> --symbols-as elf -o named.bin
   unstrip <new> --diff <old> --port-symbols ghidra > port.py
@@ -403,6 +404,7 @@ Analysis modes  --info --buildinfo --types --itabs --strings --capabilities
                 --xref-writers --data-at --addr --addr-file --diff
                 --detect-garble --reflect-names
 Modifiers       --degarble --types-full --behavioral --show --from --to --depth
+                --strings-runs --strings-min --strings-max
 Rewrite        --symbols-as <elf|pe>  [-o PATH | --in-place --yes]
 Integration     --install-plugin <ida|ghidra|binja>
                 --dispatch-resolver ghidra
@@ -963,9 +965,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if args.strings {
+    if args.strings && args.strings_runs {
         let opts = unstrip::strings::Options {
-            min_len: args.strings_min,
+            min_len: args.strings_min.unwrap_or(8),
             max: args.strings_max,
             filter: args.filter.clone(),
         };
@@ -980,6 +982,39 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     writeln!(out, "0x{:016x}  {:<14}  {}", s.addr, s.section, s.text)?;
                 }
             }
+            f => return Err(format!("--strings does not support --format {:?}", f).into()),
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
+    if args.strings {
+        let mut report = unstrip::strings::literals(&bin, &pcln)?;
+        if !report.code_scanned {
+            eprintln!(
+                "unstrip: no instruction scanner for {} yet, so no literal is proven; \
+                 --strings-runs prints the printable runs",
+                bin.arch.as_str()
+            );
+        }
+        let min_len = args.strings_min.unwrap_or(1) as u64;
+        report.literals.retain(|l| {
+            let wanted = match (&args.filter, &l.text) {
+                (None, _) => true,
+                (Some(needle), Some(text)) => text.contains(needle.as_str()),
+                (Some(_), None) => false,
+            };
+            l.len >= min_len && wanted
+        });
+        if let Some(cap) = args.strings_max {
+            report.literals.truncate(cap);
+        }
+        match args.format {
+            OutFormat::Json => {
+                serde_json::to_writer_pretty(&mut out, &report)?;
+                writeln!(out)?;
+            }
+            OutFormat::Text => write_literals(&mut out, &report.literals)?,
             f => return Err(format!("--strings does not support --format {:?}", f).into()),
         }
         out.flush()?;
@@ -1948,6 +1983,45 @@ fn write_buildinfo<W: Write>(w: &mut W, info: &BuildInfo) -> io::Result<()> {
             .min(30);
         for s in &info.settings {
             writeln!(w, "  {:<k$}  {}", s.key, s.value, k = max_key)?;
+        }
+    }
+    Ok(())
+}
+
+/// One literal per line, then one indented line per use and per static
+/// header: `0x<addr>  <len>  "<text>"`, `  <pc>  <function>  <site>`,
+/// `  <addr>  <section>  header`.
+fn write_literals(out: &mut impl Write, literals: &[unstrip::strings::Literal]) -> io::Result<()> {
+    for l in literals {
+        let shown = match (&l.text, &l.hex) {
+            (Some(text), _) => format!("{text:?}"),
+            (None, Some(hex)) => format!("hex:{hex}"),
+            (None, None) => String::new(),
+        };
+        let origin = match l.origin {
+            unstrip::strings::Origin::BuildInfo => "  [buildinfo]",
+            _ => "",
+        };
+        writeln!(out, "0x{:016x}  {:>6}  {shown}{origin}", l.addr, l.len)?;
+        for u in &l.uses {
+            let site = match u.site {
+                unstrip::strings::Site::Registers => "registers",
+                unstrip::strings::Site::Store => "store",
+                unstrip::strings::Site::Header => "header",
+                _ => "use",
+            };
+            let function = match &u.function {
+                Some(name) => format!("{name}+0x{:x}", u.pc - u.function_addr),
+                None => format!(
+                    "func@0x{:x}+0x{:x}",
+                    u.function_addr,
+                    u.pc - u.function_addr
+                ),
+            };
+            writeln!(out, "    0x{:016x}  {function}  {site}", u.pc)?;
+        }
+        for h in &l.headers {
+            writeln!(out, "    0x{:016x}  {}  static header", h.addr, h.section)?;
         }
     }
     Ok(())
