@@ -668,6 +668,56 @@ impl<'a> Pclntab<'a> {
         read_cstring(self.data, abs).ok()
     }
 
+    /// Every source file name in the file table, in table order and each once,
+    /// the list `debug/gosym` builds its file map from. From Go 1.16 the table
+    /// is `nfiles` names back to back; before, a count then name offsets.
+    pub fn files(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut push = |name: String| {
+            if seen.insert(name.clone()) {
+                names.push(name);
+            }
+        };
+        match self.layout {
+            Layout::Go12 => {
+                let n = read_u32(self.data, self.filetab_off, self.little_endian).unwrap_or(0);
+                for i in 1..n as usize {
+                    let Some(entry) = i
+                        .checked_mul(4)
+                        .and_then(|o| o.checked_add(self.filetab_off))
+                    else {
+                        break;
+                    };
+                    let Ok(name_off) = read_u32(self.data, entry, self.little_endian) else {
+                        break;
+                    };
+                    if let Ok(name) = read_cstring(self.data, name_off as usize) {
+                        push(name);
+                    }
+                }
+            }
+            Layout::Pre118 | Layout::Modern => {
+                let ps = self.ptrsize as usize;
+                let nfiles =
+                    read_uintptr(self.data, 8 + ps, ps, self.little_endian).unwrap_or(0) as usize;
+                let end = self.pctab_off.min(self.data.len());
+                let mut pos = self.filetab_off;
+                for _ in 0..nfiles {
+                    if pos >= end {
+                        break;
+                    }
+                    let Ok(name) = read_cstring(self.data, pos) else {
+                        break;
+                    };
+                    pos += name.len() + 1;
+                    push(name);
+                }
+            }
+        }
+        names
+    }
+
     pub fn text_start(&self) -> u64 {
         self.text_start
     }
