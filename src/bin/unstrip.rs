@@ -1117,12 +1117,13 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            None => {
-                writeln!(
+            None => match args.format {
+                OutFormat::Json => writeln!(out, "{{}}")?,
+                _ => writeln!(
                     out,
                     "no reflected-name table found (not garbled, or it carries none)"
-                )?;
-            }
+                )?,
+            },
         }
         out.flush()?;
         return Ok(());
