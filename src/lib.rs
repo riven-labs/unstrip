@@ -11,6 +11,7 @@ pub mod fingerprint;
 pub mod funcsig;
 pub mod garble;
 pub mod gobin;
+pub mod goresym;
 pub mod goroutines;
 pub mod inline;
 pub mod itabs;
