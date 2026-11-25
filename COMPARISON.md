@@ -28,7 +28,7 @@ Sourced from each tool's README and repository as of late May 2026. Verifiable b
 
 **`--addr-file` batch reverse-lookup.** One pclntab parse, N PC lookups, stdin supported. Useful for resolving every PC in a crash dump in a single pass.
 
-**Built-in Ghidra, IDA, and Binary Ninja exporters via `--format`.** Emits a script that creates functions, sets names, attaches `file:line` comments, and declares struct types with field offsets in the disassembler's namespace. `--install-plugin <ida|ghidra|binja>` drops a wrapper plugin into the user's RE-tool plugin directory.
+**Built-in Ghidra, IDA, and Binary Ninja exporters via `--format`.** Emits a script that creates functions, sets names, attaches the signature and `file:line` as comments, declares typed struct types at the recorded field offsets, and labels itabs, type descriptors and moduledata. The Ghidra script also applies method prototypes with the storage Go's ABI gives them; it is checked headless in CI. The IDA and Binary Ninja scripts are not run in those tools. `--install-plugin <ida|ghidra|binja>` drops a wrapper plugin into the user's RE-tool plugin directory.
 
 **`--dispatch-resolver ghidra`.** Emits a Ghidra script that, when invoked at a virtual call site, prints every recovered itab whose method table contains the dereferenced slot.
 

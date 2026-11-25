@@ -26,12 +26,50 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
   the concrete type's method table the way the runtime does it. Go 1.7 and
   1.8 store an embedded field with an empty name and no flag; it is flagged
   embedded and named after its type, as reflect names it.
+- The Ghidra script applies method prototypes: typed parameters and results
+  with custom storage that follows Go's ABI (registers on amd64 from Go 1.17,
+  the stack on 386 and older amd64), marked `abi-internal` or `abi0` when the
+  compiler spec has it. IDA and Binary Ninja keep the signature in the comment.
+- The scripts label itabs (`go:itab.*T,I`), type descriptors (`type:T`) and
+  `runtime.firstmoduledata` under the linker's names (`go.itab.` and `type.`
+  before Go 1.20).
+- `export::write` and `export::Export` take the prototypes, itabs, moduledata
+  address, pointer size, ABI and linker naming; `write_script` is unchanged.
+  `funcsig::prototypes_by_pc`, `funcsig::Prototype`,
+  `RecoveredMethod::receiver_type` and `types::recover_with_roots` support them.
+- A CI job runs the Ghidra script headless (Ghidra 12.2, PyGhidra) on Go 1.26
+  amd64 and 386 and Go 1.15 amd64 builds and fails on any failed declaration,
+  function, prototype or label.
 
 ### Changed
 
 - `Pclntab::parse` and `GoBinary::parse` no longer return
   `UnsupportedPclntabVersion`, and `pclntab::unsupported_pre118_magic`
   returns `None` for every magic.
+- Struct declarations in the scripts have typed fields: `GoString`,
+  `GoSlice`, `GoIface` and `GoEface` for strings, slices and interfaces,
+  nested structs by value (declared first), pointers to the declared type and
+  arrays of the element type. They used to be byte arrays and `void *`. Each
+  declaration is packed with Go's padding spelled out, so 386 offsets hold in
+  tools that align 8-byte fields to 8, and each script checks the parsed size
+  against the recorded one. Ghidra declarations use `intN_t`: the golang
+  compiler spec makes `int` 8 bytes.
+- Ghidra and Binary Ninja labels are the Go names; Ghidra keeps the Go type
+  name as each declared type's description.
+- The ABI0 side of each ABI wrapper pair, which shares its pclntab name with
+  the other side, is labeled `name.abi0` as the Go linker labels it, and both
+  comments give the other address.
+- Every script ends with a count per kind and `unstrip: done, N failures`.
+  The declaration helper is `_type(name, decl, size, go_name)`; it was
+  `_struct(decl)`.
+
+### Fixed
+
+- The Ghidra script created no functions in a program Ghidra had not
+  analyzed: it called `createFunction` without a body, which Ghidra refuses
+  ("Function body must contain the entrypoint"), so 2136 of 2137 functions
+  failed on a Go 1.26 build. It disassembles the entry and lets Ghidra find
+  the body.
 
 ## [2.1.0] - 2026-11-25
 

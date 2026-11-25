@@ -35,7 +35,7 @@ Method signatures attached to recovered symbols. Every method on a type the Go l
 
 Inlined call stacks, not just leaf functions. `--addr` returns the full inline tree from `FUNCDATA_InlTree`, so a PC that lands in inlined code resolves to the chain that led there, with file and line for every frame.
 
-Built-in Ghidra, IDA, and Binary Ninja Python exporters via `--format`, with C struct decls and correct field offsets. One Rust binary emits scripts for all three RE tools; `--install-plugin <ida|ghidra|binja>` drops a wrapper plugin into the user's plugin directory.
+Built-in Ghidra, IDA, and Binary Ninja Python exporters via `--format`, with typed C struct declarations at the recorded field offsets, labels for itabs and type descriptors, and method prototypes in Ghidra. One Rust binary emits scripts for all three RE tools; `--install-plugin <ida|ghidra|binja>` drops a wrapper plugin into the user's plugin directory.
 
 `--data-at <addr>` interprets bytes at a data address through the recovered itab table and function table. Iface headers resolve to concrete type plus dispatched method body. Slice headers expand to ptr/len/cap with the data pointer symbolized. String headers print a quoted preview.
 
@@ -196,16 +196,22 @@ If the runtime addresses came from an ASLR-rebased process, pass `--rebase <DELT
 
 ### Apply to your RE tool of choice
 
-`--format ida`, `--format ghidra`, or `--format binja` emits a Python script that, run inside that tool, applies every recovered function (with file:line as a function comment) **and every recovered struct type** as a C declaration the tool's parser can ingest:
+`--format ida`, `--format ghidra`, or `--format binja` emits a Python script that, run inside that tool, applies every recovered function (with the Go name, signature and file:line as the function comment), every recovered struct type as a C declaration, and labels for the itabs, the type descriptors and `runtime.firstmoduledata`. The Ghidra script also applies method prototypes:
 
 ```
 $ unstrip ./samples/myapp --format ghidra > apply.py
-# In Ghidra: Window -> Script Manager -> Run apply.py
+# In a PyGhidra-started Ghidra: Window -> Script Manager -> Run apply.py
 ```
 
-The Ghidra script is Python 3 (`@runtime PyGhidra`), so Ghidra has to be started with PyGhidra (`support/pyghidraRun`); Ghidra 12 ships no Jython.
+The Ghidra script is Python 3 (`@runtime PyGhidra`), so Ghidra has to be started with PyGhidra (`support/pyghidraRun`, or `support/pyghidraRun -H` for headless); Ghidra 12 ships no Jython. Every script ends with one count per kind of item and `unstrip: done, N failures`.
 
-Function names sanitize down to valid disassembler labels; the original Go name (with parens, brackets, generics arguments) is preserved as a function comment. Struct names become C identifiers (`errors.errorString` is declared as `errors_errorString`). The declarations carry sizes and offsets, not Go types: integer and pointer fields get a C type of the right width (pointers are `void *`), and strings, slices, interfaces, and nested structs are byte arrays of their size.
+Struct names become C identifiers (`errors.errorString` is declared as `errors_errorString`); Ghidra keeps the Go name as the type's description. Fields are typed: strings, slices and interfaces use the declared `GoString`, `GoSlice`, `GoIface` and `GoEface`, a nested struct appears by value and is declared first, a pointer points to the declared type, and an array has its element type. Every declaration is packed with Go's padding spelled out, so each field sits at the recorded offset on 386 as on amd64, and the script checks each parsed size against the recorded one.
+
+Ghidra and Binary Ninja get function names as Go spells them (Ghidra with any space as `_`); IDA gets them with Go's punctuation mapped to `_`. An ABI wrapper shares its target's name in the pclntab; the ABI0 side of each pair is labeled `name.abi0`, as the Go linker names it, and the comment gives the other address.
+
+Prototypes are Ghidra only. A method with a recovered signature gets typed parameters and results with custom storage that follows Go's ABI: registers on amd64 from Go 1.17, the stack on 386 and on older amd64. Go's register ABI is no C calling convention, so the storage is set value by value; the function is marked `abi-internal` or `abi0` when the program's compiler spec has that convention. A method that would pass a padded struct in registers keeps only its comment, and free functions have no recorded signature to apply. IDA and Binary Ninja get the signature in the comment only.
+
+Checked with Ghidra 12.2 headless (PyGhidra), analyzed and unanalyzed, on Go 1.26 amd64 and 386 and Go 1.15 amd64 and 386 builds of the test programs: every declaration parsed at its recorded size, and every function, prototype and label applied. The IDA and Binary Ninja scripts have not been run in those tools; they compile as Python, and their declarations parse in order with a standard C parser at the recorded sizes and offsets.
 
 For a menu-item install instead of running the script every time:
 
