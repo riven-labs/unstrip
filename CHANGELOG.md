@@ -63,8 +63,45 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 - A CI job runs the Ghidra script headless (Ghidra 12.2, PyGhidra) on Go 1.26
   amd64 and 386 and Go 1.15 amd64 builds and fails on any failed declaration,
   function, prototype or label.
+- `Pclntab::pc_location`: every frame at a PC, innermost first, as the Go
+  runtime's traceback and `runtime.CallersFrames` report them. Each frame
+  (`PcFrame`) has its function, file and line, the PC that position was read
+  at, and whether it was inlined. The line is the PC's own for the innermost
+  frame and the line of the inlined call for each frame outside it, read at
+  the inline record's parentPc through the Go 1.16 to 1.19 and the Go 1.20+
+  record layouts. `PcLocation` also gives the physical function's entry and
+  `inlining`: `Inlining::Unread` when the tree cannot be read (always on Go
+  1.2 to 1.15, on Go 1.18+ without `with_gofunc`, or when a record does not
+  decode), and then only the physical frame is listed, at the PC's own
+  position. A test program with up to five levels of inlining, closures,
+  methods, a generic function and a second package, built with Go 1.16,
+  1.17, 1.18, 1.20, 1.22, 1.24 and 1.26 for windows/amd64 and windows/386,
+  with and without `-gcflags=-l`, ran `runtime.Callers` and
+  `runtime.CallersFrames` on its own stacks: all 1,162 frames the runtime
+  printed match. Against the DWARF inline tree of the same builds and of
+  linux/arm64 builds, at every PC of the program's functions, all 144,666
+  frames match, and the innermost frame agrees with `go tool objdump` (Go
+  1.26.8) on every instruction. Frames of compiler-generated wrappers are
+  listed; the runtime hides them, so a `go` statement's `gowrap` function
+  (Go 1.21+) is one frame more than its traceback shows.
+- `GoroutineSpawn::location`: the frames at the call site. `find_spawns`
+  reads the inline tree of a Go 1.18+ binary when its `Pclntab` has the
+  gofunc.
 
 ### Changed
+
+- `--addr` and `--addr-file` print a PC in inlined code as a line with the
+  PC and its offset in the physical function (`0x00000000004a0225
+  main.physical+0x25`), then one `(inlined)` line per inlined frame and the
+  `(physical)` line, as before. `--addr-file` used to print the frames with
+  no PC, so lookups could not be told apart. A PC outside inlined code is
+  still one line. When the inline tree is not read (Go 1.2 to 1.15), a line
+  under the lookup says so.
+- `--addr` shows the physical function's signature at any PC in it, not only
+  at its entry.
+- `--goroutines` prints the frames at each call site under it, one indented
+  line each, so the function holding the call is named. The summary line is
+  unchanged.
 
 - `--types` prints Go syntax: struct fields as declared
   (``C2 string `json:"c2"` ``, `Next *main.Node`, an embedded field as its
@@ -104,6 +141,10 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Fixed
 
+- `--addr -f json` and `--addr-file -f json` printed text. `--addr` prints
+  the location as one object (`pc`, `entry`, `frames`, `inlining`, and
+  `signature` when known); `--addr-file` prints an array with one entry per
+  PC, or an `error` for a PC no function covers and a line that is not a PC.
 - Method tables of named map types (`http.Header`, `url.Values`) are found on
   Go 1.7 to 1.13, whose map type record differs from 1.14's: 1.7 to 1.10
   have an `hmap` type where 1.14 has the hasher, and 1.11 to 1.13 have

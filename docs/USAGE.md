@@ -77,7 +77,7 @@ Stable structural sha256 over the user-package surface: functions, types, itabs,
 
 ### `--goroutines`
 
-Lists every `runtime.newproc` and `runtime.deferproc` call site in `.text`, resolving the target function when the LEA/ADRP pattern decodes. Surfaces the control flow hidden behind `go func() { ... }` and `defer`. amd64 and arm64 only.
+Lists every `runtime.newproc` and `runtime.deferproc` call site in `.text`, resolving the target function when the LEA/ADRP pattern decodes. Surfaces the control flow hidden behind `go func() { ... }` and `defer`. Under each site, one indented line per frame at the call: the function holding it, and the functions it was inlined through when the call sits in inlined code. `--format json` gives them as each site's `location`. amd64 and arm64 only.
 
 ### `--xrefs`
 
@@ -106,11 +106,11 @@ Length is controlled by `--data-len` (bytes) or `--data-count` (records); the tw
 
 ### `--addr <PC>`
 
-PC -> function, file, line, plus the inline call stack walked from `FUNCDATA_InlTree` and `PCDATA_InlTreeIndex`. The PC must be a link-time VA, the address as your disassembler shows it when the binary is loaded at its preferred base. For a runtime PC from an ASLR-rebased process, pass the delta via `--rebase`.
+PC -> every frame at the PC, innermost first, as the Go runtime's traceback reports them: the inline call stack walked from `FUNCDATA_InlTree` and `PCDATA_InlTreeIndex`, then the function the code was compiled into. Each frame has its own file and line: the PC's line for the innermost frame, the line of the inlined call for each frame outside it. A PC outside inlined code prints one line, `PC  function  file:line`. A PC in inlined code prints `PC  function+offset`, then an `(inlined)` line per inlined frame and a `(physical)` line. `--format json` prints the PC, the function's `entry`, the `frames` and `inlining`. The inline tree is read on Go 1.16 and later; on Go 1.2 to 1.15 `inlining` is `unread`, only the physical frame is listed at the PC's own line, and the text output adds a line saying the inline tree was not read. Frames of compiler-generated wrappers (such as the `gowrap` function of a `go` statement) are listed; the runtime hides them in a traceback. The PC must be a link-time VA, the address as your disassembler shows it when the binary is loaded at its preferred base. For a runtime PC from an ASLR-rebased process, pass the delta via `--rebase`.
 
 ### `--addr-file <PATH>`
 
-Batch reverse-lookup. Reads PCs from a file (one per line; `#`-comments allowed, blank lines skipped). Use `-` for stdin. Re-uses one parsed pclntab, so 200 lookups cost about the same as one.
+Batch reverse-lookup. Reads PCs from a file (one per line; `#`-comments allowed, blank lines skipped). Use `-` for stdin. Re-uses one parsed pclntab, so 200 lookups cost about the same as one. Each PC prints as `--addr` prints it, without signatures. `--format json` prints an array with one entry per line that is not blank or a comment: the location, or `{"pc", "error"}` when no function covers the PC, or `{"line", "error"}` for a line that is not a PC.
 
 ### `--diff <OLD_BINARY>`
 

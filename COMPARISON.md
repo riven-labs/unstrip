@@ -28,7 +28,7 @@ Sourced from each tool's README and repository as of late May 2026. Verifiable b
 
 **`--itabs` reachability annotation.** Marks each recovered itab `(reachable)` or `(unreachable)` based on whether its address is referenced from `.text` or any data section (amd64; other architectures print `(reachability unknown)`). Surfaces dead itabs the Go linker happened to leave behind.
 
-**Inlined call stacks on `--addr`.** Walks `FUNCDATA_InlTree` and `PCDATA_InlTreeIndex` to return the full inline chain for a PC, not just the leaf function.
+**Inlined call stacks on `--addr`.** Walks `FUNCDATA_InlTree` and `PCDATA_InlTreeIndex` to return the full inline chain for a PC, not only the leaf function, with the line each frame is at, as `runtime.CallersFrames` reports it. Checked against `runtime.CallersFrames` in a test program built with Go 1.16 to 1.26 for Windows amd64 and 386, and against DWARF on those builds and on linux/arm64: every frame matched. unstrip also lists compiler-generated wrapper frames, such as the `gowrap` function of a `go` statement (Go 1.21+), which the runtime hides. The library call is `Pclntab::pc_location`.
 
 **`--addr-file` batch reverse-lookup.** One pclntab parse, N PC lookups, stdin supported. Useful for resolving every PC in a crash dump in a single pass.
 

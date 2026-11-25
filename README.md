@@ -33,7 +33,7 @@ unstrip ./bin --format ghidra > apply.py    # Python script for Ghidra Script Ma
 
 Method signatures attached to recovered symbols. Every method on a type the Go linker emitted a `_type` record for gets a Go-syntax signature like `(_0 []uint8) (int, error)` appended to its name in the default listing, in `--addr` lookups, and in the Ghidra/IDA/Binja exporter comments. IDA applies reflection prototypes to methods too; GoReSym, gore, and redress do not attach signatures to functions (see [COMPARISON.md](./COMPARISON.md)).
 
-Inlined call stacks, not just leaf functions. `--addr` returns the full inline tree from `FUNCDATA_InlTree`, so a PC that lands in inlined code resolves to the chain that led there, with file and line for every frame.
+Inlined call stacks, not only leaf functions. `--addr` returns the full inline tree from `FUNCDATA_InlTree`, so a PC that lands in inlined code resolves to the chain that led there, with file and line for every frame. On a test program with five levels of inlining, built with Go 1.16 to 1.26 for Windows amd64 and 386, every frame matched what `runtime.CallersFrames` printed for the program's own stacks (1,162 frames; unstrip also lists the `gowrap` wrapper of a `go` statement, which the runtime hides), and every frame of every PC in the program's functions matched DWARF on those builds and on linux/arm64 (144,666 frames).
 
 Built-in Ghidra, IDA, and Binary Ninja Python exporters via `--format`, with typed C struct declarations at the recorded field offsets, labels for itabs and type descriptors, and method prototypes in Ghidra. One Rust binary emits scripts for all three RE tools; `--install-plugin <ida|ghidra|binja>` drops a wrapper plugin into the user's plugin directory.
 
@@ -179,23 +179,30 @@ $ unstrip ./samples/myapp --itabs --filter Writer
 
 ### Reverse PC lookup, with inline call stacks
 
-For use inside a debugger, a crash dump parser, or a disassembly comment generator. When the PC lands in inlined code, you get the full call stack from the inline tree, not just the leaf:
+For use inside a debugger, a crash dump parser, or a disassembly comment generator. When the PC lands in inlined code, you get every frame the Go runtime's traceback would print for it, innermost first, each at its own line: the PC's line in the innermost function, and the line of the inlined call in each function outside it. The first line gives the PC and its offset in the function the code was compiled into. On a test program built with Go 1.26 and `-trimpath`:
 
 ```
-$ unstrip caddy --addr 0x4151a4
-(inlined)  runtime.evacuated  /usr/lib/go-1.22/src/runtime/map.go:205
-(physical) runtime.mapaccess2  /usr/lib/go-1.22/src/runtime/map.go:457
+$ unstrip inl --addr 0x4a0225
+0x00000000004a0225  main.physical+0x25
+(inlined)  main.leafA  inl/main.go:35
+(inlined)  main.midA  inl/main.go:36
+(inlined)  main.topA  inl/main.go:37
+(physical) main.physical  inl/main.go:96
 ```
 
-For batch lookups against a crash dump, use `--addr-file`. One parse, N lookups:
+A PC outside inlined code is one line. For batch lookups against a crash dump, use `--addr-file`. One parse, N lookups:
 
 ```
-$ cat crash.txt | unstrip suspicious.bin --addr-file -
-(inlined)  io.copyBuffer  /usr/lib/go-1.22/src/io/io.go:418
-(physical) io.Copy        /usr/lib/go-1.22/src/io/io.go:388
-0x000000000045a200  net.(*conn).Read  /usr/lib/go-1.22/src/net/net.go:179
-0x00000000004b8c40  main.handleClient  /tmp/build/main.go:42
+$ printf '0x4a0225\n0x4a0200\n' | unstrip inl --addr-file -
+0x00000000004a0225  main.physical+0x25
+(inlined)  main.leafA  inl/main.go:35
+(inlined)  main.midA  inl/main.go:36
+(inlined)  main.topA  inl/main.go:37
+(physical) main.physical  inl/main.go:96
+0x00000000004a0200  main.physical  inl/main.go:93
 ```
+
+`--format json` gives each PC's `entry`, its `frames` (`function`, `file`, `line`, the `pc` the position was read at, `inlined`), and `inlining`. The inline tree is read on Go 1.16 and later. On Go 1.2 to 1.15 `inlining` is `unread`: only the function the code was compiled into is listed, at the PC's own line, which inside inlined code is a line of the inlined function. The text output says so under the lookup.
 
 If the runtime addresses came from an ASLR-rebased process, pass `--rebase <DELTA>` (the difference between actual load base and link-time preferred base) and unstrip translates back to the link-time VA on disk.
 
@@ -329,15 +336,18 @@ Go packs literals end to end with no terminator, so `strings(1)` and a plain run
 
 ### Goroutines and deferred calls
 
-`--goroutines` lists every `runtime.newproc` and `runtime.deferproc` call site in `.text` and resolves the target function the goroutine or deferred call will run when possible. Surfaces the control flow hidden behind `go func() { ... }` and `defer` in Go programs that other tools don't:
+`--goroutines` lists every `runtime.newproc` and `runtime.deferproc` call site in `.text` and resolves the target function the goroutine or deferred call will run when possible. Surfaces the control flow hidden behind `go func() { ... }` and `defer` in Go programs that other tools don't.
+
+Each site is followed by its frames, one indented line each: the function holding the call, and the functions it was inlined through when the call sits in inlined code. On the test program above:
 
 ```
-$ unstrip ./sliver-client --goroutines | head
-0x0000000000424798  runtime.newproc         -> runtime.runFinalizers (0x424880)        runtime/mfinal.go:169
-0x00000000004259c0  runtime.newproc         -> (target unresolved)                     runtime/mgc.go:209
-0x00000000004479d5  runtime.newproc         -> runtime.forcegchelper (0x447a00)        runtime/proc.go:360
-0x000000000045e480  runtime.newproc         -> runtime.ensureSigM.func1 (0x4767e0)     runtime/signal_unix.go:1061
-0x000000000049c4ae  runtime.newproc         -> (target unresolved)                     sync/waitgroup.go:235
+$ unstrip inl --goroutines | head -6
+0x0000000000424a78  runtime.newproc         -> runtime.runFinalizers (0x424b60) runtime/mfinal.go:172
+    (physical) runtime.createfing  runtime/mfinal.go:172
+0x0000000000425b81  runtime.newproc         -> (unresolved: no-lea-pattern) runtime/mgc.go:214
+    (physical) runtime.gcenable  runtime/mgc.go:214
+0x0000000000425bc0  runtime.newproc         -> (unresolved: no-lea-pattern) runtime/mgc.go:215
+    (physical) runtime.gcenable  runtime/mgc.go:215
 ```
 
 When the target resolves, you see exactly which function the goroutine runs. Resolution is partial: on a Go 1.26 test program 4 of 34 sites resolve on amd64 and 7 of 34 on arm64; a funcval built in a heap object several instructions before the call is not followed. When the LEA pattern doesn't match the heuristic (the funcval came from a register or stack slot), the call site and source file:line still show so you can open the source. amd64 and arm64 only today.
