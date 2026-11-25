@@ -9,6 +9,17 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Added
 
+- `--strings` prints exact string literals: each literal's address, length
+  and bytes, with every instruction that uses it and the function it sits
+  in. A literal is reported only where the binary pairs its pointer with its
+  length (two consecutive argument or result registers at a call or return,
+  two adjacent stored words, or a static header in data) and the pair fits
+  the linker's string table, which is sorted by length and packed. amd64 and
+  arm64; on 386, which has no instruction scanner yet, nothing is reported.
+  On amd64 and arm64 builds of Go 1.15, 1.20 and 1.26,
+  plain and garbled, every reported literal was one the compiler emitted and
+  every function attribution checked against `-gcflags=-S` was right. The
+  library call is `strings::literals`, returning `strings::Literals`.
 - Go 1.2 to 1.15 binaries are read (pclntab magic `0xfffffffb`): every
   function with its file and line, PC lookups, line tables, SP deltas and
   PCDATA. The function table matches `debug/gosym` entry for entry on every
@@ -43,6 +54,10 @@ Unreleased changes accumulate under `## [Unreleased]` until a tag is cut.
 
 ### Changed
 
+- `--strings` prints literals instead of printable runs, which often glued
+  a dozen literals into one line. `--strings --strings-runs` prints the runs
+  as before, on every architecture. `--strings-min` now defaults to 1 for
+  literals and stays 8 for runs, and `--filter` matches a literal's text.
 - `Pclntab::parse` and `GoBinary::parse` no longer return
   `UnsupportedPclntabVersion`, and `pclntab::unsupported_pre118_magic`
   returns `None` for every magic.

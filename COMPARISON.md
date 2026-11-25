@@ -22,6 +22,8 @@ Sourced from each tool's README and repository as of late May 2026. Verifiable b
 
 **`--xref-readers` and `--xref-writers <addr>`.** Scans `.text` for amd64 RIP-relative instructions touching a data address. Hits are categorized as LEA, MOV-load, MOV-store, CMP, or indirect CALL/JMP, each attributed to the containing function.
 
+**`--strings`: exact literals with the functions that use them.** Each literal is reported with its address, length and bytes only where the code or a static header pairs its pointer with its length, and each lists the instructions that use it (amd64 and arm64; 386 has no scanner yet). GoReSym master (`fa3f0577`) has `-strings`, which lists a value and a start address without the code that uses it. On our builds of `testdata/strlits.go`, a small `net/http` server and a cobra and AWS SDK program (Go 1.15, 1.20 and 1.26, linux amd64, arm64 and 386, plus garble 0.16 builds), judged against the literals the compiler emitted (`go build -a -gcflags=all=-S`): every literal unstrip printed was one of them, and 99.8% or more of GoReSym's. GoReSym printed 13 to 23% of them; unstrip printed 95 to 99% on amd64 and arm64 (42% under garble `-literals`, which replaces most literals with code) and none on 386.
+
 **`--itabs` reachability annotation.** Marks each recovered itab `(reachable)` or `(unreachable)` based on whether its address is referenced from `.text` or any data section (amd64; other architectures print `(reachability unknown)`). Surfaces dead itabs the Go linker happened to leave behind.
 
 **Inlined call stacks on `--addr`.** Walks `FUNCDATA_InlTree` and `PCDATA_InlTreeIndex` to return the full inline chain for a PC, not just the leaf function.

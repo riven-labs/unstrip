@@ -34,7 +34,30 @@ Recovers `(interface, concrete) -> method set` pairs from `runtime.itablinks`. T
 
 ### `--strings`
 
-Printable string literals from the binary's read-only data regions (`.rodata` / `.noptrdata` on ELF; `__rodata` / `__noptrdata` on Mach-O; `.rdata` on PE). Pair with `--filter "https://"` or `--filter "_NO_"` to narrow the output. Garble does not rewrite string literals in its default mode, so this is often the surface that identifies an obfuscated binary when symbols are hashed.
+The program's string literals, each as its address, length and bytes, with the instructions that use it:
+
+```
+$ unstrip testdata/strlits.linux-amd64.stripped --strings --filter host.strlits
+0x00000000004cd531      27  "static-host.strlits.example"
+    0x00000000004a29ae  main.main+0xae  header
+    0x000000000058a160  .data  static header
+0x00000000004cda41      28  "dynamic-host.strlits.example"
+    0x00000000004a26d5  main.build+0x35  store
+```
+
+Go packs its literals end to end with no terminator, so the bytes alone do not say where one ends.
+A literal is reported only where the binary pairs a pointer with a length: two consecutive argument or result registers at a call or return (`registers`), two adjacent words stored off one base (`store`), or a `{pointer, length}` header in an initialized global or a read-only composite literal (`static header`, with any code that loads the header's address listed as `header`).
+Each pair must also fit the linker's string table, which is sorted by length and packed; a pair that does not is dropped, not guessed at.
+A literal the code never pairs with its length, such as a lookup table indexed byte by byte, is not reported.
+
+Text that is not valid UTF-8 prints as `hex:...`.
+`--filter` matches the text.
+The toolchain version and module info strings are marked `[buildinfo]`.
+In JSON (`-f json`) each literal has `addr`, `len`, `text` (or `hex`), `origin`, `uses` (`pc`, `function_addr`, `function`, `site`) and `headers`, and the report says whether the code was scanned, whether calls were read with the register ABI, and how many pairs were dropped and why.
+
+amd64 and arm64.
+On 386 there is no instruction scanner yet, so nothing is reported; `--strings --strings-runs` still prints the printable runs.
+Garble's default mode leaves literals in place; `-literals` replaces most of them with code that builds them at run time, and what remains (including the encrypted bytes) is reported as it is.
 
 ### `--capabilities`
 
@@ -105,8 +128,9 @@ These flags only make sense alongside one of the analysis modes above.
 - `--rebase <DELTA>`: with `--addr`, subtract this offset (the `actual_load_base - preferred_load_base` delta) so you can pass a runtime PC instead of a link-time VA. Hex (`0x` prefix) or decimal.
 - `--data-as <KIND>`: with `--data-at`, the interpretation. See `--data-at` above.
 - `--data-len <N>` / `--data-count <N>`: with `--data-at`, bytes vs records. Mutually exclusive. The actual read is clamped to the containing section's file-backed range.
-- `--strings-min <N>`: with `--strings`, the minimum printable-run length. Default 8. Below that the output is dominated by struct-field-name fragments and other non-literal noise.
-- `--strings-max <N>`: with `--strings`, cap the number of runs emitted. Default unlimited.
+- `--strings-runs`: with `--strings`, print the printable runs of the read-only sections (`.rodata` and `.noptrdata` on ELF, `__rodata` and `__noptrdata` on Mach-O, `.rdata` on PE) instead of literals, as unstrip 2.1 and earlier did. A run often holds many literals glued together. Works on every architecture.
+- `--strings-min <N>`: with `--strings`, the minimum length in bytes. Default 1 for literals, 8 for runs (below that runs are mostly struct-field-name fragments).
+- `--strings-max <N>`: with `--strings`, cap the number of literals or runs emitted. Default unlimited.
 - `--from <FUNCNAME>` / `--to <FUNCNAME>`: with `--xrefs`, filter to callers/callees of a named function. Combine with `--depth` for transitive walks.
 - `--depth <N>`: with `--xrefs --from`/`--to`, transitive depth. Default 1.
 - `--max-nodes <N>`: with `--xrefs --from`/`--to`, BFS node cap so a deep traversal on a large binary cannot blow memory. Default 5000. Output includes a `truncated` flag in JSON or a warning line in text when the cap is hit.
