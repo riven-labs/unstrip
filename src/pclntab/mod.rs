@@ -57,6 +57,11 @@ pub struct Function {
     /// Line of the function's `func` keyword. The line of a PC inside the
     /// function is [`Pclntab::pc_position`].
     pub start_line: Option<u32>,
+    /// Bytes from the entry to the next function's entry (the functab's
+    /// sentinel after the last one), so `address + size` is the end PC
+    /// `debug/gosym` reports as `Func.End`. Includes the alignment padding
+    /// after the code. None when the next entry does not read.
+    pub size: Option<u64>,
 }
 
 /// Cloning is cheap: every field is a slice reference or a small scalar. A
@@ -513,8 +518,7 @@ impl<'a> Pclntab<'a> {
             return None;
         }
 
-        let (address, func_start) = self.functab_entry(idx)?;
-        self.read_function(address, func_start).ok()
+        self.read_function(idx).ok()
     }
 
     /// Resolve a PC to the full inlined call stack, innermost frame first.
@@ -716,10 +720,7 @@ impl<'a> Pclntab<'a> {
 
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
-            let Some((address, func_start)) = self.functab_entry(i) else {
-                continue;
-            };
-            match self.read_function(address, func_start) {
+            match self.read_function(i) {
                 Ok(f) => out.push(f),
                 Err(_) => continue,
             }
@@ -782,7 +783,17 @@ impl<'a> Pclntab<'a> {
         Ok(out)
     }
 
-    fn read_function(&self, address: u64, func_start: usize) -> Result<Function> {
+    /// The function at functab index `i`.
+    fn read_function(&self, i: usize) -> Result<Function> {
+        let Some((address, func_start)) = self.functab_entry(i) else {
+            return Err(Error::BadPclntab {
+                offset: 0,
+                reason: format!("functab entry {i} does not read"),
+            });
+        };
+        let size = self
+            .functab_addr(i + 1)
+            .and_then(|end| end.checked_sub(address));
         let fb = self.fields_base();
         // func_start comes from a header-controlled funcoff, so the nameOff field
         // end can overflow usize; treat overflow as out of range, not a panic.
@@ -808,6 +819,7 @@ impl<'a> Pclntab<'a> {
             name,
             file,
             start_line,
+            size,
         })
     }
 

@@ -341,6 +341,7 @@ mod tests {
             name: name.to_string(),
             file: None,
             start_line: None,
+            size: None,
         }
     }
 

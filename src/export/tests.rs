@@ -360,6 +360,7 @@ fn function(address: u64, name: &str, file: &str) -> Function {
         name: name.to_string(),
         file: Some(file.to_string()),
         start_line: Some(1),
+        size: None,
     }
 }
 
