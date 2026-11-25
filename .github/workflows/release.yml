@@ -31,7 +31,7 @@ jobs:
             archive: tar.gz
             linker: aarch64-linux-gnu-gcc
             apt: gcc-aarch64-linux-gnu
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
           - os: windows-latest
