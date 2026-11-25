@@ -1477,15 +1477,20 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 names.relabel_types(&mut all);
             }
         }
-        if let Some(needle) = &args.filter {
-            all.retain(|t| t.name.contains(needle));
-        }
+        let names = types::TypeNames::new(&all);
+        let shown: Vec<&types::Type> = match &args.filter {
+            Some(needle) => all
+                .iter()
+                .filter(|t| t.name.contains(needle) || names.name(t.addr).contains(needle))
+                .collect(),
+            None => all.iter().collect(),
+        };
         match args.format {
             OutFormat::Json => {
-                serde_json::to_writer_pretty(&mut out, &all)?;
+                serde_json::to_writer_pretty(&mut out, &shown)?;
                 writeln!(out)?;
             }
-            OutFormat::Text => write_types(&mut out, &all)?,
+            OutFormat::Text => write_types(&mut out, &shown, &names)?,
             f => return Err(format!("--types does not support --format {:?}", f).into()),
         }
         out.flush()?;
@@ -1894,37 +1899,29 @@ fn write_itabs<W: Write>(
     Ok(())
 }
 
-fn write_types<W: Write>(w: &mut W, all: &[unstrip::Type]) -> io::Result<()> {
-    let name_width = all.iter().map(|t| t.name.len()).max().unwrap_or(40).min(80);
-    for t in all {
+fn write_types<W: Write>(
+    w: &mut W,
+    shown: &[&types::Type],
+    names: &types::TypeNames<'_>,
+) -> io::Result<()> {
+    for t in shown {
         writeln!(
             w,
-            "0x{:016x}  {:<9}  size={:<6}  {:<name_w$}",
+            "0x{:016x}  {:<9}  size={:<6}  {}",
             t.addr,
             t.kind.as_str(),
             t.size,
-            t.name,
-            name_w = name_width,
+            names.name(t.addr),
         )?;
         match &t.kind_data {
-            unstrip::types::KindData::Struct { fields } => {
+            types::KindData::Struct { fields } => {
                 for f in fields {
-                    let embedded = if f.embedded { " (embedded)" } else { "" };
-                    let struct_tag = if f.tag.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  `{}`", f.tag)
-                    };
-                    writeln!(
-                        w,
-                        "    +{:04x}  {}: type@0x{:x}{}{}",
-                        f.offset, f.name, f.typ, embedded, struct_tag
-                    )?;
+                    writeln!(w, "    +{:04x}  {}", f.offset, names.field(f))?;
                 }
             }
-            unstrip::types::KindData::Interface { methods } => {
+            types::KindData::Interface { methods } => {
                 for m in methods {
-                    writeln!(w, "    .{}(): type@0x{:x}", m.name, m.typ)?;
+                    writeln!(w, "    {}{}", m.name, names.signature(m.typ))?;
                 }
             }
             _ => {}
